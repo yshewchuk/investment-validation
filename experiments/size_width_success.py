@@ -43,20 +43,24 @@ def _get(obj, *keys):
 def breakeven_alpha(sweep):
     """The EXP-187 measure of design section 7: breakeven alpha of mean return per trade over LADDER, or None (not_available).
 
-    ``sweep`` is {alpha: {"mean": mean return per trade}} and must hold every ladder alpha with a finite real mean;
-    otherwise None. A crossing of zero is interpolated by ``engine.evaluate.breakeven_alpha_from_sweep``. With no
-    crossing: 0.0 if every mean is >= 0 (always positive), 1.0 if any is negative (always negative). All means exactly
-    zero is None.
+    ``sweep`` is {alpha: {"mean": mean return per trade}}, keyed by alphas or their .2f strings as
+    ``engine.evaluate.alpha_sweep`` returns them. Each ladder alpha is looked up under the float key or the string key
+    f"{a:.2f}"; if both are present, both must hold a finite real mean, and the float key's mean is used. Every ladder
+    alpha must resolve to a finite real mean; otherwise None. A crossing of zero is interpolated by
+    ``engine.evaluate.breakeven_alpha_from_sweep``. With no crossing: 0.0 if every mean is >= 0 (always positive), 1.0
+    if any is negative (always negative). All means exactly zero is None.
     """
     if not isinstance(sweep, dict):
         return None
     means = []
     for a in LADDER:
-        point = sweep.get(a)
-        m = _num(point.get("mean")) if isinstance(point, dict) else None
-        if m is None:
+        keys = [k for k in (a, f"{a:.2f}") if k in sweep]
+        if not keys:
             return None
-        means.append(m)
+        ms = [_num(sweep[k].get("mean")) if isinstance(sweep[k], dict) else None for k in keys]
+        if any(m is None for m in ms):
+            return None
+        means.append(ms[0])
     if all(m == 0.0 for m in means):
         return None
     x = breakeven_alpha_from_sweep({a: {"mean": m} for a, m in zip(LADDER, means)})

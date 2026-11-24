@@ -85,6 +85,52 @@ def test_breakeven_not_a_dict_is_none():
     assert sws.breakeven_alpha([(0.0, -1.0)]) is None
 
 
+def _str_sweep(means):
+    """A breakeven sweep over LADDER keyed by the .2f strings that ``engine.evaluate.alpha_sweep`` returns."""
+    return {f"{a:.2f}": {"mean": m} for a, m in zip(LADDER, means)}
+
+
+def test_breakeven_string_keys_crossing_matches_float_keys():
+    means = [-1.0, -0.5, 0.0, 0.5, 1.0]
+    assert sws.breakeven_alpha(_str_sweep(means)) == pytest.approx(0.5)
+    assert sws.breakeven_alpha(_str_sweep(means)) == sws.breakeven_alpha(_sweep(means))
+
+
+def test_breakeven_string_keys_asymmetric_crossing_matches_float_keys():
+    means = [-2.0, -1.0, 3.0, 4.0, 5.0]
+    assert sws.breakeven_alpha(_str_sweep(means)) == pytest.approx(0.3125)
+    assert sws.breakeven_alpha(_str_sweep(means)) == sws.breakeven_alpha(_sweep(means))
+
+
+def test_breakeven_string_keys_always_positive_and_negative():
+    assert sws.breakeven_alpha(_str_sweep([1.0, 2.0, 3.0, 4.0, 5.0])) == 0.0
+    assert sws.breakeven_alpha(_str_sweep([-1.0, -2.0, -3.0, -4.0, -5.0])) == 1.0
+
+
+def test_breakeven_mixed_float_and_string_keys():
+    means = [-1.0, -0.5, 0.0, 0.5, 1.0]
+    sweep = {}
+    for i, (a, m) in enumerate(zip(LADDER, means)):
+        sweep[a if i % 2 == 0 else f"{a:.2f}"] = {"mean": m}
+    assert set(map(type, sweep)) == {float, str}
+    assert sws.breakeven_alpha(sweep) == pytest.approx(0.5)
+
+
+def test_breakeven_string_keys_missing_one_is_none():
+    sweep = _str_sweep([-1.0, -0.5, 0.0, 0.5, 1.0])
+    del sweep["0.50"]
+    assert sws.breakeven_alpha(sweep) is None
+
+
+def test_breakeven_float_and_string_both_present_invalid_is_none():
+    sweep = _sweep([-1.0, -0.5, 0.0, 0.5, 1.0])
+    sweep["0.50"] = {"mean": "0.5"}
+    assert sws.breakeven_alpha(sweep) is None
+    sweep = _sweep([-1.0, -0.5, 0.0, 0.5, 1.0])
+    sweep["0.25"] = {"mean": float("nan")}
+    assert sws.breakeven_alpha(sweep) is None
+
+
 # --- success rule ---
 
 def test_pass_case():
