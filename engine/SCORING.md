@@ -219,6 +219,14 @@ board = score_calendar(horizon_days=21)     # the dashboard's input
 
 ---
 
+## 7a. Chain-index twin (`engine/chain_index.py`)
+
+- `price_structure_indexed(structure, snapshot, fill, *, pin=None, closing=False)` equals `price_structure`: same strikes, prices, cash flows and flags, and the same exception types and messages (`LadderTooCoarse` included).
+- Expiry selection runs on a lazily built per-snapshot index (distinct expiries, their dte, memoised rule results); every other step is the legacy pandas code. The index lives with its snapshot.
+- `ChainSnapshot.rows` is treated as immutable once priced through this function; the expiry and dte columns are checksummed on every call and a change raises `ChainSnapshotMutated` (`ENGINE_CHAIN_INDEX_VERIFY=0` disables the check; other columns are not checksummed).
+- A snapshot or call outside the proven shape (tz-aware or NaT expiries, NaN dte, several dte per expiry or one dte shared by expiries, empty rows, non-numeric selector bounds) is sent whole to `price_structure`.
+- `engine/structures.py` and `engine/fills.py` are not modified; nothing in the v14 SIZE closure imports this module (`tests/v2/integration/test_chain_index_closure.py`).
+
 ## 8. Known limits
 
 Stated so nobody has to rediscover them.
@@ -238,11 +246,3 @@ Stated so nobody has to rediscover them.
   predicted-run-up decile is Phase 2 backlog item 3; `implied_t1` pools decision
   days with `days_before_print` as a feature specifically so that experiment has
   a model to work with.
-
-## 10. Chain-index twin (`engine/chain_index.py`)
-
-- `price_structure_indexed(structure, snapshot, fill, *, pin=None, closing=False)` equals `price_structure`: same strikes, prices, cash flows and flags, and the same exception types and messages (`LadderTooCoarse` included).
-- Expiry selection runs on a lazily built per-snapshot index (distinct expiries, their dte, memoised rule results); every other step is the legacy pandas code. The index lives with its snapshot.
-- `ChainSnapshot.rows` is treated as immutable once priced through this function; the expiry and dte columns are checksummed on every call and a change raises `ChainSnapshotMutated` (`ENGINE_CHAIN_INDEX_VERIFY=0` disables the check; other columns are not checksummed).
-- A snapshot or call outside the proven shape (tz-aware or NaT expiries, NaN dte, several dte per expiry or one dte shared by expiries, empty rows, non-numeric selector bounds) is sent whole to `price_structure`.
-- `engine/structures.py` and `engine/fills.py` are not modified; nothing in the v14 SIZE closure imports this module (`tests/v2/integration/test_chain_index_closure.py`).
