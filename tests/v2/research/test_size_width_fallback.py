@@ -5,7 +5,7 @@ from experiments import size_pnl_shortvol as sv
 from experiments import size_width_fallback as fbm
 from experiments.size_pnl_pool import build_pool
 from experiments.size_width_account import simulate_account
-from experiments.size_width_band import rho_ladder
+from experiments.size_width_band import PHIS, rho_ladder
 from experiments.size_width_fallback import FallbackSweep, accounts, floor_ok, recover, recovery, split_trades, t9
 from experiments.size_width_sweep import ALPHA, E_ARM, Sweep, scaled
 from tests.v2.research.test_size_pnl_shortvol import _tables, chunk_of, events_for
@@ -70,10 +70,23 @@ def _factors():
     return {n: 1.0 for n in sv.NAMES}
 
 
+def _body(bands):
+    """A valid frozen tuning_band body: {name: (lo, hi) or None}; None is a no_positive_peak structure. Same band at every phi."""
+    out = {}
+    for n in sv.NAMES:
+        if bands[n] is None:
+            cell = {"lo": None, "hi": None, "peak_k": None, "flags": ["no_positive_peak"]}
+        else:
+            lo, hi = bands[n]
+            cell = {"lo": lo, "hi": hi, "peak_k": min(max(1.0, lo), hi), "flags": []}
+        out[n] = {"primary": "B", "curves": {"B": {str(p): cell for p in PHIS}}}
+    return out
+
+
 def _fb(band=WIDE):
     bands = {n: None for n in sv.NAMES}
     bands[NAME] = band
-    return FallbackSweep(_factors(), bands)
+    return FallbackSweep(_factors(), _body(bands), 0.9)
 
 
 # ---- the floor re-check ----------------------------------------------------
@@ -179,11 +192,34 @@ def test_without_a_band_nothing_is_recovered_or_taken(monkeypatch):
 
 
 def test_factors_are_validated():
-    bands = {n: None for n in sv.NAMES}
+    body = _body({n: None for n in sv.NAMES})
     with pytest.raises(ValueError):
-        FallbackSweep({n: 1.0 for n in sv.NAMES if n != NAME}, bands)
+        FallbackSweep({n: 1.0 for n in sv.NAMES if n != NAME}, body, 0.9)
     with pytest.raises(ValueError):
-        FallbackSweep({**_factors(), NAME: 1.1}, bands)
+        FallbackSweep({**_factors(), NAME: 1.1}, body, 0.9)
+
+
+def test_a_malformed_body_is_refused():
+    body = _body({n: WIDE for n in sv.NAMES})
+    del body[NAME]
+    with pytest.raises(ValueError, match="malformed"):
+        FallbackSweep(_factors(), body, 0.9)
+
+
+def test_phi_outside_phis_is_refused():
+    with pytest.raises(ValueError, match="phi must be one of"):
+        FallbackSweep(_factors(), _body({n: WIDE for n in sv.NAMES}), 0.5)
+
+
+def test_no_positive_peak_structure_gets_no_band_and_no_trials(monkeypatch):
+    _small_window(monkeypatch)
+    fb = _run(_fb(band=None), _scene())
+    assert fb.bands[NAME] is None
+    assert fb.trials == []
+
+
+def test_valid_body_gives_the_band_range():
+    assert _fb().bands[NAME] == WIDE
 
 
 # ---- recovery, T9, accounts ---------------------------------------------------

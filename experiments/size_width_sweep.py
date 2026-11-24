@@ -17,6 +17,7 @@ WINDOWS = {"2023H2": (pd.Timestamp("2023-07-01"), pd.Timestamp("2024-01-01")),
 INNER = (pd.Timestamp("2023-07-01"), pd.Timestamp("2025-01-01"))
 _TAKEN = ["event_id", "event_date", "structure", "k", "entry_date", "exit_date", "entry_cost", "exit_value",
           "exit_value_mid", "pnl_dollars", "pnl_dollars_mid", "secured_per_contract"]
+TAKEN_COLS = _TAKEN  # public alias for the other width modules
 
 
 def admit_k(k):

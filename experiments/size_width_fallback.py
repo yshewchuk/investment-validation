@@ -1,10 +1,13 @@
 """EXP-189 W5: nearest-feasible-width fallback arm (design 12.3), its recovery statistics and T9."""
+import sys
+import time
+
 import pandas as pd
 
 from engine.structures import BUY
 from experiments import size_pnl_shortvol as sv
-from experiments.size_width_band import rho_ladder, tier
-from experiments.size_width_sweep import _TAKEN, ALPHA, E_ARM, INNER, Sweep, admit_k, in_window, scaled
+from experiments.size_width_band import PHIS, band_range, rho_ladder, tier, well_formed
+from experiments.size_width_sweep import TAKEN_COLS, ALPHA, E_ARM, INNER, Sweep, admit_k, in_window, scaled
 from experiments.size_width_tuning import evaluate
 
 
@@ -53,18 +56,27 @@ def _mean(values):
 class FallbackSweep(Sweep):
     """Arm E is the only arm: ladder_too_coarse rows are recovered at the nearest feasible rho when the structure has a band.
     It reuses Sweep's per-event-k path, so the k column is the effective multiplier."""
-    def __init__(self, factors, bands):
+    def __init__(self, factors, body, phi):
+        """``body`` is the frozen tuning_band body from ``frozen_bands(out, inputs_hash)``, which does the identity, hash and shape checks; ``well_formed`` re-checks its shape here."""
         super().__init__()
+        if phi not in PHIS:
+            raise ValueError(f"phi must be one of {PHIS}")
+        if not well_formed(body):
+            raise ValueError("tuning_band body is malformed")
         if any(n not in factors for n in sv.NAMES):
             raise ValueError(f"no factor for {[n for n in sv.NAMES if n not in factors]}")
-        self.factors, self.bands, self.trials = {n: admit_k(factors[n]) for n in sv.NAMES}, {n: bands.get(n) for n in sv.NAMES}, []
+        self.phi = phi
+        self.factors, self.bands, self.trials = {n: admit_k(factors[n]) for n in sv.NAMES}, {n: band_range(body, n, phi) for n in sv.NAMES}, []
 
     def _frames(self, chunk, events, sims, name):
         k = self.factors[name]
         frame = sv.score_events(chunk, scaled(events, k), sims, name, alpha=ALPHA)
         if self.bands[name] is None:
             return [(E_ARM, frame.assign(k=k))]
-        out, found = recover(chunk, events, sims, name, frame, k, rho_ladder(*self.bands[name], k))
+        t0 = time.time()
+        ladder = rho_ladder(*self.bands[name], k)
+        out, found = recover(chunk, events, sims, name, frame, k, ladder)
+        print(f"[width_fallback] {name} k={k} declined={len(found)} recovered={sum(r is not None for r in found.values())} rungs={len(ladder)} elapsed={time.time() - t0:.1f}s", file=sys.stderr)
         dates = dict(zip(frame["event_id"], frame["event_date"]))
         self.trials += [{"structure": name, "event_id": eid, "event_date": dates[eid], "rho": rho} for eid, rho in found.items()]
         return [(E_ARM, out)]
@@ -79,7 +91,7 @@ def split_trades(fb, window):
         if not rows.empty:
             parts.append(rows.assign(structure=name, ret=rows["exit_value_mid"] / rows["entry_cost"] - 1.0,
                                      recovered=[(name, e) in recovered for e in ids], tier=[tier(mcap.get(e)) for e in ids]))
-    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=[*_TAKEN, "ret", "recovered", "tier"])
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=[*TAKEN_COLS, "ret", "recovered", "tier"])
 
 
 def recovery(fb, window=INNER):

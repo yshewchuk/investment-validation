@@ -58,13 +58,13 @@ def build_bands(curves):
 
 def write_bands(out, bands, inputs_hash):
     """Publishes ``bands`` as the write-once tuning_band receipt under ``out``; returns the receipt."""
-    if not _well_formed(bands):
+    if not well_formed(bands):
         raise ValueError("tuning_band body is malformed")
     return receipts.write_receipt(Path(out) / "receipts" / "tuning_band.json",
                                   {"experiment": "EXP-189", "arm": "band", "inputs_hash": inputs_hash, "window": WINDOW, "body": bands})
 
 
-def _well_formed(body):
+def well_formed(body):
     """True when ``body`` holds every structure with a B curve (plus optional C and anchor), a primary of C when present else B, and a valid cell per label and phi: no_positive_peak alone with None fields, else 0 < lo <= peak_k <= hi with flags [] or ["band_open"]."""
     def real(x):
         return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
@@ -94,7 +94,7 @@ def frozen_bands(out, inputs_hash):
     """The frozen tuning_band body under ``out``; refuses when the receipt is missing, malformed, for other inputs, or changed."""
     data = receipts.load_receipt(Path(out) / "receipts" / "tuning_band.json")
     if ((data.get("experiment"), data.get("arm"), data.get("window")) != ("EXP-189", "band", WINDOW)
-            or data.get("inputs_hash") != inputs_hash or not _well_formed(data.get("body"))):
+            or data.get("inputs_hash") != inputs_hash or not well_formed(data.get("body"))):
         raise Refusal(_CONFLICT, "tuning band receipt does not match this run's inputs", {"reason": "tuning_receipt_changed"})
     return data["body"]
 
