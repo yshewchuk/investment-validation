@@ -3,7 +3,7 @@ is walked) and the pool is stubbed as the EXP-188 driver tests stub it; the sour
 import pandas as pd
 import pytest
 
-from engine.v2.ops.errors import OpsError
+from engine.v2.ops.errors import OpsError, fail
 from experiments import size_pnl_driver as base
 from experiments import size_pnl_readers as readers
 from experiments import size_pnl_receipts as receipts
@@ -14,7 +14,7 @@ from experiments import size_width_tuning as tuning
 from experiments.size_pnl_shortvol import NAMES, Refusal
 from experiments.size_width_success import LADDER, breakeven_alpha
 from experiments.size_width_sweep import _TAKEN, RET_COLS, WINDOWS, Sweep
-from tests.v2.research.test_size_pnl_driver import EVENTS, OK, PLAN_FRAME, chunk, sources, use_chunks
+from tests.v2.research.test_size_pnl_driver import BASE, EVENTS, OK, PLAN_FRAME, chunk, sources, use_chunks
 
 CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
 NAME = "CND-PS"
@@ -31,11 +31,15 @@ def _m0_table():
                         index=pd.Index(ids, name="event_id"))
 
 
+def _m0_key(roster):
+    return next(m["model_id"] for m in roster["models"] if "M0" in m["roles"])
+
+
 @pytest.fixture
 def m0(monkeypatch):
-    """The M0 table is the only ready model: the EXP-188 roster's own model ids are not M0."""
+    """The M0 table is the only ready model, keyed by the roster's M0 model id."""
     def tables(bound, roster, admitted, production, **kw):
-        return {"M0": {"status": "ready", "table": _m0_table(), "binding": {"model": "M0"}}}
+        return {_m0_key(roster): {"status": "ready", "table": _m0_table(), "binding": {"model": "M0"}}}
     monkeypatch.setattr(readers, "model_tables", tables)
 
 
@@ -272,7 +276,7 @@ def test_inputs_hash_is_stable_on_rerun_and_binds_the_inner_m0_table(m0, monkeyp
     def moved(bound, roster, admitted, production, **kw):
         table = _m0_table()
         table.loc["E1", "pred_move"] = 6.0  # one inner event's prediction moves
-        return {"M0": {"status": "ready", "table": table, "binding": {"model": "M0"}}}
+        return {_m0_key(roster): {"status": "ready", "table": table, "binding": {"model": "M0"}}}
 
     monkeypatch.setattr(readers, "model_tables", moved)
     assert driver._load(src, "inner", None, OK())["inputs_hash"] != first
@@ -293,3 +297,74 @@ def test_an_inner_window_with_no_event_refuses_empty_population_in_load(m0, monk
         driver._load(sources(), "inner", None, OK())
     assert caught.value.code == CONFLICT
     assert caught.value.details["reason"] == "empty_population"
+
+
+# ---- outer predictions, preflight and the fit population -----------------------
+
+def test_outer_refuses_when_the_m0_table_has_no_2025_rows(tmp_path, monkeypatch):
+    table = _m0_table().loc[["E1", "E2"]]
+    monkeypatch.setattr(readers, "model_tables", lambda bound, roster, admitted, production, **kw: {
+        _m0_key(roster): {"status": "ready", "table": table, "binding": {"model": "M0"}}})
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(), "outer", tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "outer_predictions_unbound"
+    assert not (tmp_path / "receipts").exists()
+
+
+def test_outer_preflight_failure_writes_no_inputs_receipt(tmp_path, m0):
+    out = tmp_path / "out"
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(), "outer", out, prereg=OK)
+    assert caught.value.details["reason"] == "tuning_receipt_missing"
+    assert not list(tmp_path.rglob("inputs_outer.json"))
+
+
+def test_fit_population_is_the_2023_24_rows_with_labels_printed_before_2025(tmp_path, monkeypatch, pricing):
+    table = _m0_table().assign(pred_move=[1.0, 2.0, 3.0, 4.0])  # E1 is 2023H1, E2 is 2024, E3 and E4 are 2025
+
+    def fetch(columns, ids):
+        out = BASE[BASE["event_id"].isin(list(ids))].copy()
+        out.loc[out["event_id"] == "E2", "available_as_of_date"] = "2025-01-02"  # E2's label prints after 2024-12-31
+        return out
+
+    seen = []
+
+    def fit(pred, y):
+        seen.append((pred.tolist(), y.tolist()))
+        raise fail(CONFLICT, "too few events", details={"reason": "m0_inputs_insufficient"})
+
+    monkeypatch.setattr(readers, "model_tables", lambda bound, roster, admitted, production, **kw: {
+        _m0_key(roster): {"status": "ready", "table": table, "binding": {"model": "M0"}}})
+    monkeypatch.setattr(driver.errmodel, "fit", fit)
+    use_chunks(monkeypatch, [("2023Q3", chunk("E1")), ("2024Q3", chunk("E2"))])
+    summary = driver.run(sources(fetch=fetch), "inner", tmp_path, event_ids=["E1", "E2"], prereg=OK)
+    assert summary["c_status"] == "smoke_no_fake"
+    assert len(seen) == 1
+    pred, y = seen[0]
+    assert pred == [1.0, 2.0]  # 2023H1 row (E1) is included
+    assert y[0] == 4.0
+    assert pd.isna(y[1])  # E2's label printed after 2024-12-31 is NaN, not 4.0
+
+
+def test_fake_and_anchor_are_run_on_the_pricing_seam(tmp_path, m0, pricing, monkeypatch):
+    seen = {}
+
+    def fit(pred, y):
+        return {"L": 1.0, "b": 0.8, "s": 0.2, "mean_log_y": 1.0, "n": 300}
+
+    def run_fake(months, table, labels, model, sessions, out, inputs_hash, **kw):
+        seen["fake"] = kw["pricing"]
+        return {"status": "fake_not_calibrated", "calibration": {"ok": False}}
+
+    def run_anchor(months, table, labels, sessions, **kw):
+        seen["anchor"] = kw["pricing"]
+        return {}
+
+    monkeypatch.setattr(driver.errmodel, "fit", fit)
+    monkeypatch.setattr(driver.fake, "run_fake", run_fake)
+    monkeypatch.setattr(driver.fake, "run_anchor", run_anchor)
+    use_chunks(monkeypatch, [("2023Q3", chunk("E1")), ("2024Q3", chunk("E2"))])
+    summary = driver.run(sources(), "inner", tmp_path, event_ids=["E1", "E2"], prereg=OK)
+    assert summary["c_status"] == "fake_not_calibrated"
+    assert seen == {"fake": driver.PRICING, "anchor": driver.PRICING}

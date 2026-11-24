@@ -23,7 +23,7 @@ from experiments import size_width_prereg
 from experiments import size_width_tuning as tuning
 from experiments.size_pnl_pool import build_pool
 from experiments.size_pnl_shortvol import NAMES, Refusal
-from experiments.size_width_sweep import INNER as SWEEP_INNER, RET_COLS, WINDOWS, Sweep, in_window
+from experiments.size_width_sweep import RET_COLS, WINDOWS, Sweep
 from experiments.size_width_success import LADDER, breakeven_alpha
 
 PRICING = size_pnl_shortvol
@@ -90,8 +90,9 @@ def _declined(sweep):
 
 def _load(src, stage, ids, receipt):
     """The loaded run: the M0 table on the stage's plan with its facts and labels, and the inputs body (stage-independent but for the table and plan bindings)."""
-    _roster, bound, _production = base._prepare(src, stage, ids)
-    entry = bound["tables"].get("M0")
+    roster, bound, _production = base._prepare(src, stage, ids)
+    m0 = next((m["model_id"] for m in roster["models"] if "M0" in m["roles"]), None)
+    entry = bound["tables"].get(m0)
     if entry is None or entry["status"] != "ready":
         raise Refusal(_CONFLICT, "M0 inputs are missing or failed", {"reason": "m0_inputs_missing"})
     ready = {"M0": {**entry, "table": base._restrict(entry["table"], ids)}}
@@ -114,6 +115,9 @@ def _load(src, stage, ids, receipt):
     table = ready["M0"]["table"]
     if table.empty:
         raise Refusal(_CONFLICT, "no event survives the exclusions", {"reason": "empty_population"})
+    dates = pd.to_datetime(table["event_date"])
+    if stage == "outer" and not ((dates >= pd.Timestamp(base.OUTER[0])) & (dates < pd.Timestamp(base.OUTER[1]))).any():
+        raise Refusal(_CONFLICT, "2025 predictions are not bound for M0", {"reason": "outer_predictions_unbound"})
     survivors = facts_all[~facts_all.index.astype(str).isin(base._facts_missing(facts_all))]
     inner_ids = {str(e) for e in inner_window["event_id"]}
     inner_table = table[pd.to_datetime(table["event_date"]) < pd.Timestamp(base.OUTER[0])]
@@ -134,20 +138,23 @@ def _inner(src, out, loaded):
     ids, plan, table, labels = loaded["ids"], loaded["plan"], loaded["table"], loaded["labels"]
     sessions, inputs_hash = loaded["sessions"], loaded["inputs_hash"]
     months = list(_months(src, plan, table, loaded["facts_all"], loaded["exits"], base.INNER_EMIT_FROM))
+    _log(f"materialised months={len(months)}")
     sweep, started, total = Sweep(ladder=True, pricing=PRICING), time.monotonic(), _total(plan)
     for done, (chunk, events, output) in enumerate(months, start=1):
         sweep.add_month(chunk, events, _pool(table, labels, _period(events).start_time), output=output, sessions=sessions)
         _progress("inner", done, total, started)
-    inner = in_window(table, SWEEP_INNER)
+    fit_rows = table[pd.to_datetime(table["event_date"]) < pd.Timestamp(base.OUTER[0])]
+    printed = base._printed(labels, base.OUTER[0])
     try:
-        model = errmodel.fit(inner["pred_move"].to_numpy(dtype=float), labels["abs_move"].reindex(inner.index).to_numpy(dtype=float))
+        model = errmodel.fit(fit_rows["pred_move"].to_numpy(dtype=float), printed["abs_move"].reindex(fit_rows.index).to_numpy(dtype=float))
     except OpsError as exc:
         if ids is None or exc.problem.details.get("reason") != "m0_inputs_insufficient":
             raise
         model, c = None, {"status": "smoke_no_fake", "calibration": None}
     else:
-        c = fake.run_fake(months, table, labels, model, sessions, out, inputs_hash)
-    anchor = {name: {str(k): v for k, v in row.items()} for name, row in fake.run_anchor(months, table, labels, sessions).items()}
+        c = fake.run_fake(months, table, printed, model, sessions, out, inputs_hash, pricing=PRICING)
+    _log(f"c_status={c['status']}")
+    anchor = {name: {str(k): v for k, v in row.items()} for name, row in fake.run_anchor(months, table, printed, sessions, pricing=PRICING).items()}
     res = tuning.run_inner(sweep, out, inputs_hash)
     results = res["results"]
     by = {"production": {n: 1.0 for n in NAMES}, "A": tuning.factors("A", res["tuned"]["A"]), "B": tuning.factors("B", res["tuned"]["B"]),
@@ -163,15 +170,22 @@ def _inner(src, out, loaded):
     return {"stage": "inner", "c_status": c["status"], "arms": sorted(by), "months": len(months)}
 
 
-def _outer(src, out, loaded):
-    """The outer stage. Preflight first: the inner summary and every arm's frozen factors, before any chunk is built. Then each
-    2025 month is frozen before its labels are read (R6)."""
-    ids, inputs_hash, plan = loaded["ids"], loaded["inputs_hash"], loaded["plan"]
+def _preflight(out, loaded):
+    """The outer stage's preflight: the inner summary, its binding to these inputs and scope, and every arm's frozen factors. Returns (arms, by)."""
+    ids, inputs_hash = loaded["ids"], loaded["inputs_hash"]
     inner = receipts.load_receipt(out / "receipts" / "inner_summary.json")
     if inner["inputs_hash"] != inputs_hash or inner["scope"] != base._scope(ids):
         raise Refusal(_CONFLICT, "inner_summary.json is bound to other inputs or another scope", {"reason": "tuning_receipt_changed"})
     arms = [a for a in ("A", "B", "C", "D", "E") if a != "C" or inner["c_status"] == "ok"]
     by = {arm: tuning.frozen(out, arm, inputs_hash) for arm in arms}
+    return arms, by
+
+
+def _outer(src, out, loaded, pre=None):
+    """The outer stage. Preflight first: the inner summary and every arm's frozen factors, before any chunk is built. Then each
+    2025 month is frozen before its labels are read (R6)."""
+    ids, inputs_hash, plan = loaded["ids"], loaded["inputs_hash"], loaded["plan"]
+    arms, by = _preflight(out, loaded) if pre is None else pre
     sweep, labels, table, sessions = Sweep(ladder=True, pricing=PRICING), loaded["labels"], loaded["table"], loaded["sessions"]
     total, started, count, fresh_labels = _total(plan), time.monotonic(), 0, []
     for count, (chunk, events, output) in enumerate(_months(src, plan, table, loaded["facts_all"], loaded["exits"], pd.Timestamp(base.OUTER[0])), start=1):
@@ -207,8 +221,9 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_width_prereg.require
     ids = base._smoke(src, event_ids)
     _log(f"scope={'smoke' if ids is not None else 'full'} events={'all' if ids is None else len(ids)}")
     loaded = _load(src, stage, ids, receipt)
+    pre = _preflight(out, loaded) if stage == "outer" else None
     out.mkdir(parents=True, exist_ok=True)
     base._receipt(out / "receipts" / f"inputs_{stage}.json", loaded["inputs"], "inputs_receipt_changed")
-    summary = _inner(src, out, loaded) if stage == "inner" else _outer(src, out, loaded)
+    summary = _inner(src, out, loaded) if stage == "inner" else _outer(src, out, loaded, pre)
     _log(f"stage={stage} end elapsed={time.monotonic() - started:.1f}s rss={base._rss_mb():.0f}MB")
     return summary
