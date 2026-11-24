@@ -1,0 +1,257 @@
+"""EXP-189 driver: synthetic runs only. The pricing seam is stubbed on size_pnl_shortvol (every event is declined, so no account
+is walked) and the pool is stubbed as the EXP-188 driver tests stub it; the sources and chunks are the EXP-188 fixtures."""
+import pandas as pd
+import pytest
+
+from engine.v2.ops.errors import OpsError
+from experiments import size_pnl_driver as base
+from experiments import size_pnl_readers as readers
+from experiments import size_pnl_receipts as receipts
+from experiments import size_pnl_shortvol as sv
+from experiments import size_width_driver as driver
+from experiments import size_width_fake as fake
+from experiments import size_width_tuning as tuning
+from experiments.size_pnl_shortvol import NAMES, Refusal
+from experiments.size_width_success import LADDER, breakeven_alpha
+from experiments.size_width_sweep import _TAKEN, RET_COLS, WINDOWS, Sweep
+from tests.v2.research.test_size_pnl_driver import EVENTS, OK, PLAN_FRAME, chunk, sources, use_chunks
+
+CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
+NAME = "CND-PS"
+
+
+@pytest.fixture(autouse=True)
+def bounded(monkeypatch):
+    monkeypatch.setenv("BOUNDED_RUN_NESTED", "1")
+
+
+def _m0_table():
+    ids = list(EVENTS)
+    return pd.DataFrame({"event_date": pd.to_datetime([EVENTS[e] for e in ids]), "pred_move": 5.0, "pred_crush": -12.0},
+                        index=pd.Index(ids, name="event_id"))
+
+
+@pytest.fixture
+def m0(monkeypatch):
+    """The M0 table is the only ready model: the EXP-188 roster's own model ids are not M0."""
+    def tables(bound, roster, admitted, production, **kw):
+        return {"M0": {"status": "ready", "table": _m0_table(), "binding": {"model": "M0"}}}
+    monkeypatch.setattr(readers, "model_tables", tables)
+
+
+@pytest.fixture
+def pricing(monkeypatch):
+    """Every event is simulated, scored and declined (thin_history): the sweep runs, no account is walked."""
+    def simulate(chunk_, events, pool, **kw):
+        return {str(e): "sim" for e in events["event_id"]}
+
+    def score_events(chunk_, events, sims, name, *, alpha=0.5):
+        n = len(events)
+        return pd.DataFrame({"event_id": events["event_id"].astype(str).to_numpy(), "event_date": events["event_date"].to_numpy(),
+                             "structure": [name] * n, "status": ["scored"] * n, "reason": [None] * n,
+                             "exp_pnl_sim": [0.01] * n, "entry_cost": [2.0] * n})
+
+    def decide(scored):
+        return scored.assign(status="undetermined", reason="thin_history")
+
+    def score(chunk_, events, decisions, name, alpha, *, drop_unquoted=False, mid_marks=False, repriced=False):
+        ids = [str(e) for e in decisions["event_id"]]
+        n = len(ids)
+        return pd.DataFrame({"event_id": pd.Series(ids, dtype=object), "structure": [name] * n, "entry_cost": [2.0] * n, "exit_value": [1.0] * n,
+                             "pnl_dollars": [0.0] * n, "pnl_per_share": [0.0] * n})
+
+    def secured(chunk_, events, decisions, name):
+        ids = [str(e) for e in decisions["event_id"]]
+        return pd.DataFrame({"event_id": pd.Series(ids, dtype=object), "secured_per_contract": [5.0] * len(ids)})
+
+    monkeypatch.setattr(sv, "simulate", simulate)
+    monkeypatch.setattr(sv, "score_events", score_events)
+    monkeypatch.setattr(sv, "decide", decide)
+    monkeypatch.setattr(sv, "score", score)
+    monkeypatch.setattr(sv, "secured", secured)
+    monkeypatch.setattr(driver, "build_pool", lambda table, labels: None)
+    monkeypatch.setattr(fake, "build_pool", lambda table, labels: None)
+
+
+def _loaded(src, ids=None):
+    """The loaded run of the outer stage, built by hand (the inputs are the EXP-188 fixtures)."""
+    return {"ids": ids, "plan": base._plan_window(PLAN_FRAME, base._window("outer"), ids), "table": _m0_table(),
+            "labels": readers.read_labels(src.fetch, src.admitted, start=base.INNER[0], end=base.OUTER[0], event_ids=ids),
+            "facts_all": base._load_facts(src, set(EVENTS)), "sessions": base._sessions(src), "exits": base._exits(src),
+            "inputs_hash": "H"}
+
+
+def _inner_summary(out, inputs_hash="H", c_status="smoke_no_fake"):
+    receipts.write_receipt(out / "receipts" / "inner_summary.json", {
+        "stage": "inner", "inputs_hash": inputs_hash, "scope": None, "smoke": False, "c_status": c_status, "model": None,
+        "calibration": None, "anchor": {}, "results": {}, "stats": {}, "declined": {}})
+
+
+def _tuning_receipts(out, inputs_hash="H"):
+    def one(members):
+        return {"k": 1.0, "flags": [], "members": list(members), "scores": {}}
+    bodies = {"A": {"all": one(NAMES)}, "B": {n: one((n,)) for n in NAMES},
+              "D": {"T": one(tuning.TWIN), "C": one([n for n in NAMES if n not in tuning.TWIN])},
+              "E": {n: {"k_share": {}, "modal_share": 0.0, "same_k": False, "candidates": 0, "no_feasible_k": 0, "curve": {}}
+                    for n in NAMES}}
+    for arm, body in bodies.items():
+        receipts.write_receipt(out / "receipts" / f"tuning_{arm}.json", {"experiment": "EXP-189", "arm": arm,
+                                                                         "inputs_hash": inputs_hash, "window": "2023H2-2024", "body": body})
+
+
+# ---- refusals and stage -----------------------------------------------------
+
+def test_not_bounded_refuses_resource_unavailable(tmp_path, monkeypatch):
+    monkeypatch.delenv("BOUNDED_RUN_NESTED", raising=False)
+    with pytest.raises(OpsError) as caught:
+        driver.run(sources(), "inner", tmp_path, prereg=OK)
+    assert caught.value.code == "RESOURCE_UNAVAILABLE"
+    assert caught.value.problem.details["reason"] == "not_bounded"
+
+
+def test_a_typo_stage_raises_value_error(tmp_path):
+    with pytest.raises(ValueError, match="stage must be one of"):
+        driver.run(sources(), "typo", tmp_path, prereg=OK)
+
+
+def test_missing_m0_inputs_refuse_before_any_receipt(tmp_path, monkeypatch):
+    monkeypatch.setattr(readers, "model_tables", lambda bound, roster, admitted, production, **kw: {})
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(), "inner", tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "m0_inputs_missing"
+    assert not (tmp_path / "receipts").exists()
+
+
+def test_pricing_is_the_shortvol_seam(monkeypatch):
+    assert driver.PRICING is sv
+
+
+def test_the_sweep_is_built_on_the_pricing_seam(tmp_path, m0, pricing, monkeypatch):
+    seen = []
+
+    class Recorder(Sweep):
+        def __init__(self, *args, **kwargs):
+            seen.append(kwargs.get("pricing"))
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(driver, "Sweep", Recorder)
+    use_chunks(monkeypatch, [("2023Q3", chunk("E1")), ("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path, event_ids=["E1", "E2"], prereg=OK)
+    assert seen and all(p is sv for p in seen)
+
+
+# ---- months ---------------------------------------------------------------------
+
+def test_months_yield_output_false_before_the_emit_date_and_true_from_it(monkeypatch):
+    src = sources()
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    facts = base._load_facts(src, {"E1", "E2"})
+    got = list(driver._months(src, PLAN_FRAME, _m0_table(), facts, {}, pd.Timestamp("2024-08-01")))
+    assert [sorted(events["event_id"]) for _c, events, _o in got] == [["E1"], ["E2"]]
+    assert [output for _c, _events, output in got] == [False, True]
+
+
+# ---- inner stage ----------------------------------------------------------------
+
+def test_smoke_inner_runs_end_to_end_without_a_fake_and_writes_no_tuning_c(tmp_path, m0, pricing, monkeypatch):
+    use_chunks(monkeypatch, [("2023Q3", chunk("E1")), ("2024Q3", chunk("E2"))])
+    out = tmp_path / "out"
+    summary = driver.run(sources(), "inner", out, event_ids=["E1", "E2"], prereg=OK)
+    assert summary["c_status"] == "smoke_no_fake" and summary["months"] == 2
+    assert (out / "receipts" / "inputs_inner.json").exists()
+    inner = receipts.load_receipt(out / "receipts" / "inner_summary.json")
+    assert inner["c_status"] == "smoke_no_fake" and inner["smoke"] is True
+    assert not (out / "receipts" / "tuning_C.json").exists()
+
+
+def test_the_full_inner_run_with_too_few_events_refuses_m0_inputs_insufficient(tmp_path, m0, pricing, monkeypatch):
+    use_chunks(monkeypatch, [("2023Q3", chunk("E1")), ("2024Q3", chunk("E2"))])
+    with pytest.raises(OpsError) as caught:
+        driver.run(sources(), "inner", tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.problem.details["reason"] == "m0_inputs_insufficient"
+
+
+# ---- outer preflight -------------------------------------------------------------
+
+def test_outer_without_an_inner_summary_refuses_tuning_receipt_missing(tmp_path, m0):
+    src = sources()
+    with pytest.raises(Refusal) as caught:
+        driver._outer(src, tmp_path / "out", _loaded(src))
+    assert caught.value.details["reason"] == "tuning_receipt_missing"
+
+
+def test_outer_with_an_inner_summary_for_other_inputs_refuses_tuning_receipt_changed(tmp_path, m0):
+    src = sources()
+    _inner_summary(tmp_path / "out", inputs_hash="OTHER")
+    with pytest.raises(Refusal) as caught:
+        driver._outer(src, tmp_path / "out", _loaded(src))
+    assert caught.value.details["reason"] == "tuning_receipt_changed"
+
+
+def test_outer_with_a_missing_tuning_receipt_refuses_before_any_month(tmp_path, m0):
+    src, out = sources(), tmp_path / "out"
+    _inner_summary(out)
+    with pytest.raises(Refusal) as caught:
+        driver._outer(src, out, _loaded(src))
+    assert caught.value.details["reason"] == "tuning_receipt_missing"
+    assert not (out / "months").exists()
+
+
+def test_outer_freezes_each_2025_month_before_its_labels_are_read(tmp_path, m0, pricing, monkeypatch):
+    src, out = sources(), tmp_path / "out"
+    _inner_summary(out)
+    _tuning_receipts(out)
+    loaded = _loaded(src)  # the pre-2025 labels are read before the recorder is installed
+    seen, real = [], readers.read_labels
+
+    def recording(fetch, admitted, **kw):
+        month = pd.Timestamp(kw["start"]).to_period("M")
+        if month.year == 2025:
+            seen.append((str(month), (out / "months" / f"{month}.parquet").exists()))
+        return real(fetch, admitted, **kw)
+
+    monkeypatch.setattr(readers, "read_labels", recording)
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+    summary = driver._outer(src, out, loaded)
+    assert seen == [("2025-01", True), ("2025-02", True)]
+    assert summary["months"] == 3 and summary["arms"] == ["A", "B", "D", "E"]
+    assert (out / "receipts" / "outer_summary.json").exists()
+
+
+# ---- stats and declined share -----------------------------------------------------
+
+def _taken(eid, exit_date, rets):
+    row = dict.fromkeys(_TAKEN + RET_COLS)
+    row.update({"event_id": eid, "event_date": pd.Timestamp("2024-03-01"), "structure": NAME, "k": 1.0,
+                "entry_date": pd.Timestamp("2024-03-01"), "exit_date": pd.Timestamp(exit_date), "entry_cost": 2.0,
+                "exit_value": 1.0, "exit_value_mid": 1.0, "pnl_dollars": 0.0, "pnl_dollars_mid": 0.0,
+                "secured_per_contract": 5.0})
+    row.update(dict(zip(RET_COLS, rets)))
+    return row
+
+
+def test_stats_are_the_breakeven_of_the_window_means_and_none_without_rows():
+    sweep = Sweep()
+    sweep.taken[(NAME, 1.0)] = [pd.DataFrame([_taken("a", "2024-03-10", [-0.2, -0.1, 0.1, 0.2, 0.3]),
+                                              _taken("b", "2024-03-12", [-0.4, -0.1, 0.3, 0.4, 0.5])],
+                                             columns=_TAKEN + RET_COLS)]
+    by = {n: 1.0 for n in NAMES}
+    got = driver._stats(sweep, by, WINDOWS["2024"])
+    means = [-0.3, -0.1, 0.2, 0.3, 0.4]
+    expected = breakeven_alpha({a: {"mean": m} for a, m in zip(LADDER, means)})
+    assert got["x"] == pytest.approx(expected) and 0.25 < got["x"] < 0.5
+    assert got["mid"] == pytest.approx(0.2) and got["alpha0"] == pytest.approx(-0.3)
+    assert got["trades"] == 2
+    empty = driver._stats(Sweep(), by, WINDOWS["2025"])
+    assert empty == {"trades": 0, "x": None, "mid": None, "alpha0": None}
+
+
+def test_declined_share_is_declined_over_declined_plus_taken():
+    sweep = Sweep()
+    sweep.declined[(NAME, 1.0)] = {"thin_history": 3, "below_cutoff": 1}
+    sweep.taken[(NAME, 1.0)] = [pd.DataFrame(index=range(4), columns=_TAKEN)]
+    sweep.declined[(NAME, "E")] = {"thin_history": 2}
+    sweep.declined[(NAME, 2.0)] = {}
+    assert driver._declined(sweep) == {NAME: {"1.0": 0.5, "E": 1.0, "2.0": 0.0}}
