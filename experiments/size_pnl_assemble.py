@@ -439,7 +439,8 @@ def _sections(out, outer, inputs, inner, tickers, stored_gate=None):
         sections += [_harsh(text) for text in (*harsh, _verdicts(classify_ho, missing_years, inner_present, basis="harsh"))]
     breakeven_frame = combined  # Amendment 6b: breakeven alpha per model, book and year, on the pooled evaluated frame
     if not gate_raw.empty:  # Amendment 3: the G_PROD taken rows join the breakeven table too
-        taken_gate = gate_raw[gate_raw["status"] == "taken"]
+        # same E_str restriction as gprod_report.sections: only events in the straddle evaluated population
+        taken_gate = gate_raw[(gate_raw["status"] == "taken") & gate_raw["event_id"].isin(set(frame.loc[frame["book"] == "straddle", "event_id"]))]
         breakeven_frame = pd.concat([combined, taken_gate.assign(model_id=taken_gate["model_id"].map(label_of), taken=True)])
     sections += [breakeven.section(breakeven_frame)]
     if not gate_raw.empty:  # Amendment 3: the G_PROD sections, after the Amendment 1 ones and before the accounts

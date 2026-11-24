@@ -968,6 +968,28 @@ def test_breakeven_section_includes_gprod_rows(tmp_path):
     assert ["E-log", "straddle", "G_PROD", "2025", "2", "70.00", "74.00"] in [c[:7] for c in gprod]
 
 
+def _e04_outside_e_str_with_gprod(rows):
+    """E04 has no straddle R_L/R_L2 rows, so it is outside E_str, yet it carries a taken G_PROD row with endpoints.
+    Every other event keeps its straddle rows and the usual G_PROD copies."""
+    e04_straddle = next(row for row in rows if row["book"] == "straddle" and row["arm_or_rule"] == "R_L" and row["event_id"] == "E04")
+    kept = [row for row in rows if not (row["book"] == "straddle" and row["event_id"] == "E04")]
+    gated = _with_gate_rows(kept)
+    stray = _with_account([{**e04_straddle, "arm_or_rule": "G_PROD", "secured_per_contract": 0.0, "status": "taken"}])
+    return _with_endpoints(gated + stray)
+
+
+def test_breakeven_gprod_rows_are_restricted_to_e_str(tmp_path):
+    out = build(tmp_path, rows_fn=_e04_outside_e_str_with_gprod)
+    assemble_mod.assemble(out, plan_frame(), admitted=None)
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    breakeven = [_cells(line) for line in _section_lines(text, "### Breakeven alpha per model and book") if line.startswith("| ")]
+    gprod = [cells[:7] for cells in breakeven if cells[2] == "G_PROD"]
+    # E04's taken G_PROD row is outside the straddle evaluated population, so the 2025 row keeps only E03 (pnl 31: a0 30, a1 32)
+    assert ["E-log", "straddle", "G_PROD", "2025", "1", "30.00", "32.00"] in gprod
+    assert ["E-log", "straddle", "G_PROD", "2025", "2", "70.00", "74.00"] not in gprod
+    assert not any(cells[3] == "2025" and cells[4] == "2" for cells in gprod)
+
+
 # ---- Amendment 5: short-vol E and straddle E_str are separate populations ----
 
 TWO = {"E01": "2024-02-15", "E02": "2024-05-15"}  # two quarters (2024Q1, 2024Q2) and two tickers (AAA, BBB) in the plan
