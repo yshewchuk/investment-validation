@@ -285,7 +285,7 @@ def test_event_absent_from_chunk_is_no_ladder_chunk():
     assert out.loc[0, "status"] == "undetermined" and out.loc[0, "reason"] == "no_ladder_chunk"
 
 
-def test_put_only_event_is_no_atm_pair():
+def test_put_only_event_decides_as_no_atm_pair():
     chunk = lad._pack([rec("po", 100.0, [(0, 100, 1.8, 2.0, 0.6, 1.0, 1)])], {})
     out = sd.decide(pd.DataFrame([ev("po", 1.0)]), chunk, GATE)
     assert out.loc[0, "status"] == "undetermined" and out.loc[0, "reason"] == "no_atm_pair"
