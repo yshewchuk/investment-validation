@@ -69,7 +69,7 @@ The reference is `engine.structures.price_structure` itself, with `ExpirySelecto
 
 **Strike rules, by kind.**
 - `atm`/`moneyness`: `gap = np.abs(strike_orig - target)`, `strike_orig[gap.argmin()]`: first row at the minimum, equal to `idxmin`. Ties between two listed strikes go to whichever is listed first in row order, NOT the lower strike.
-- `delta`: `|delta|` gap in row order, first minimum, NaN skipped (`nanargmin`); the "needs a delta column" check (missing or all-NaN) runs on the same-right group.
+- `delta`: `|delta|` gap in row order, first minimum, NaN skipped (`nanargmin`); the "needs a delta column" check (missing or all-NaN) runs on the group the selector uses AFTER the all-rights fallback, so a calls-only chain with finite call deltas selects a call strike and fails later at the contract lookup.
 - `bracket`, `grid_step`, `offset_from`: the same numpy expressions on the cached ascending grid. `offset_from` first filters the grid to strikes strictly above (`moneyness > 0`) or below the anchor, then takes `argmin(|grid - (anchor + moneyness * spot)|)`; its error is "no listed strike {above|below} {anchor:.4f} at this expiry". Ties for `offset_from` go to the lower grid index, which differs from `atm`; do not unify. `bracket` takes the nearest listed strike at or below (above) spot and uses `isclose` only when `steps` is set; `grid_step` anchors use the lowest `isclose` hit.
 - `same_as`, `mirror`, `fixed`: the returned value is the TARGET (`resolved[ref]`, the mirror, `self.strike`), never the matched listed strike; contract lookup then runs `isclose` again.
 - Right restriction: the same-right group is used when non-empty, else the all-rights group at the expiry, as the legacy `rows = same_right` fallback.
@@ -93,12 +93,12 @@ The reference is `engine.structures.price_structure` itself, with `ExpirySelecto
 
 `tests/v2/research/test_chain_index_equivalence.py`. The subject is `price_structure_indexed`; the reference is `engine.structures.price_structure` called on a fresh, identical snapshot (no copied oracle: the original stays). Each case asserts the two `StructurePrice` objects equal field by field (`Timestamp` values and `.unit`, floats exact, which `to_dict()` strings would hide) and `to_dict()` equal, or the same exception TYPE and `str`:
 - Every key of `STRUCTURES`, default parameters, on AMC, BMO and `None` sessions; width and `steps` sweeps for the five short-vol builders, including zero-quantity reference legs.
-- `pin=`: entry onto a post-print chain, `closing=True`, a pinned expiry absent on the exit chain, an unlisted pinned strike, a pin naming no leg, a duplicate pin name, a `Resolution` pin with another ticker or structure (`ResolutionMismatch`).
+- `pin=`: entry onto a post-print chain, `closing=True`, a pinned expiry absent on the exit chain, an unlisted pinned strike, a pin naming no leg, a duplicate pin name, a `Resolution` pin with another ticker or structure (`ResolutionMismatch`, tested on the twin only: `price_structure` takes no `Resolution` pin).
 - Coarse ladders: the KEN and ABM geometries of `guides/coarse_ladder_collision.md`, with the exact `LadderTooCoarse` text.
 - Every refusal in section 4, each expiry-rule and strike-selector error, a calls-only chain for a put leg (all-rights fallback), crossed, negative and NaN quotes, a `ValueError` on leg 1 with a `StructureError` on leg 2, missing spot, missing column.
 - `isclose` edges: a target just inside and just outside tolerance, two listed strikes inside one tolerance, duplicate rows for one contract, equidistant strikes in both row orders, `nearest_dte` ties in both orders.
 - Ineligible shapes (section 1) match `price_structure` via the plain path; a seeded property test of 200 random chains per structure.
-- Call-order independence, verify mode (an in-place `rows` edit raises `ChainSnapshotMutated`), `price_resolution` refusing another snapshot (`ResolutionMismatch`), and a planted-defect control (a deliberately wrong tie rule must fail the battery).
+- Call-order independence, verify mode (an in-place `rows` edit raises `ChainSnapshotMutated`), `price_resolution` refusing another snapshot (`ResolutionMismatch`, twin only), and a planted-defect control (a deliberately wrong tie rule must fail the battery).
 - **Closure test** (`tests/v2/research/test_chain_index_closure.py`): `engine/chain_index.py` is absent from `source_closure(root, [...])` for each bound root: `experiments/size_search.py`, `magnitude_search_worker.py`, `size_search_binding.py`, `v2_magnitude_search.py`, `size_pnl_shortvol.py`, `size_width_sweep.py` and the EXP-188 `run.py`; and the content hashes of `engine/structures.py` and `engine/fills.py` equal `origin/main`'s.
 
 ## 6. Real-data regression tool
