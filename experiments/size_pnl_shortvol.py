@@ -6,7 +6,6 @@ at exit by the rung rules. Pure functions over numpy/pandas: no I/O, no ledger. 
 call ``simulate``, ``score_events``, ``decide`` and ``score`` per quarter (future); no production caller
 yet. Progress logging: none needed (pure per-quarter functions).
 """
-import itertools
 import math
 
 import numpy as np
@@ -17,7 +16,9 @@ from engine.fills import FillModel
 from engine.forecast_sizing import FORECAST_SIZED, forecast_params
 from engine.portfolio import CONTRACT_MULTIPLIER
 from engine.pnl_sim import DRAWS, trailing_cutoff
-from engine.structures import BUY, PUT, SELL, STRUCTURES, StructureError
+from engine.score import _mean_relative_spread
+from engine.structures import (BUY, PUT, SELL, STRUCTURES, ChainSnapshot, LadderTooCoarse, StructureError,
+                               price_structure)
 from experiments.size_pnl_account import secured_per_contract
 from experiments.size_pnl_pool import MIN_WINDOW, put_means, structure_pnl
 from experiments.size_pnl_straddle import EXIT_UNQUOTED, lots
@@ -91,35 +92,62 @@ def _floor_ok(legs):
     return True
 
 
-def resolve(chunk, i, name, pred):
-    """(legs, reason) for event ``i``: every leg as a dict (traded and reference), or (None, reason)."""
+def chain_snapshot(chunk, i):
+    """Event ``i``'s put chain at entry quotes, as ``price_structure`` reads it.
+
+    The ladder already chose the single expiry (first_post_event), so the snapshot carries only it, and
+    event_date = expiry makes the selector's inclusive rule return it.
+    """
+    puts = _put_slots(chunk, i)
+    expiry = pd.Timestamp(chunk["expiry"][i])
+    rows = pd.DataFrame({"expiry": [expiry] * puts.size, "dte": [chunk["dte_entry"][i]] * puts.size,
+                         "strike": chunk["strike"][puts], "right": [PUT] * puts.size,
+                         "bid": chunk["bid_e"][puts], "ask": chunk["ask_e"][puts]})
+    return ChainSnapshot(ticker="", obs_date=expiry, event_date=expiry, rows=rows,
+                         spot=float(chunk["spot_entry"][i]))
+
+
+def resolve_priced(chunk, i, name, pred, fill):
+    """(priced, legs, reason) for event ``i``: production's ``StructurePrice`` and every leg as a dict.
+
+    Both resolution and pricing run in ``engine.structures.price_structure``; the dicts carry the listed strikes.
+    On a refusal the result is (None, None, reason).
+    """
     params = _width_params(name, pred)
     pinned(name)
     if params is None:
-        return None, "width_declined"
+        return None, None, "width_declined"
     spec = STRUCTURES[name](**params)
-    puts = _put_slots(chunk, i)
-    rows = pd.DataFrame({"strike": chunk["strike"][puts], "right": ["P"] * puts.size})
-    resolved = {}
     try:
-        for leg in spec.legs:
-            resolved[leg.name] = leg.strike.select(rows, float(chunk["spot_entry"][i]), resolved, right="P")
+        priced = price_structure(spec, chain_snapshot(chunk, i), fill)
+    except LadderTooCoarse:  # before StructureError: it is a subclass
+        return None, None, "ladder_too_coarse"
     except StructureError:
-        return None, "structure_unresolved"
-    if any(np.isclose(a, b) for a, b in itertools.combinations(resolved.values(), 2)):
-        return None, "ladder_too_coarse"
+        return None, None, "structure_unresolved"
+    except ValueError:  # FillModel refuses a crossed, negative or NaN quote
+        return None, None, "entry_quote_unusable"
+    puts = _put_slots(chunk, i)
     legs = []
-    for leg in spec.legs:
-        hit = puts[np.isclose(chunk["strike"][puts], resolved[leg.name])]
+    for leg in priced.legs:
+        hit = puts[np.isclose(chunk["strike"][puts], leg.strike)]
         if hit.size == 0:
-            return None, "structure_unresolved"
+            return None, None, "structure_unresolved"
         # The LISTED strike, not the arithmetic one: a mirrored leg can be 93.99999999999999 for a listed 94.0,
         # and structure_value needs exact grid equality.
         legs.append({"name": leg.name, "strike": float(chunk["strike"][hit[0]]), "side": leg.side,
                      "qty": float(leg.qty), "idx": int(hit[0])})
     if not _floor_ok(legs):
-        return None, "negative_floor"
-    return legs, None
+        return None, None, "negative_floor"
+    return priced, legs, None
+
+
+def resolve(chunk, i, name, pred):
+    """(legs, reason) for event ``i``: every leg as a dict (traded and reference), or (None, reason).
+
+    Resolution does not depend on alpha, so this resolves at alpha 0.5 and keeps only the legs.
+    """
+    _priced, legs, reason = resolve_priced(chunk, i, name, pred, FillModel(0.5))
+    return legs, reason
 
 
 def simulate(chunk, events, pool, *, draws=DRAWS):
@@ -144,28 +172,17 @@ def simulate(chunk, events, pool, *, draws=DRAWS):
     return out
 
 
-def entry_legs(chunk, legs, fill):
-    """(entry cost per share, mean relative spread), or None when a traded leg has no finite entry quote.
+def entry(priced):
+    """(entry cost per share, mean relative spread), or None when the entry cost is not finite.
 
-    Zero-bid and locked entry quotes are priced normally, as ``price_structure`` does. This is
-    deliberately NOT the straddle's stricter entry rule. The spread averages every resolved leg
-    with a finite quote and a positive mid, reference legs included, exactly as the board does: `engine.score._mean_relative_spread` iterates `priced.legs`
-    (engine/score.py:2476, 5333), which holds the zero-quantity reference legs too. EXP-133's `build.py` averages
-    only used legs; the design (section 5) pins the board's rule.
+    The cost is production's ``StructurePrice.cost``. The spread is production's ``_mean_relative_spread``
+    over all resolved legs, reference legs included, as the board computes it.
     """
-    cost, spreads = 0.0, []
-    for leg in legs:
-        k = leg["idx"]
-        bid, ask = float(chunk["bid_e"][k]), float(chunk["ask_e"][k])
-        finite = math.isfinite(bid) and math.isfinite(ask)
-        if finite and bid + ask > 0:
-            spreads.append((ask - bid) / ((bid + ask) / 2.0))
-        if leg["qty"] > 0:
-            if not finite:
-                return None
-            price = fill.buy(bid, ask) if leg["side"] == BUY else fill.sell(bid, ask)
-            cost += _sign(leg["side"]) * leg["qty"] * float(price)
-    return cost, (float(np.mean(spreads)) if spreads else math.nan)
+    cost = priced.cost
+    if not math.isfinite(cost):
+        return None
+    rel = _mean_relative_spread(priced)
+    return cost, (math.nan if rel is None else rel)
 
 
 def _row(ev, name, **kw):
@@ -192,8 +209,8 @@ def score_events(chunk, events, sims, name, *, alpha=0.5):
         if eid not in pos or sim is None:
             row["reason"] = "unsimulable"
         else:
-            legs, reason = resolve(chunk, pos[eid], name, ev["pred_move"])
-            entered = None if legs is None else entry_legs(chunk, legs, fill)
+            priced, legs, reason = resolve_priced(chunk, pos[eid], name, ev["pred_move"], fill)
+            entered = None if legs is None else entry(priced)
             if legs is None:
                 row["reason"] = reason
             elif entered is None:
@@ -294,10 +311,12 @@ def score(chunk, events, decisions, name, alpha, *, drop_unquoted=False, mid_mar
         eid = str(dec["event_id"])
         if eid not in pred or eid not in pos:
             raise ValueError(f"taken event {eid!r} is missing from the chunk or events")
-        legs, reason = resolve(chunk, pos[eid], name, pred[eid])
+        priced, legs, reason = resolve_priced(chunk, pos[eid], name, pred[eid], FillModel(alpha))
+        if reason == "entry_quote_unusable":
+            raise ValueError(f"taken event {eid!r} has an unusable entry quote")
         if legs is None:
             raise ValueError(f"taken event {eid!r} has no resolvable {name} structure ({reason})")
-        entered = entry_legs(chunk, legs, FillModel(alpha))
+        entered = entry(priced)
         if entered is None:
             raise ValueError(f"taken event {eid!r} has an unusable entry quote")
         cost = entered[0]

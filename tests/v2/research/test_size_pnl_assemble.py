@@ -149,7 +149,7 @@ def test_happy_path_writes_every_section_in_order(tmp_path):
     out = build(tmp_path)
     summary = assemble_mod.assemble(out, plan_frame(), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
-    assert summary["report"] == str(out / "REPORT.md") and summary["sections"] == 14 and summary["rows"] > 0  # 10 + marks basis + breakeven note + harsh note (Amendment 1) + accounts (Amendment 2)
+    assert summary["report"] == str(out / "REPORT.md") and summary["sections"] == 15 and summary["rows"] > 0  # 10 + marks basis + breakeven note + harsh note (Amendment 1) + accounts (Amendment 2) + the Amendment 6 board-match section
     assert text.startswith("# EXP-188 REPORT")
     heads = ["### T1", "### T2", "### T3", "### T4", "### T6", "### T7", "### T8", "### T9", "### T10"]
     positions = [next(i for i, line in enumerate(_sections(text)) if line.startswith(h)) for h in heads]
@@ -575,6 +575,14 @@ def test_out_dir_that_is_not_a_path_refuses_as_out_dir_invalid(tmp_path):
     assert caught.value.details["reason"] == "report_out_dir_invalid"
 
 
+@pytest.mark.parametrize("board_ledger", [123, "", "  "], ids=["not_a_path", "empty", "blank"])
+def test_board_ledger_that_is_not_a_path_refuses_as_board_ledger_invalid(tmp_path, board_ledger):
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(tmp_path, plan_frame(), admitted=None, board_ledger=board_ledger)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "report_board_ledger_invalid"
+
+
 @pytest.mark.parametrize("plan", [None, pd.DataFrame()], ids=["none", "empty_columns"])
 def test_none_or_empty_column_plan_refuses_as_tickers_invalid_before_check_plan(tmp_path, monkeypatch, plan):
     monkeypatch.setattr(ladder, "check_plan", REAL_CHECK_PLAN)  # the real admission must not see these frames
@@ -671,8 +679,8 @@ def test_mid_column_adds_the_harsh_sections_after_the_headline_verdicts(tmp_path
     summary = assemble_mod.assemble(out, plan_frame(), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
     harsh = [line for line in _sections(text) if line.startswith(HARSH)]
-    # the 10 headline sections, 4 harsh sections, the marks basis, the breakeven note (no endpoints here) and the accounts
-    assert summary["sections"] == 17
+    # the 10 headline sections, 4 harsh sections, the marks basis, the breakeven note (no endpoints here), the accounts + the board-match section
+    assert summary["sections"] == 18
     assert [line.rsplit(": ", 1)[1] for line in harsh] == ["T4 Short-vol, as is", "T6 Straddle buy rules",
                                                             "T7 Contrasts", "T10 Verdicts"]
     assert text.index(harsh[0]) > text.index("### T10 Verdicts")

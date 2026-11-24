@@ -277,5 +277,5 @@ def test_without_inner_decisions_the_report_is_unchanged_in_shape(tmp_path):
     out = build(tmp_path)
     summary = assemble_mod.assemble(out, plan_frame(), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
-    assert summary["sections"] == 14  # 11 headline (run, marks basis, T1-T4, T6-T10), the harsh not_testable note, breakeven, and the Amendment 2 accounts
+    assert summary["sections"] == 15  # 11 headline (run, marks basis, T1-T4, T6-T10), the harsh not_testable note, breakeven, the Amendment 2 accounts, and the Amendment 6 board-match section
     assert "### Inner window" not in text

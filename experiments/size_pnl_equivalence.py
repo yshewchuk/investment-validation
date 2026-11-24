@@ -27,8 +27,8 @@ def build_sample(chunk, events, sims, *, alpha, size=SAMPLE):
         i = pos[eid]
         for k in range(len(shortvol.NAMES)):  # the structure offset spreads the sample over the names
             name = shortvol.NAMES[(len(sample) + k) % len(shortvol.NAMES)]
-            legs, _ = shortvol.resolve(chunk, i, name, ev["pred_move"])
-            entered = None if legs is None else shortvol.entry_legs(chunk, legs, fill)
+            priced, legs, _ = shortvol.resolve_priced(chunk, i, name, ev["pred_move"], fill)
+            entered = None if legs is None else shortvol.entry(priced)
             if entered is None or not (math.isfinite(entered[0]) and entered[0] >= shortvol.MIN_DEBIT):
                 continue
             exits = [{"strike": leg["strike"], "side": shortvol._CLOSE[leg["side"]], "qty": leg["qty"]}
