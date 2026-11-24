@@ -291,13 +291,14 @@ def test_short_vol_non_trade_keeps_its_event_and_straddle_non_trade_drops_it(rea
     assert "E0" not in set(ev.population(d)["event_id"].astype(str))
 
 
-@pytest.mark.parametrize("reason", ["entry_not_debit"])
-def test_short_vol_entry_not_debit_or_negative_floor_is_undetermined_and_drops_its_event(reason):
-    """An entry cost that is not a debit is a missing fact now: the row is undetermined and the event leaves E."""
+def test_short_vol_entry_not_debit_is_undetermined_and_drops_its_event():
+    """An entry cost that is not a debit is a missing fact now: the row is undetermined and the event leaves E.
+    Only E0 leaves; the other seven events keep their rows, so an all-rows-dropped bug cannot pass."""
     d = frame_of()
     d["reason"] = "scored"
-    _mark_one(d, "M02", "E0", "S1", "short_vol", reason)
-    assert "E0" not in set(ev.population(d)["event_id"].astype(str))
+    _mark_one(d, "M02", "E0", "S1", "short_vol", "entry_not_debit")
+    assert set(ev.population(d)["event_id"].astype(str)) == {f"E{i}" for i in range(1, 8)}
+    assert len(ev.population(d)) == len(d) - 8 * 3  # E0's rows under all 8 models and 3 units leave E
 
 
 @pytest.mark.parametrize("reason", ["entry_quote_unusable", "structure_unresolved"])

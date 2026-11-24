@@ -253,7 +253,7 @@ def test_missing_mirror_strike_is_unresolved():
     assert sv.resolve(chunk, 0, "TWIN-P", PRED) == (None, "structure_unresolved")
 
 
-def test_flipped_condor_now_resolves(monkeypatch):
+def test_flipped_condor_resolves_without_a_floor_drop(monkeypatch):
     # The EXP-133 zero floor is gone: a short-the-wings condor resolves like any other.
     real = STRUCTURES["CND-PS"]
     monkeypatch.setitem(STRUCTURES, "CND-PS", lambda **kw: flipped(real(**kw)))
@@ -263,6 +263,20 @@ def test_flipped_condor_now_resolves(monkeypatch):
     want = [(leg.side, leg.qty) for leg in flipped(real()).legs if leg.qty > 0]
     got = [(leg["side"], leg["qty"]) for leg in legs if leg["qty"] > 0]
     assert got == want and len(got) > 0
+
+
+def test_flipped_condor_is_scored_with_a_hand_oracle(monkeypatch):
+    # Flipped CND-PS SELLS 94 and 106 and BUYS 97 and 103 at entry. At alpha 0.5 (mid) the chunk's mids give
+    # cost = 2*1.09 - 2*1.36 = -0.54 a share: not a debit, so the row is undetermined as entry_not_debit, not scored.
+    real = STRUCTURES["CND-PS"]
+    monkeypatch.setitem(STRUCTURES, "CND-PS", lambda **kw: flipped(real(**kw)))
+    chunk = chunk_of(("A", {}))
+    grid = np.arange(80.0, 121.0)
+    means = 0.001 * (grid - 80.0) ** 2
+    out = sv.score_events(chunk, events_for("A"), {"A": (grid, means)}, "CND-PS").iloc[0]
+    assert out["entry_cost"] == pytest.approx(2 * 1.09 - 2 * 1.36)  # -0.54
+    assert out["status"] == "undetermined" and out["reason"] == "entry_not_debit"
+    assert math.isnan(out["exp_pnl_sim"])
 
 
 def test_unflipped_condor_has_a_floor():
@@ -364,10 +378,20 @@ def test_score_accepts_a_nanodollar_debit():
     # One contract each: BUY 94 and 106 at +1.0 each, SELL 97 and 103 at -1.0 each, so exit = 1 + 1 - 1 - 1 = 0.0.
     assert row["rung"] == "rung1"
     assert row["exit_value"] == pytest.approx(0.0, abs=1e-9)
-    assert row["pnl_per_share"] == pytest.approx(row["exit_value"] - 1e-9, abs=1e-9)
+    assert row["pnl_per_share"] < 0
+    assert row["pnl_per_share"] == pytest.approx(-1e-9, rel=1e-3)  # exit 0.0 less the 1e-9 debit
     # Lots from the capital rule by hand, on the row's own entry cost (about 1e-9, so the count is ~1e11 and float
     # noise in the cost matters: use the cost the row carries, not the literal).
     assert row["lots"] == math.floor(CAPITAL_PER_TRADE / (row["entry_cost"] * 100))
+
+
+def test_score_refuses_a_non_debit_entry():
+    # Sells (97, 103) mid 2.5 exceed buys (94, 106) mid 1.5: the entry cost is -2.0 a share, and score refuses it.
+    neg = chunk_of(("A", {}), entry=lambda k: (2.0, 3.0) if k in (97, 103) else (1.0, 2.0))
+    decisions = taken(neg, "A")  # priced at alpha 0.5 from the chunk, so the bound check passes and the debit check fires
+    assert decisions.loc[0, "entry_cost"] == pytest.approx(-2.0) and decisions.loc[0, "alpha"] == 0.5
+    with pytest.raises(ValueError, match="not a debit"):
+        sv.score(neg, events_for("A"), decisions, "CND-PS", 0.5)
 
 
 def test_score_events_refuses_bad_alpha(pool):
