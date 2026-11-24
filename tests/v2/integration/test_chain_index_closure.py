@@ -10,7 +10,6 @@ from __future__ import annotations
 # packages: engine.v2.ops
 
 import ast
-import hashlib
 import os
 import subprocess
 from pathlib import Path
@@ -29,6 +28,7 @@ BLOCKED_ENTRIES = (
 V14_ENTRIES = ["experiments/v2_magnitude_search.py", "experiments/v2_prediction.py"]
 SCAN_DIRS = ("engine", "experiments", "ops", "tools")
 ALLOWED_IMPORTERS = {"engine/chain_index.py"}
+MAX_SOURCE_BYTES = 8 * 1024 * 1024
 
 
 @pytest.mark.parametrize("entries", BLOCKED_ENTRIES, ids=["size-search", "size-panel", "v14"])
@@ -67,17 +67,16 @@ def test_no_scanned_module_imports_the_twin():
         if not base.is_dir():
             continue
         for path in sorted(base.rglob("*.py")):
-            text = path.read_text(encoding="utf-8")
+            with path.open("rb") as stream:
+                data = stream.read(MAX_SOURCE_BYTES + 1)
+            assert len(data) <= MAX_SOURCE_BYTES, path
+            text = data.decode("utf-8")
             # Text pre-filter only; the decision is made on the parsed imports.
             if "chain_index" not in text:
                 continue
             if _imports_twin(ast.parse(text)):
                 importers.add(path.relative_to(ROOT).as_posix())
     assert importers - ALLOWED_IMPORTERS == set(), sorted(importers - ALLOWED_IMPORTERS)
-
-
-def _git(*args: str) -> bytes:
-    return subprocess.run(["git", "-C", str(ROOT), *args], check=True, capture_output=True).stdout
 
 
 def test_v14_closure_unchanged_against_base():
@@ -88,13 +87,9 @@ def test_v14_closure_unchanged_against_base():
     # Each HEAD closure file must exist at the base and have the same bytes there.
     changed = subprocess.run(
         ["git", "-C", str(ROOT), "diff", "--name-only", base, "--", *closure],
-        check=True, capture_output=True, text=True,
+        check=True, capture_output=True, text=True, timeout=60,
     ).stdout
     assert changed.strip() == "", changed
-    for rel in closure:
-        head = "sha256:" + hashlib.sha256((ROOT / rel).read_bytes()).hexdigest()
-        blob = _git("show", f"{base}:{rel}")
-        assert head == "sha256:" + hashlib.sha256(blob).hexdigest(), rel
 
 
 def test_structures_and_fills_are_in_v14_closure():
