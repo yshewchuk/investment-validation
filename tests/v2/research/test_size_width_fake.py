@@ -53,6 +53,11 @@ def _months():
     return [(chunk, prior, False), (chunk, cur, True)], sessions
 
 
+def _small_draws(monkeypatch):
+    """Protocol N is tuning.FAKE_DRAWS (20); the tests that run a 2-draw stage patch the constant to 2."""
+    monkeypatch.setattr(tuning, "FAKE_DRAWS", 2)
+
+
 def _per_draw(peaks=None, trades=None):
     """One draw: every structure at return 0.01 on every grid k, except ``peaks`` ({name: {k: ret}}); 150 trades each unless
     ``trades`` maps a name to another count."""
@@ -137,6 +142,7 @@ def test_argmax_at_the_top_edge_is_k_at_edge_with_an_interior_k():
 
 def test_run_fake_writes_tuning_c_that_frozen_reads_and_is_reproducible(tmp_path, monkeypatch):
     _small_window(monkeypatch)
+    _small_draws(monkeypatch)
     table, labels, model = _world()
     months, sessions = _months()
     res = fake.run_fake(months, table, labels, model, sessions, tmp_path, "hash-1", n=2, draws=DRAW)
@@ -146,6 +152,7 @@ def test_run_fake_writes_tuning_c_that_frozen_reads_and_is_reproducible(tmp_path
     assert set(factors) == set(NAMES) and all(v in GRID for v in factors.values())
     with pytest.raises(Refusal) as caught:
         tuning.frozen(tmp_path, "C", "hash-2")
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.details["reason"] == "tuning_receipt_changed"
     again = fake.run_fake(months, table, labels, model, sessions, tmp_path, "hash-1", n=2, draws=DRAW)
     assert again["body"] == res["body"]
@@ -157,7 +164,8 @@ def test_run_fake_writes_tuning_c_that_frozen_reads_and_is_reproducible(tmp_path
     assert receipt["arm"] == "C" and receipt["inputs_hash"] == "hash-1" and receipt["window"] == "2023H2-2024"
 
 
-def test_real_calibration_failure_omits_c_and_writes_no_receipt(tmp_path):
+def test_real_calibration_failure_omits_c_and_writes_no_receipt(tmp_path, monkeypatch):
+    _small_draws(monkeypatch)
     table, labels, model = _world()
     months, sessions = _months()
     res = fake.run_fake(months, table, labels, {**model, "s": 3.0}, sessions, tmp_path, "hash-1", n=2, draws=DRAW)
@@ -168,6 +176,7 @@ def test_real_calibration_failure_omits_c_and_writes_no_receipt(tmp_path):
 
 def test_uncalibrated_fake_writes_no_receipt_and_runs_no_draws(tmp_path, monkeypatch):
     _small_window(monkeypatch)
+    _small_draws(monkeypatch)
     table, labels, model = _world()
     months, sessions = _months()
     monkeypatch.setattr(fake, "calibration", lambda *a, **k: {"ok": False, "reason": "fake_not_calibrated"})
@@ -177,6 +186,7 @@ def test_uncalibrated_fake_writes_no_receipt_and_runs_no_draws(tmp_path, monkeyp
     assert not (tmp_path / "receipts" / "tuning_C.json").exists()
     with pytest.raises(Refusal) as caught:
         tuning.frozen(tmp_path, "C", "hash-1")
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.details["reason"] == "tuning_receipt_missing"
 
 
@@ -278,25 +288,73 @@ def test_t4_markdown_renders_300_trades_and_marks_299_n_a():
 
 # ---- arm C shape in the tuning module -------------------------------------
 
-def test_units_c_is_b_and_valid_checks_the_arm_c_shape():
+def _c_frozen(root, receipt):
+    """Write ``receipt`` as the tuning_C receipt under ``root`` and read it back through tuning.frozen."""
+    receipts.write_receipt(root / "receipts" / "tuning_C.json", receipt)
+    return tuning.frozen(root, "C", "h")
+
+
+def test_units_c_is_b_and_frozen_checks_the_arm_c_shape(tmp_path):
     assert tuning.units("C") == tuning.units("B")
     body = {n: {"k": 1.0, "flags": [], "members": [n], "scores": {}} for n in NAMES}
-    receipt = {"experiment": "EXP-189", "arm": "C", "window": "2023H2-2024", "body": body,
-               "fake": {"calibration": {"ok": True}}}
-    assert tuning._valid("C", receipt)
-    assert not tuning._valid("C", {**receipt, "fake": {"calibration": {"ok": False}}})
-    assert not tuning._valid("C", {k: v for k, v in receipt.items() if k != "fake"})
-    assert not tuning._valid("C", {**receipt, "fake": {}})
-    missing = {n: v for n, v in body.items() if n != NAMES[0]}
-    assert not tuning._valid("C", {**receipt, "body": missing})
+    fake_meta = {"N": 20, "seed_tag": "exp189-v1", "model": MODEL, "calibration": {"ok": True}}
+    receipt = {"experiment": "EXP-189", "arm": "C", "inputs_hash": "h", "window": "2023H2-2024", "body": body,
+               "fake": fake_meta}
+    assert set(_c_frozen(tmp_path / "valid", receipt)) == set(NAMES)
+    bad = {
+        "calibration_failed": {**receipt, "fake": {**fake_meta, "calibration": {"ok": False}}},
+        "no_fake": {k: v for k, v in receipt.items() if k != "fake"},
+        "fake_empty": {**receipt, "fake": {}},
+        "N_2": {**receipt, "fake": {**fake_meta, "N": 2}},
+        "N_missing": {**receipt, "fake": {k: v for k, v in fake_meta.items() if k != "N"}},
+        "N_true": {**receipt, "fake": {**fake_meta, "N": True}},
+        "missing_unit": {**receipt, "body": {n: v for n, v in body.items() if n != NAMES[0]}},
+    }
+    for name, change in bad.items():
+        with pytest.raises(Refusal) as caught:
+            _c_frozen(tmp_path / name, change)
+        assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT", name
+        assert caught.value.details["reason"] == "tuning_receipt_changed", name
 
 
-def test_write_tuning_c_refuses_an_uncalibrated_fake_and_writes_nothing(tmp_path):
+def test_write_tuning_c_refuses_an_uncalibrated_fake_and_writes_nothing(tmp_path, monkeypatch):
+    _small_draws(monkeypatch)
     with pytest.raises(Refusal) as caught:
         fake.write_tuning_c(tmp_path, {}, "h", MODEL, {"ok": False, "reason": "fake_not_calibrated"}, 2)
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.details["reason"] == "fake_not_calibrated"
     assert not (tmp_path / "receipts" / "tuning_C.json").exists()
+
+
+def test_run_fake_refuses_a_reduced_draw_count_before_calibration_and_writes_nothing(tmp_path, monkeypatch):
+    table, labels, model = _world()
+    months, sessions = _months()
+    monkeypatch.setattr(fake, "calibration", lambda *a, **k: pytest.fail("no calibration for a non-protocol N"))
+    monkeypatch.setattr(fake, "run_draw", lambda *a, **k: pytest.fail("no draws for a non-protocol N"))
+    with pytest.raises(Refusal) as caught:
+        fake.run_fake(months, table, labels, model, sessions, tmp_path, "hash-1", n=2, draws=DRAW)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.details["reason"] == "fake_draws_not_protocol"
+    assert not (tmp_path / "receipts" / "tuning_C.json").exists()
+
+
+def test_write_tuning_c_refuses_a_reduced_draw_count_with_an_ok_calibration_and_writes_nothing(tmp_path):
+    with pytest.raises(Refusal) as caught:
+        fake.write_tuning_c(tmp_path, {}, "h", MODEL, {"ok": True}, 2)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.details["reason"] == "fake_draws_not_protocol"
+    assert not (tmp_path / "receipts" / "tuning_C.json").exists()
+
+
+def test_frozen_refuses_a_c_receipt_written_with_a_reduced_draw_count(tmp_path):
+    body = {n: {"k": 1.0, "flags": [], "members": [n], "scores": {}} for n in NAMES}
+    receipts.write_receipt(tmp_path / "receipts" / "tuning_C.json", {
+        "experiment": "EXP-189", "arm": "C", "inputs_hash": "h", "window": "2023H2-2024", "body": body,
+        "fake": {"N": 2, "seed_tag": "exp189-v1", "model": MODEL, "calibration": {"ok": True}}})
+    with pytest.raises(Refusal) as caught:
+        tuning.frozen(tmp_path, "C", "h")
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.details["reason"] == "tuning_receipt_changed"
 
 
 def test_frozen_refuses_a_stored_arm_c_receipt_whose_calibration_failed(tmp_path):
@@ -306,4 +364,5 @@ def test_frozen_refuses_a_stored_arm_c_receipt_whose_calibration_failed(tmp_path
         "fake": {"N": 2, "seed_tag": "exp189-v1", "model": MODEL, "calibration": {"ok": False}}})
     with pytest.raises(Refusal) as caught:
         tuning.frozen(tmp_path, "C", "h")
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.details["reason"] == "tuning_receipt_changed"

@@ -12,6 +12,7 @@ from experiments.size_width_sizing import GRID
 from experiments.size_width_sweep import E_ARM, INNER, WINDOWS, admit_k
 
 MIN_TRADES, SAME_K_SHARE = 300, 0.8
+FAKE_DRAWS = 20
 EDGES = (min(GRID), max(GRID))
 TWIN = ("TWIN-P", "TWIN-P5")
 _CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
@@ -122,6 +123,8 @@ def _valid(arm, receipt):
         fake = receipt.get("fake")
         cal = fake.get("calibration") if isinstance(fake, dict) else None
         if not (isinstance(cal, dict) and cal.get("ok") is True):
+            return False
+        if not (type(fake.get("N")) is int and fake["N"] == FAKE_DRAWS):
             return False
     try:
         return set(body) == set(units(arm)) and all(
