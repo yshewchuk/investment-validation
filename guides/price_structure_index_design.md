@@ -2,7 +2,7 @@
 
 Design PR; no code. Slices S1–S5 (section 9) add code. Contract lines: `engine/SCORING.md` section 9.
 
-**Problem (supervisor measurement 2026-11-24).** On synthetic 300-event put chains with 5 short-vol structures, `engine.structures.price_structure` costs 12.8 ms per call against 1.8 ms for the old experiment resolver. About 54% is `ExpirySelector.select` re-run for every leg (pandas `drop_duplicates`, sort, filter), about 12% is `StrikeSelector.select` (pandas filter, grid rebuild per leg), the rest is per-leg boolean masks over the whole chain plus fill pricing; building the `ChainSnapshot` is 4%. It is repeated work on one immutable chain: `engine/replay.py` quotes every structure on one decision snapshot, and each structure has 2–7 legs.
+**Problem (supervisor measurement 2026-11-24).** On synthetic 300-event put chains with 5 short-vol structures, `engine.structures.price_structure` costs 12.8 ms per call against 1.8 ms for the old experiment resolver. About 54% is `ExpirySelector.select` re-run for every leg (pandas `drop_duplicates`, sort, filter), about 12% is `StrikeSelector.select` (pandas filter, grid rebuild per leg), the rest is per-leg boolean masks over the whole chain plus fill pricing; building the `ChainSnapshot` is 4%. It is repeated work on immutable chains: each structure has 2–7 legs, and `engine/replay.py` re-resolves per snapshot and pins entry legs onto the exit chain.
 
 **Hard rules (user).** Outputs are bit-identical, including the SAME exception types and messages (`LadderTooCoarse` too). `experiments/` is not touched and no running experiment may be affected. No cross-structure vectorising. No real store, `data/` or `/root/rebuild-logs` reads; no heavy jobs; CI is the evidence.
 
@@ -21,24 +21,24 @@ So any byte change to `engine/structures.py` or `engine/fills.py`, or a new modu
 
 **Out of scope: the v2 research copy.** `engine/v2/research/_pricing.py` carries its own `price_structure` (used by `engine/v2/research/replay.py`). It is a separate implementation with its own closure and is not changed or indexed here; adopting the index there would be a later design.
 
-**Closure-neutral rule for S1–S4.** `engine/structures.py` and `engine/fills.py` stay byte-identical. All new logic is in a NEW module `engine/chain_index.py` that nothing bound imports. It reads `ChainSnapshot`, `Structure`, `ResolvedLeg`, `StructurePrice` and the error classes from `engine.structures`. `engine/fills.py` is never edited: quote validation reuses the public `FillModel.mid`. A CI test (S2) asserts the git diff of the two bound files is empty for S1–S4.
+**Closure-neutral rule for S1–S4.** `engine/structures.py` and `engine/fills.py` stay byte-identical. All new logic is in a NEW module `engine/chain_index.py` that nothing bound imports. It imports the dataclasses and errors from `engine.structures`; quote validation reuses the public `FillModel.mid`. A CI test (S2) asserts the two bound files' content hashes equal `origin/main`'s.
 
 ## 1. The index
 
 `ChainIndex` is built lazily on the first indexed call for a snapshot and holds copies of what the legacy path re-derives:
 
-- **Columns, original row order:** `expiry` as int64 ns (comparisons) plus the original-dtype values (returned `Timestamp`s keep the column's unit), `strike` float64, `right`, `bid`, `ask`, `dte`, and `delta` if the column exists.
+- **Columns, original row order:** `expiry` as int64 ns via `astype("datetime64[ns]")` (exact for s/ms/us/ns units; comparisons) plus the original-dtype values (returned `Timestamp`s keep the column's unit), `strike` float64, `right`, `bid`, `ask`, `dte`, and `delta` if the column exists.
 - **Expiries:** the distinct expiries, ascending, each with its single `dte` (the legacy `drop_duplicates().sort_values("expiry")` frame as arrays).
 - **Groups:** per `(expiry, right)` and per `(expiry, ALL)` (the all-rights fallback, section 3), built on first touch: the positions of its rows in original order, so the strike, bid, ask, dte and delta arrays are original-order slices, plus the cached grid `np.sort(np.unique(strike))`.
-- **Memo of expiry-rule results:** key `(kind, target_dte, min_dte, max_dte, expiry)`, value a `Timestamp` or the stored `(exception class, message)`. A miss runs the rule on the expiry arrays; a hit re-raises a fresh exception of the same class and message. Event date and session are per snapshot, so they are not in the key. A selector whose `expiry` field is unhashable bypasses the memo.
+- **Memo of expiry-rule results:** key `(kind, target_dte, min_dte, max_dte, expiry)`, value a `Timestamp` or the stored `(exception class, message)`. A hit re-raises a fresh exception of the same class and message. Event date and session are per snapshot, so not in the key; an unhashable `expiry` bypasses the memo.
 
 **Why original order, not sorted.** The legacy tie rules are row-order rules (`idxmin` first minimum, `hit.iloc[0]` first `isclose` row); sorting changes both on ties and duplicate quotes. Groups are small (about 100 rows), so the same numpy expressions on a group are exact and cheap; no `searchsorted`.
 
 **Lifetime.** The index lives and dies with its snapshot. No global LRU and no sharing across snapshots. Until S5 `ChainSnapshot` is not edited, so the index lives in a module dict `{id(snapshot): (weakref(snapshot), index)}` with a `weakref.finalize` that removes the entry at collection; a lookup that finds a dead or different referent rebuilds. (A weak-keyed dict cannot be used: the frozen dataclass hashes its `DataFrame` field.) A lock guards the build; the index is not a snapshot attribute, so it is never pickled.
 
 **Immutability and invalidation.** `ChainSnapshot.rows` must be treated as immutable once a snapshot has been priced. Pandas offers no cheap way to enforce this for a mutable `DataFrame`, so enforcement is layered:
-1. The index copies its arrays, so it never aliases `rows`; a later in-place edit leaves the index at its build-time view, which is why mutation is a contract violation rather than a refresh.
-2. S2 audits every `ChainSnapshot(` construction site and records in its PR that none mutates `rows` after building it; sites that reuse one frame across snapshots are listed.
+1. The index copies its arrays; a later in-place edit leaves it at its build-time view, so mutation is a contract violation, not a refresh.
+2. S2 audits every `ChainSnapshot(` construction site for post-build `rows` mutation and records the result in its PR.
 3. **Verify mode:** `ENGINE_CHAIN_INDEX_VERIFY=1`, and unconditionally the battery, the regression tool and the benchmark, store a CRC32 fingerprint of every column the index reads at build time and re-check it on every indexed call. A mismatch raises `ChainSnapshotMutated(RuntimeError)`. It is deliberately NOT a `StructureError`: callers catch `StructureError` and write `NO_CHAIN`, which would hide the bug.
 4. Default mode adds no per-call O(N) check (about 0.1 ms at 5,000 rows, 5% of the target budget).
 
@@ -62,11 +62,11 @@ class Resolution:
 ```
 
 - `resolve_structure(structure, snapshot, *, pin=None) -> Resolution` runs the single pass over legs: spot, then per leg expiry, strike, contract lookup, quote validation; after the last leg, the collision check. It takes no fill, because nothing before pricing depends on `alpha`.
-- `price_resolution(resolution, snapshot, fill, *, closing=False) -> StructurePrice` does only the arithmetic: per leg the identical calls `fill.price`, `fill.cash_flow`, `FillModel.is_wide` on the stored bid/ask, with `side` flipped through `_OPPOSITE` when `closing`. It does not resolve. It checks that `resolution.ticker`, `obs_date`, `event_date` equal the snapshot's and raises `ValueError` otherwise; it does not re-read quotes, so passing a different chain is a caller error, not a repricing.
+- `price_resolution(resolution, snapshot, fill, *, closing=False) -> StructurePrice` does only the arithmetic: per leg the identical calls `fill.price`, `fill.cash_flow`, `FillModel.is_wide` on the stored bid/ask, with `side` flipped through `_OPPOSITE` when `closing`. It does not resolve. It requires `snapshot` to be the object the Resolution was resolved on (held by weak reference) and raises `ValueError` otherwise; it never re-reads quotes.
 - `price_structure(structure, snapshot, fill, *, pin=None, closing=False)` is `price_resolution(resolve_structure(structure, snapshot, pin=pin), snapshot, fill, closing=closing)`: same signature, same behaviour.
 - **`closing` is a pricing-time argument.** A Resolution is direction-free: its legs carry opening sides, as legacy `ResolvedLeg` entries carry them before the flip.
-- **`pin=`** keeps its meaning: a pinned leg takes `expiry` and `strike` from the pin by name, skips both selectors, and the strike enters the cross-leg `resolved` dict so later unpinned legs can still reference it. Pin entries naming no leg are ignored; a duplicate pin name keeps the last, as the legacy dict does. `pin` accepts `Sequence[ResolvedLeg]` (unchanged, no identity check, as today) and also a `Resolution` or its `.legs`. A `Resolution` pin is identity-checked: if its `ticker` or `structure` differs from the snapshot's ticker or the structure being resolved, `resolve_structure` raises `ValueError` before any leg runs, so a pin resolved on ticker A can never silently price ticker B. The check applies only to the new `Resolution` form, so legacy behaviour is untouched. Bare `.legs` carry no identity and keep the legacy rule.
-- **Exit reuse.** The entry `Resolution` replaces `pin=entry_price.legs`: `exit_res = resolve_structure(structure, exit_snapshot, pin=entry_res)`, then `price_resolution(exit_res, exit_snapshot, fill, closing=True)`. The pinned path therefore still checks the entry's expiry exists on the exit chain and that the contract is listed there. A resolution never prices a chain it was not resolved on without `resolve_structure(pin=...)`, so "closing without pinning is nearly always a bug" stays enforceable.
+- **`pin=`** keeps its meaning: a pinned leg takes `expiry` and `strike` from the pin by name, skips both selectors, and the strike enters the cross-leg `resolved` dict so later unpinned legs can still reference it. Pin entries naming no leg are ignored; a duplicate pin name keeps the last, as the legacy dict does. `pin` accepts `Sequence[ResolvedLeg]` (unchanged, no identity check, as today) and also a `Resolution` or its `.legs`. A `Resolution` pin is identity-checked: a different `ticker` or `structure` raises `ValueError` before any leg runs. Bare `.legs` carry no identity and keep the legacy rule.
+- **Exit reuse.** The entry `Resolution` replaces `pin=entry_price.legs`: `exit_res = resolve_structure(structure, exit_snapshot, pin=entry_res)`, then `price_resolution(exit_res, exit_snapshot, fill, closing=True)`. The pinned path still checks the expiry exists on the exit chain and the contract is listed.
 
 ## 3. Exact-equivalence rules
 
@@ -98,11 +98,11 @@ R3 (determinism) and R5 (identity) are the load-bearing ones; the others are mos
 | **R5 identity** | `Resolution` records ticker, `obs_date`, `event_date`, spot and contracts; `price_resolution` refuses a snapshot whose identity differs. Bound files stay byte-identical until S5. |
 | **R6 causality** | Nothing reads beyond the chain given. A pin carries only expiry and strike, so no entry quote reaches the exit price. |
 
-**Failure order, unchanged.** Per leg, in structure order, the first failure wins: (1) pinned leg: pinned expiry absent from the chain (`StructureError`); else the expiry rule (`StructureError`, in the order in section 3); (2) the strike rule (`StructureError`, messages per kind, including "no chain rows at the selected expiry"); (3) no listed contract (`StructureError: {leg}: no {right} at strike {strike} expiry {date} on {obs}`); (4) the quote check, `ValueError` from `FillModel.mid` for NaN, negative bid, negative ask, crossed, in that order. **After all legs**, `LadderTooCoarse` (a `StructureError` subclass) with legs grouped by `(right, strike, expiry)`, groups sorted as now and rendered with `:g`, including zero-quantity reference legs. Because (4) runs inside `resolve_structure` per leg, a later leg's `StructureError` still cannot pre-empt an earlier leg's `ValueError`, which is the legacy order; `price_resolution` itself cannot fail on data. The `ValueError` for a bad `alpha` is raised by `FillModel` at construction, before either function.
+**Failure order, unchanged.** Per leg, in structure order, the first failure wins: (1) pinned leg: pinned expiry absent from the chain (`StructureError`); else the expiry rule (`StructureError`, in the order in section 3); (2) the strike rule (`StructureError`, messages per kind, including "no chain rows at the selected expiry"); (3) no listed contract (`StructureError: {leg}: no {right} at strike {strike} expiry {date} on {obs}`); (4) the quote check, `ValueError` from `FillModel.mid` for NaN, negative bid, negative ask, crossed, in that order. **After all legs**, `LadderTooCoarse` (a `StructureError` subclass) with legs grouped by `(right, strike, expiry)`, groups sorted as now and rendered with `:g`, including zero-quantity reference legs. Because (4) runs inside `resolve_structure` per leg, a later leg's `StructureError` cannot pre-empt an earlier leg's `ValueError`, as in legacy; `price_resolution` cannot fail on data. A bad `alpha` fails at `FillModel` construction.
 
 ## 6. Equivalence battery
 
-`tests/v2/research/test_price_structure_equivalence.py`, with the frozen oracle in `tests/v2/research/price_structure_oracle_support.py`: a verbatim copy of today's `price_structure` loop, both `select` methods and the collision check, so later engine edits cannot move the reference. A test checks the oracle against `engine.structures` while they are the same code and records its source hash. The battery is parametrised on a subject callable (S1: the current function; S2 onward: `engine.chain_index`).
+`tests/v2/research/test_price_structure_equivalence.py`, with the frozen oracle in `tests/v2/research/price_structure_oracle_support.py`: a verbatim copy of today's `price_structure` loop, both `select` methods and the collision check, so later engine edits cannot move the reference. The battery is parametrised on a subject callable (S1: the current function; S2 onward: `engine.chain_index`).
 
 Each case asserts equal `StructurePrice.to_dict()` and field types, or the same exception TYPE and `str`:
 - Every key of `STRUCTURES`, default parameters, on AMC, BMO and `None` sessions; width and `steps` sweeps for the five short-vol builders, including zero-quantity reference legs.
@@ -112,18 +112,18 @@ Each case asserts equal `StructurePrice.to_dict()` and field types, or the same 
 - `isclose` edges: a target just inside and just outside tolerance, two listed strikes inside one tolerance, duplicate rows for one contract, equidistant strikes in both row orders.
 - Ineligible shapes (NaN or float32 strike, tz-aware expiry, two `dte` for one expiry, empty chain) match the oracle via the fallback.
 - Seeded property test: 200 random chains per structure; results equal or both refuse identically.
-- Call-order independence (shuffled structure orders on one snapshot, repeat calls) and verify mode (an in-place `rows` edit raises `ChainSnapshotMutated`).
+- Call-order independence, verify mode (an in-place `rows` edit raises `ChainSnapshotMutated`), and a planted-defect control (a deliberately wrong tie rule must fail the battery).
 - S2 to S4: the diff of `engine/structures.py` and `engine/fills.py` against `origin/main` is empty.
 
 ## 7. Real-data regression tool
 
 `tools/px_ledger_regression.py` re-prices the board's recorded structures from the prediction ledger and requires exact agreement. **The supervisor runs it after the heavy run; it never runs in CI on real data.** It opens the ledger read-only, reads only the paths given on the command line and writes nothing in the repo, so `--no-ledger` does not apply.
 
-For each prediction row with `strategy`, `structure_params`, a quote date and recorded legs and `entry_cost`, it rebuilds the structure from `STRUCTURES`, loads that date's chain through the board's loader, and prices with BOTH the oracle and the indexed path at the recorded fill. **Pass**: every row identical (all `StructurePrice.to_dict()` fields, or the same exception type and message). Otherwise it exits non-zero and prints up to 20 mismatching row ids. An informational table compares each row with the ledger's recorded contract and cost; drift versus the ledger is reported and, by the pass condition, identical for both paths. Progress goes to stderr (stage start/end, done/total, rate, ETA, RSS); stdout is one JSON summary. `--limit` and `--sample-seed` allow a bounded first pass; verify mode is on.
+For each prediction row with `strategy`, `structure_params`, a quote date and recorded legs and `entry_cost`, it rebuilds the structure from `STRUCTURES`, loads that date's chain through the board's loader, and prices with BOTH the oracle and the indexed path at the recorded fill. **Pass**: every row identical (all `StructurePrice.to_dict()` fields, or the same exception type and message). Otherwise it exits non-zero and prints up to 20 mismatching row ids. Drift versus the ledger's recorded contract and cost is reported only. Progress goes to stderr (stage start/end, done/total, rate, ETA, RSS); stdout is one JSON summary. `--limit`, `--sample-seed` and `--max-rows` (default 200,000, refusing beyond it) bound a run; verify mode is on. It imports the oracle from the S1 test-support module.
 
 ## 8. Benchmark script
 
-`tools/bench_price_structure.py`, no data read: seeded synthetic chains (300 events, put ladders at $0.5/$1/$5/$10 spacings, 3–6 expiries, mixed AMC/BMO), the five short-vol structures (`CND-PS`, `BFLY-P`, `BFLY-P5`, `RAMP7`, `CTR5`), oracle versus indexed. It reports median, p95 and total per call for **cold** (fresh snapshot per call: build plus price) and **warm** (one snapshot across the five structures), the speed-up, and asserts identical outputs on every call. Targets, reported not CI-gated: warm at most 3 ms per call (baseline 12.8 ms; old resolver 1.8 ms), cold not slower than legacy. If cold is slower, the build trims eager work, since single-structure callers such as `engine/score.py` pay it every time.
+`tools/bench_price_structure.py`, no data read: seeded synthetic chains (300 events, put ladders at $0.5/$1/$5/$10 spacings, 3–6 expiries, mixed AMC/BMO), the five short-vol structures (`CND-PS`, `BFLY-P`, `BFLY-P5`, `RAMP7`, `CTR5`), oracle versus indexed. It reports median, p95 and total per call for **cold** (fresh snapshot per call: build plus price) and **warm** (one snapshot across the five structures), the speed-up, and asserts identical outputs on every call. Targets, reported not CI-gated: warm at most 3 ms per call (baseline 12.8 ms), cold not slower than legacy, since single-structure callers such as `engine/score.py` pay the build every time. It runs with verify mode off (production) and reports a verify-on row separately.
 
 ## 9. Slice split list (about 150 code lines each; test code excluded)
 
@@ -140,10 +140,6 @@ Estimates per slice (code / test / doc lines): S1 0 / 350 / 0; S2 150 / 250 / 10
 
 EXP-188/189 adapters adopting the split is separate later work in `experiments/`, under the same binding decision; it can call `engine.chain_index` directly, so S5 is not on its path.
 
-## 10. Standard-tool check
+## 10. Standard tools and open point
 
-numpy and pandas only. No library covers exact legacy tie rules, and `np.isclose` is called, not re-implemented. No standard format is hand-rolled.
-
-## 11. Open point for the supervisor
-
-Section 0: whether S5 (the bound-file edit) is wanted at all, or callers adopt `engine.chain_index` directly and `price_structure` stays as the oracle.
+numpy and pandas only; no library covers the legacy tie rules, and `np.isclose` is called, not re-implemented. Open for the supervisor: whether S5 is wanted, or callers adopt `engine.chain_index` directly and `price_structure` stays as the oracle.

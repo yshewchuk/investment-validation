@@ -243,10 +243,8 @@ Stated so nobody has to rediscover them.
 
 ## 9. Pricing contract: chain index and Resolution (design; lands with slices S2-S4)
 
-Design and rationale: `guides/price_structure_index_design.md`.
+Design: `guides/price_structure_index_design.md`.
 
-- `price_structure(structure, snapshot, fill, *, pin=None, closing=False)` keeps its signature and its outputs bit for bit: same strikes, prices, cash flows, flags, and the same exception types and messages, `LadderTooCoarse` included. Failure order is per leg (expiry, strike, contract, quote `ValueError`), then the collision check.
-- A lazily built per-snapshot chain index (module `engine/chain_index.py`) serves the expiry and strike rules; `np.isclose` defaults (`rtol=1e-5`, `atol=1e-8`, tolerance scaled by the target) decide every strike match; row-order tie rules are preserved. Snapshots outside the proven shape fall back to the legacy path.
-- `ChainSnapshot.rows` is immutable once priced. Verify mode (`ENGINE_CHAIN_INDEX_VERIFY=1`) raises `ChainSnapshotMutated` on an in-place edit.
-- `resolve_structure(structure, snapshot, *, pin=None) -> Resolution` and `price_resolution(resolution, snapshot, fill, *, closing=False) -> StructurePrice`; `price_structure` is their composition. `pin=` may be a `Resolution`; `closing` is a pricing-time argument.
-- `engine/structures.py` and `engine/fills.py` are inside the closure of registered runner manifests and the v14 SIZE plan; they stay byte-identical until the supervisor clears the binding (design section 0).
+- `price_structure` keeps its signature and outputs bit for bit, including exception types and messages.
+- `ChainSnapshot.rows` is immutable once priced.
+- `price_structure` becomes the composition of `resolve_structure` and `price_resolution`.
