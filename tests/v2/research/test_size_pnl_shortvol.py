@@ -10,7 +10,7 @@ from engine.entry_rules import MAX_REL_SPREAD, MCAP_FLOOR
 from engine.fills import FillModel
 from engine.forecast_sizing import FORECAST_SIZED, forecast_params
 from engine.pnl_sim import expected_pnl
-from engine.portfolio import CONTRACT_MULTIPLIER
+from engine.portfolio import CAPITAL_PER_TRADE, CONTRACT_MULTIPLIER
 from engine.score import _mean_relative_spread
 from engine.structures import BUY, CALL, PUT, STRUCTURES, ChainSnapshot, ExpirySelector, price_structure
 from experiments import size_pnl_ladder as lad
@@ -335,25 +335,39 @@ def test_score_events_negative_cost_is_not_a_debit(pool):
     assert out["reason"] == "entry_not_debit" and out["status"] == "undetermined" and math.isnan(out["exp_pnl_sim"])
 
 
-def test_debit_of_a_nanodollar_is_simulated(pool):
+def test_debit_of_a_nanodollar_is_simulated():
     # Mids are 1.5 everywhere except the BUY at 94 (mid 1.5 + 1e-9): the entry debit is 1e-9 a share, and any positive debit is simulated.
     thin = chunk_of(("A", {}), entry=lambda k: (1.0, 2.0 + 2e-9) if k == 94 else (1.0, 2.0))
-    out = run(thin, events_for("A"), pool).iloc[0]
-    assert out["entry_cost"] == pytest.approx(1e-9, abs=1e-12)
+    # Hand-supplied simulation on the chunk's strike grid 80..120. A quadratic is used rather than a line: a line is
+    # symmetric about the condor's centre (100), so the BUY and SELL terms would cancel and the oracle would be -1 for any sign.
+    grid = np.arange(80.0, 121.0)
+    means = 0.001 * (grid - 80.0) ** 2
+    sims = {"A": (grid, means)}
+    out = sv.score_events(thin, events_for("A"), sims, "CND-PS").iloc[0]
     assert out["status"] == "scored" and math.isfinite(out["exp_pnl_sim"]) and pd.isna(out["reason"])
-    # Independent oracle, by hand (no structure_pnl / structure_value): BUY legs close at +mean, SELL legs at -mean,
-    # each at the simulated mean of its listed strike. The cost is ~1e-9, so the return is huge: this checks the formula.
-    grid, means = sv.simulate(thin, events_for("A"), pool, draws=DRAW)["A"]
-    legs, _ = sv.resolve(thin, 0, "CND-PS", PRED)
-    value = sum((1.0 if leg["side"] == BUY else -1.0) * leg["qty"] * means[np.flatnonzero(grid == leg["strike"])[0]]
-                for leg in legs if leg["qty"] > 0)
-    assert out["exp_pnl_sim"] == pytest.approx((value - out["entry_cost"]) / out["entry_cost"], rel=1e-9)
+    # Independent oracle, by hand from the literals. CND-PS traded legs, one contract each (as in the cost assertion
+    # 2*1.36 - 2*1.09): BUY 94 and 106, SELL 97 and 103. A BUY leg closes at +mean, a SELL leg at -mean.
+    def mean_at(k):
+        return 0.001 * (k - 80.0) ** 2
+    value = mean_at(94) + mean_at(106) - mean_at(97) - mean_at(103)  # 0.196 + 0.676 - 0.289 - 0.529 = 0.054
+    cost = 1e-9
+    assert out["entry_cost"] == pytest.approx(cost, abs=1e-12)
+    assert out["exp_pnl_sim"] == pytest.approx((value - cost) / cost, rel=1e-3)
 
 
 def test_score_accepts_a_nanodollar_debit():
     thin = chunk_of(("A", {}), entry=lambda k: (1.0, 2.0 + 2e-9) if k == 94 else (1.0, 2.0))
     scored = sv.score(thin, events_for("A"), taken(thin, "A"), "CND-PS", 0.5)
     assert len(scored) == 1 and scored.iloc[0]["entry_cost"] == pytest.approx(1e-9, abs=1e-12)
+    row = scored.iloc[0]
+    # Exit quotes default to locked at 1.0 on rung 1 (put_legs), so every leg marks at 1.0 under any alpha.
+    # One contract each: BUY 94 and 106 at +1.0 each, SELL 97 and 103 at -1.0 each, so exit = 1 + 1 - 1 - 1 = 0.0.
+    assert row["rung"] == "rung1"
+    assert row["exit_value"] == pytest.approx(0.0, abs=1e-9)
+    assert row["pnl_per_share"] == pytest.approx(row["exit_value"] - 1e-9, abs=1e-9)
+    # Lots from the capital rule by hand, on the row's own entry cost (about 1e-9, so the count is ~1e11 and float
+    # noise in the cost matters: use the cost the row carries, not the literal).
+    assert row["lots"] == math.floor(CAPITAL_PER_TRADE / (row["entry_cost"] * 100))
 
 
 def test_score_events_refuses_bad_alpha(pool):
