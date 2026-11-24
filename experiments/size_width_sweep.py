@@ -66,7 +66,8 @@ class Sweep:
 
     def add_month(self, chunk, events, pool, *, output, sessions, draws=DRAWS):
         """Simulate once, score every (structure, k) and E, decide on the accumulated history. ``output`` False (burn-in) only adds history.
-        ``sessions`` maps event_id -> (entry_date, exit_date); a missing event leaves NaT dates and the account refuses it."""
+        ``sessions`` maps event_id -> (entry_date, exit_date); a missing event leaves NaT dates and the account refuses it.
+        Returns the month's fresh taken rows (a frame with the ``_TAKEN`` columns plus ``arm``; empty when ``output`` is False)."""
         started = time.time()
         self.fresh = []
         sims = self.pricing.simulate(chunk, events, pool, draws=draws)

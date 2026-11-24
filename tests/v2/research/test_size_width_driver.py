@@ -78,7 +78,7 @@ def _loaded(src, ids=None):
     return {"ids": ids, "plan": base._plan_window(PLAN_FRAME, base._window("outer"), ids), "table": _m0_table(),
             "labels": readers.read_labels(src.fetch, src.admitted, start=base.INNER[0], end=base.OUTER[0], event_ids=ids),
             "facts_all": base._load_facts(src, set(EVENTS)), "sessions": base._sessions(src), "exits": base._exits(src),
-            "inputs_hash": "H"}
+            "inputs_hash": "H", "inputs": {"stage": "inputs", "inputs_hash": "H"}}
 
 
 def _inner_summary(out, inputs_hash="H", c_status="smoke_no_fake"):
@@ -179,6 +179,7 @@ def test_outer_without_an_inner_summary_refuses_tuning_receipt_missing(tmp_path,
     src = sources()
     with pytest.raises(Refusal) as caught:
         driver._outer(src, tmp_path / "out", _loaded(src))
+    assert caught.value.code == CONFLICT
     assert caught.value.details["reason"] == "tuning_receipt_missing"
 
 
@@ -187,6 +188,7 @@ def test_outer_with_an_inner_summary_for_other_inputs_refuses_tuning_receipt_cha
     _inner_summary(tmp_path / "out", inputs_hash="OTHER")
     with pytest.raises(Refusal) as caught:
         driver._outer(src, tmp_path / "out", _loaded(src))
+    assert caught.value.code == CONFLICT
     assert caught.value.details["reason"] == "tuning_receipt_changed"
 
 
@@ -195,6 +197,7 @@ def test_outer_with_a_missing_tuning_receipt_refuses_before_any_month(tmp_path, 
     _inner_summary(out)
     with pytest.raises(Refusal) as caught:
         driver._outer(src, out, _loaded(src))
+    assert caught.value.code == CONFLICT
     assert caught.value.details["reason"] == "tuning_receipt_missing"
     assert not (out / "months").exists()
 
@@ -218,6 +221,8 @@ def test_outer_freezes_each_2025_month_before_its_labels_are_read(tmp_path, m0, 
     assert seen == [("2025-01", True), ("2025-02", True)]
     assert summary["months"] == 3 and summary["arms"] == ["A", "B", "D", "E"]
     assert (out / "receipts" / "outer_summary.json").exists()
+    outer = receipts.load_receipt(out / "receipts" / "outer_summary.json")
+    assert outer["inputs_outer"].startswith("sha256:") and outer["labels_2025"].startswith("sha256:")
 
 
 # ---- stats and declined share -----------------------------------------------------
@@ -255,3 +260,36 @@ def test_declined_share_is_declined_over_declined_plus_taken():
     sweep.declined[(NAME, "E")] = {"thin_history": 2}
     sweep.declined[(NAME, 2.0)] = {}
     assert driver._declined(sweep) == {NAME: {"1.0": 0.5, "E": 1.0, "2.0": 0.0}}
+
+
+# ---- load: input binding and refusals ---------------------------------------------
+
+def test_inputs_hash_is_stable_on_rerun_and_binds_the_inner_m0_table(m0, monkeypatch):
+    src = sources()
+    first = driver._load(src, "inner", None, OK())["inputs_hash"]
+    assert driver._load(src, "inner", None, OK())["inputs_hash"] == first
+
+    def moved(bound, roster, admitted, production, **kw):
+        table = _m0_table()
+        table.loc["E1", "pred_move"] = 6.0  # one inner event's prediction moves
+        return {"M0": {"status": "ready", "table": table, "binding": {"model": "M0"}}}
+
+    monkeypatch.setattr(readers, "model_tables", moved)
+    assert driver._load(src, "inner", None, OK())["inputs_hash"] != first
+
+
+def test_null_plan_date_refuses_plan_dates_null_in_load(m0):
+    plan = PLAN_FRAME.copy()
+    plan.loc[plan["event_id"] == "E1", "entry_date"] = pd.NaT
+    with pytest.raises(OpsError) as caught:
+        driver._load(sources(plan_frame=plan), "inner", None, OK())
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.details["reason"] == "plan_dates_null"
+
+
+def test_an_inner_window_with_no_event_refuses_empty_population_in_load(m0, monkeypatch):
+    monkeypatch.setattr(base, "_plan_window", lambda *a, **k: PLAN_FRAME.iloc[0:0])
+    with pytest.raises(Refusal) as caught:
+        driver._load(sources(), "inner", None, OK())
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "empty_population"

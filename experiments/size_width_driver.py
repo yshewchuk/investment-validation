@@ -114,11 +114,15 @@ def _load(src, stage, ids, receipt):
     table = ready["M0"]["table"]
     if table.empty:
         raise Refusal(_CONFLICT, "no event survives the exclusions", {"reason": "empty_population"})
+    survivors = facts_all[~facts_all.index.astype(str).isin(base._facts_missing(facts_all))]
+    inner_ids = {str(e) for e in inner_window["event_id"]}
+    inner_table = table[pd.to_datetime(table["event_date"]) < pd.Timestamp(base.OUTER[0])]
     body = {"stage": "inputs", "spec_hash": receipt["spec_hash"], "identity": bound["identity"], "snapshot": src.snapshot_id,
             "crush_table_hash": src.crush_table_hash, "production_hash": src.production_hash,
-            "labels": content_hash(base._label_rows([labels])), "scope": base._scope(ids)}
+            "labels": content_hash(base._label_rows([labels])), "scope": base._scope(ids),
+            "inner_table": content_hash(sorted([str(i), str(d), float(m), float(c)] for i, d, m, c in zip(inner_table.index, inner_table["event_date"], inner_table["pred_move"], inner_table["pred_crush"]))),
+            "inner_plan": content_hash(base._plan_rows(inner_window)), "inner_facts": content_hash(base._facts_rows(survivors, inner_ids))}
     inputs_hash = content_hash(body)
-    survivors = facts_all[~facts_all.index.astype(str).isin(base._facts_missing(facts_all))]
     inputs = {**body, "inputs_hash": inputs_hash, "table": base._table_binding(ready["M0"], ids),
               "plan": content_hash(base._plan_rows(plan)), "facts": content_hash(base._facts_rows(survivors, stage_ids))}
     return {"ids": ids, "plan": plan, "table": table, "labels": labels, "facts_all": facts_all, "sessions": base._sessions(src),
@@ -169,7 +173,7 @@ def _outer(src, out, loaded):
     arms = [a for a in ("A", "B", "C", "D", "E") if a != "C" or inner["c_status"] == "ok"]
     by = {arm: tuning.frozen(out, arm, inputs_hash) for arm in arms}
     sweep, labels, table, sessions = Sweep(ladder=True, pricing=PRICING), loaded["labels"], loaded["table"], loaded["sessions"]
-    total, started, count = _total(plan), time.monotonic(), 0
+    total, started, count, fresh_labels = _total(plan), time.monotonic(), 0, []
     for count, (chunk, events, output) in enumerate(_months(src, plan, table, loaded["facts_all"], loaded["exits"], pd.Timestamp(base.OUTER[0])), start=1):
         period = _period(events)
         fresh = sweep.add_month(chunk, events, _pool(table, labels, period.start_time), output=output, sessions=sessions)
@@ -177,12 +181,14 @@ def _outer(src, out, loaded):
         if output:
             decisions.freeze_month(out, period, [fresh.assign(model_id="M0", book="short_vol", arm_or_rule=fresh["arm"], status="taken", reason=None)])
             got = readers.read_labels(src.fetch, src.admitted, start=period.start_time, end=(period + 1).start_time, event_ids=ids)
+            fresh_labels.append(got)
             labels = pd.concat([labels, got])
     results = tuning.run_outer(sweep, out, arms, inputs_hash)
     by = {"production": {n: 1.0 for n in NAMES}, **by}
     stats = {label: {"2025": _stats(sweep, by[label], WINDOWS["2025"])} for label in results}
     body = {"stage": "outer", "inputs_hash": inputs_hash, "scope": base._scope(ids), "smoke": ids is not None, "arms": arms,
-            "results": {label: {"2025": results[label]} for label in results}, "stats": stats, "declined": _declined(sweep)}
+            "results": {label: {"2025": results[label]} for label in results}, "stats": stats, "declined": _declined(sweep),
+            "inputs_outer": content_hash(loaded["inputs"]), "labels_2025": content_hash(base._label_rows(fresh_labels))}
     receipts.write_receipt(out / "receipts" / "outer_summary.json", body)
     return {"stage": "outer", "arms": arms, "months": count}
 
@@ -198,10 +204,10 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_width_prereg.require
     if stage not in base.STAGES:
         raise ValueError(f"stage must be one of {base.STAGES}, got {stage!r}")
     out = Path(out_dir)
-    out.mkdir(parents=True, exist_ok=True)
     ids = base._smoke(src, event_ids)
     _log(f"scope={'smoke' if ids is not None else 'full'} events={'all' if ids is None else len(ids)}")
     loaded = _load(src, stage, ids, receipt)
+    out.mkdir(parents=True, exist_ok=True)
     base._receipt(out / "receipts" / f"inputs_{stage}.json", loaded["inputs"], "inputs_receipt_changed")
     summary = _inner(src, out, loaded) if stage == "inner" else _outer(src, out, loaded)
     _log(f"stage={stage} end elapsed={time.monotonic() - started:.1f}s rss={base._rss_mb():.0f}MB")
