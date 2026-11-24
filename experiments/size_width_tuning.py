@@ -150,7 +150,7 @@ def fake_model_ok(model):
 def _valid(arm, receipt):
     """True when ``receipt`` is EXP-189 arm ``arm`` on the inner window with a dict body; A, B, C and D bodies hold exactly the units
     of ``arm``, each with its members and a grid k (a bool is not a k). An arm C receipt also needs a calibrated fake with the
-    protocol N, the seed tag, and a valid fake model."""
+    protocol N and sim-draws count, the seed tag, and a valid fake model."""
     body = receipt.get("body")
     if not (receipt.get("experiment") == "EXP-189" and receipt.get("arm") == arm and receipt.get("window") == "2023H2-2024"
             and isinstance(body, dict)):

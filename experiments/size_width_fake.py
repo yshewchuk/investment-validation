@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from engine.pnl_sim import DRAWS
+from experiments import label_availability
 from experiments import size_pnl_receipts as receipts
 from experiments import size_width_errmodel as errmodel
 from experiments.size_pnl_pool import build_pool
@@ -54,12 +55,19 @@ def fake_pred(model, event_ids, labels, d):
 
 
 def _run(months, table, labels, pred, sessions, *, draws, names):
-    """One full sweep on the forecast Series ``pred``: the pool of a model whose forecasts are ``pred`` (crush stays M0's),
-    then the unit score of every (structure, k) on the inner window."""
+    """One full sweep on the forecast Series ``pred``: per calendar month, a pool of a model whose forecasts are ``pred``
+    (crush stays M0's), built causally: rows with event_date before the month start, and labels whose ``available`` date
+    is before the month start (the labels frame needs an ``available`` column, else a refusal). Then the unit score of
+    every (structure, k) on the inner window."""
     months, names = list(months), tuple(names)
-    pool = build_pool(table.assign(pred_move=table.index.astype(str).map(pred)), labels)
+    if "available" not in labels.columns:
+        raise Refusal("EXPERIMENT_IDENTITY_CONFLICT", "labels need the available column", {"reason": "labels_availability_missing"})
     sweep = Sweep(names=names)
     for chunk, events, output in months:
+        start = pd.to_datetime(events["event_date"]).dt.to_period("M").min().start_time
+        t = table[pd.to_datetime(table["event_date"]) < start]
+        printed = labels[label_availability.printed_before(labels["available"], start.date().isoformat())]
+        pool = build_pool(t.assign(pred_move=t.index.astype(str).map(pred)), printed)
         sweep.add_month(chunk, events.assign(pred_move=events["event_id"].astype(str).map(pred)), pool,
                         output=output, sessions=sessions, draws=draws)
     return {name: {k: unit_score(sweep.rows([(name, k)], INNER), INNER) for k in sweep.ks} for name in names}

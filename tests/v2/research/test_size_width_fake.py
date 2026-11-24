@@ -42,8 +42,9 @@ def _world(n=4000, seed=11):
     truth = {"L": float(np.log(4.0)), "b": 0.8, "s": 0.25, "mean_log_y": float(np.mean(np.log(y)))}
     pred = errmodel.fake_forecast(truth, y, rng.standard_normal(n))
     table = pd.DataFrame({"event_date": dates, "pred_move": pred, "pred_crush": rng.normal(-15, 3, n)}, index=index)
-    labels = pd.DataFrame({"abs_move": y, "crush_pct_iv30": table["pred_crush"].to_numpy() + rng.normal(0, 5, n)},
-                          index=index)
+    available = (dates + pd.Timedelta(days=1)).strftime("%Y-%m-%d").to_numpy()
+    labels = pd.DataFrame({"abs_move": y, "crush_pct_iv30": table["pred_crush"].to_numpy() + rng.normal(0, 5, n),
+                           "available": available}, index=index)
     return table, labels, errmodel.fit(pred, y)
 
 
@@ -276,11 +277,16 @@ def test_anchor_scores_every_structure_and_k_and_t4_marks_thin_cells(monkeypatch
 
 def _direct(months, table, labels, pred, sessions, name="CND-PS", k=1.0):
     """(trades, total_return) of the last month's taken set, by the module functions directly: no fake._run, no Sweep.
-    Follows Sweep's scaled-events route at a fixed k: each month is simulated once on the unscaled forecast events, scored
-    on the events with pred_move x k (NaN stays NaN), then decided on the whole history and priced at mid marks."""
-    pool = build_pool(table.assign(pred_move=table.index.astype(str).map(pred)), labels)
+    Each month's pool is built by hand: rows with event_date before the month start, labels whose ``available`` string is
+    before the month-start ISO string. Follows Sweep's scaled-events route at a fixed k: each month is simulated once on the
+    unscaled forecast events, scored on the events with pred_move x k (NaN stays NaN), then decided on the whole history
+    and priced at mid marks."""
     history, chunk_last, scaled_last = [], None, None
     for chunk, events, _output in months:
+        start = pd.to_datetime(events["event_date"]).dt.to_period("M").min().start_time
+        rows_before = table[pd.to_datetime(table["event_date"]) < start]
+        labels_before = labels[labels["available"] < start.date().isoformat()]
+        pool = build_pool(rows_before.assign(pred_move=rows_before.index.astype(str).map(pred)), labels_before)
         forecast = events.assign(pred_move=events["event_id"].astype(str).map(pred))
         scaled_events = forecast.assign(pred_move=forecast["pred_move"] * k)
         sims = sv.simulate(chunk, forecast, pool, draws=DRAW)
@@ -601,3 +607,49 @@ def test_run_fake_stores_the_sim_draw_count_in_the_receipt(tmp_path, monkeypatch
     assert res["status"] == "ok"
     receipt = json.loads((tmp_path / "receipts" / "tuning_C.json").read_text(encoding="utf-8"))
     assert receipt["fake"]["sim_draws"] == DRAW
+
+
+# ---- causal per-month pools -----------------------------------------------
+
+def test_anchor_with_no_label_printed_before_any_month_takes_no_trades(monkeypatch):
+    _small_window(monkeypatch)
+    table, labels, _ = _world()
+    months, sessions = _months()
+    none_printed = labels.assign(available="2099-01-01")
+    res = fake.run_anchor(months, table, none_printed, sessions, draws=DRAW)
+    assert all(res[name][k]["trades"] == 0 for name in NAMES for k in GRID)
+    normal = fake.run_anchor(months, table, labels, sessions, draws=DRAW)
+    assert normal["CND-PS"][1.0]["trades"] > 0
+
+
+def test_label_printed_after_a_month_start_is_excluded_from_that_month(monkeypatch):
+    _small_window(monkeypatch)
+    table, labels, _ = _world()
+    months, sessions = _months()
+    # Every label is printed on 2024-05-15: June's pool (start 2024-06-01) holds them, May's (start 2024-05-01) holds none.
+    late = labels.assign(available="2024-05-15")
+    res = fake.run_anchor(months, table, late, sessions, draws=DRAW)
+    assert set(res) == set(NAMES)
+    for name in NAMES:
+        assert set(res[name]) == set(GRID)
+    actual = late["abs_move"].reindex(table.index).to_numpy(dtype=float)
+    ok = np.isfinite(actual) & (actual > 0)
+    pred = pd.Series(np.where(ok, actual, np.nan), index=table.index.astype(str))
+    n_direct, ret_direct = _direct(months, table, late, pred, sessions, name="CND-PS", k=1.0)
+    assert res["CND-PS"][1.0]["trades"] == n_direct
+    assert res["CND-PS"][1.0]["ret"] == pytest.approx(ret_direct)
+
+
+def test_labels_without_an_available_column_refuse_in_run_draw_and_run_anchor(monkeypatch):
+    _small_window(monkeypatch)
+    table, labels, model = _world()
+    months, sessions = _months()
+    bare = labels.drop(columns=["available"])
+    with pytest.raises(Refusal) as caught:
+        fake.run_draw(months, table, bare, model, 0, sessions, draws=DRAW)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.details["reason"] == "labels_availability_missing"
+    with pytest.raises(Refusal) as caught:
+        fake.run_anchor(months, table, bare, sessions, draws=DRAW)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.details["reason"] == "labels_availability_missing"
