@@ -1,4 +1,4 @@
-"""EXP-188 Amendment 3 G_PROD: production's STR-THRU gate, refit ONCE through 2024 (`size_pnl_gate_fold fit`), applied per model to 2025 straddle candidates; design section 'Amendment 3'. Sensitivity only, never a verdict; no refit, no threshold change. Both files are verified against their expected sha256 before either is parsed.
+"""EXP-188 Amendment 3 G_PROD: production's STR-THRU gate, refit ONCE through 2024 (`size_pnl_gate_fold fit`), applied per model to 2025 straddle candidates; design section 'Amendment 3'. G_PROD is now the straddle book's only rule (Amendment 6), no longer a sensitivity arm; no refit, no threshold change. Both files are verified against their expected sha256 before either is parsed.
 """
 import io
 import os
@@ -200,7 +200,7 @@ def month_decider(gate, table, labels, start_m):
                 return "undetermined", reason
             return ("taken", None) if ret >= gate.threshold else ("not_taken", "below_gate_threshold")
 
-        dec = straddle.decide(events, pd.DataFrame({"event_date": [], "edge": []}), RULE, chunk, gate=verdict)
+        dec = straddle.decide(events, chunk, verdict)
         return dec.assign(gate_score=dec["event_id"].astype(str).map(lambda e: scores[e][0]))
 
     return decide

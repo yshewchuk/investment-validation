@@ -1,4 +1,4 @@
-"""EXP-188 S7: straddle rules. Synthetic fixtures only; no repository."""
+"""EXP-188 S7: the straddle under production's G_PROD gate. Synthetic fixtures only; no repository."""
 import math
 from types import SimpleNamespace
 
@@ -6,14 +6,20 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from engine.fills import FillModel
 from engine.portfolio import CAPITAL_PER_TRADE, CONTRACT_MULTIPLIER
 from engine.score import GATE_MCAP_FLOOR
+from engine.structures import CALL, PUT, StructurePrice
+from engine.v2.ops.errors import OpsError
+from experiments import size_pnl_gate_agreement as ga
 from experiments import size_pnl_ladder as lad
 from experiments import size_pnl_readers as rd
 from experiments import size_pnl_straddle as sd
+from experiments.size_pnl_gate_fold import REGISTERED_THRESHOLD
 
 NAN = float("nan")
-EMPTY = pd.DataFrame({"event_date": pd.Series([], dtype=object), "edge": pd.Series([], dtype=float)})
+GATE = lambda ev: ("taken", None)
+NOT_TAKEN = lambda ev: ("not_taken", "below_gate_threshold")
 
 
 def pair(k, *, call_e=(2.0, 2.2), put_e=(1.8, 2.0), call_x=(1.0, 1.4, 1), put_x=(0.6, 1.0, 1)):
@@ -37,61 +43,99 @@ def good(*eids):
     return lad._pack([rec(e, 100.0, pair(100)) for e in eids], {})
 
 
-def prior(n=120, date="2024-01-15"):
-    """n history rows in the window before a June 2024 decision; edges 0.00 .. (n-1)/100."""
-    return pd.DataFrame({"event_date": [date] * n, "edge": np.arange(n) / 100.0})
-
-
 def ev(eid, edge, *, date="2024-06-10", mcap=20e9, implied=5.0, pred=None):
     """Event row whose forecast edge is ``edge`` (pred - implied). NaN ``implied`` or ``pred`` means missing."""
     return {"event_id": eid, "event_date": date, "pred_abs_move": 5.0 + edge if pred is None else pred,
             "implied_move": implied, "mcap_usd": mcap}
 
 
-# ---- atm_legs -------------------------------------------------------------
+def legs(chunk, i=0):
+    """(call_idx, put_idx) that ``resolve`` picks for event ``i`` (None, None on a refusal)."""
+    return sd.resolve(chunk, i)[1:3]
 
-def test_atm_nearest_strike():
+
+def only(*taken):
+    """A gate stub that takes the listed event ids and refuses the rest."""
+    return lambda event: ("taken", None) if event["event_id"] in taken else ("not_taken", "below_gate_threshold")
+
+
+# ---- resolve ----------------------------------------------------------------
+
+def test_resolve_nearest_call_strike_chosen():
     chunk = lad._pack([rec("E", 101.0, pair(95) + pair(100) + pair(105))], {})
-    c, p = sd.atm_legs(chunk, 0)
+    priced, c, p, reason = sd.resolve(chunk, 0)
+    assert reason is None and isinstance(priced, StructurePrice)
     assert chunk["strike"][c] == 100 and chunk["right"][c] == 1
     assert chunk["strike"][p] == 100 and chunk["right"][p] == 0
 
 
-def test_atm_tie_goes_to_lower_strike():
+def test_resolve_tie_goes_to_lower_strike_on_an_ascending_ladder():
     chunk = lad._pack([rec("E", 102.5, pair(100) + pair(105))], {})
-    c, _ = sd.atm_legs(chunk, 0)
+    c, _ = legs(chunk)
     assert chunk["strike"][c] == 100
 
 
-def test_atm_bad_entry_quote_keeps_true_strike():
-    chunk = lad._pack([rec("E", 100.0, pair(95) + pair(100, call_e=(NAN, NAN)))], {})
-    c, p = sd.atm_legs(chunk, 0)
-    assert chunk["strike"][c] == 100 and chunk["right"][c] == 1
-    assert chunk["strike"][p] == 100 and chunk["right"][p] == 0
-    st = sd.entry_state(chunk, 0, mcap=20e9)
-    assert st["status"] == "undetermined" and st["reason"] == "entry_quote_unusable"
-
-
-def test_atm_call_without_put_at_atm_is_none_no_shift():
+def test_call_without_put_at_the_atm_strike_refuses_without_shifting():
     # Healthy pairs at 95 and 110 do not rescue an ATM strike (100) that has a call but no put.
     call_only = [(1, 100, 2.0, 2.2, 1.0, 1.4, 1)]
     chunk = lad._pack([rec("E", 100.0, pair(95) + pair(110) + call_only)], {})
-    assert sd.atm_legs(chunk, 0) is None
-    assert sd.decide(pd.DataFrame([ev("E", 1.0)]), EMPTY, "R_L2", chunk).loc[0, "reason"] == "no_atm_pair"
+    assert sd.resolve(chunk, 0) == (None, None, None, "no_atm_pair")
 
 
-def test_atm_put_only_at_nearest_call_strike_is_none():
+def test_atm_put_only_at_nearest_call_strike_is_no_atm_pair():
     # Full pair at 95, call-only at 100: the ATM strike is the nearest call (100), which has no put.
     chunk = lad._pack([rec("E", 100.0, pair(95) + [(1, 100, 2.0, 2.2, 1.0, 1.4, 1)])], {})
-    assert sd.atm_legs(chunk, 0) is None
+    assert sd.resolve(chunk, 0)[3] == "no_atm_pair"
 
 
-def test_atm_none_without_common_strike_or_finite_spot():
-    calls = [(1, 100, 2.0, 2.2, 1.0, 1.4, 1)]
-    puts = [(0, 105, 1.8, 2.0, 0.6, 1.0, 1)]
-    chunk = lad._pack([rec("E", 100.0, calls + puts), rec("F", NAN, pair(100))], {})
-    assert sd.atm_legs(chunk, 0) is None
-    assert sd.atm_legs(chunk, 1) is None
+def test_put_only_event_is_no_atm_pair():
+    chunk = lad._pack([rec("po", 100.0, [(0, 100, 1.8, 2.0, 0.6, 1.0, 1)])], {})
+    assert sd.resolve(chunk, 0)[3] == "no_atm_pair"
+
+
+def test_non_finite_spot_is_no_atm_pair():
+    chunk = lad._pack([rec("F", NAN, pair(100))], {})
+    assert sd.resolve(chunk, 0) == (None, None, None, "no_atm_pair")
+
+
+@pytest.mark.parametrize("kw", [{"put_e": (2.2, 2.0)}, {"call_e": (NAN, 2.2)}], ids=["crossed", "nan_bid"])
+def test_crossed_or_nan_bid_is_entry_quote_unusable_and_never_taken(kw):
+    chunk = one(**kw)
+    assert sd.resolve(chunk, 0) == (None, None, None, "entry_quote_unusable")
+    assert sd.entry_state(chunk, 0, mcap=20e9)["reason"] == "entry_quote_unusable"
+    out = sd.decide(pd.DataFrame([ev("E", 1.0)]), chunk, GATE)
+    assert out.loc[0, "status"] == "undetermined" and out.loc[0, "reason"] == "entry_quote_unusable"
+
+
+@pytest.mark.parametrize("kw, cost", [({"put_e": (0.0, 0.5)}, 2.1 + 0.25), ({"call_e": (2.0, 2.0)}, 2.0 + 1.9)],
+                         ids=["zero_bid_put", "locked_call"])
+def test_zero_bid_and_locked_entry_quotes_are_priced_at_mid(kw, cost):
+    chunk = one(**kw)
+    priced, c, p, reason = sd.resolve(chunk, 0)
+    assert reason is None and priced.cost == pytest.approx(cost)
+    assert sd.entry_state(chunk, 0, mcap=20e9)["status"] == "ok"
+    out = sd.decide(pd.DataFrame([ev("E", 1.0)]), chunk, GATE)
+    assert out.loc[0, "status"] == "taken" and pd.isna(out.loc[0, "reason"])
+
+
+@pytest.mark.parametrize("alpha", [0.5, 0.25])
+def test_resolve_cost_is_the_fill_model_buy_sum_on_three_events(alpha):
+    chunk = lad._pack([rec("A", 100.0, pair(100)),
+                       rec("B", 97.0, pair(95) + pair(100, call_e=(2.4, 2.6))),
+                       rec("C", 210.0, pair(210, put_e=(3.0, 3.4), call_e=(4.1, 4.5)))], {})
+    fill = FillModel(alpha)
+    for i in range(3):
+        _, c, p, reason = sd.resolve(chunk, i, alpha)
+        assert reason is None
+        expected = sum(float(fill.buy(chunk["bid_e"][k], chunk["ask_e"][k])) for k in (c, p))
+        assert sd.resolve(chunk, i, alpha)[0].cost == pytest.approx(expected)
+
+
+def test_chain_snapshot_puts_only_holds_only_puts():
+    chunk = good("E")
+    assert list(sd.chain_snapshot(chunk, 0, puts_only=True).rows["right"]) == [PUT]
+    rows = sd.chain_snapshot(chunk, 0).rows
+    assert list(rows["right"]) == [PUT, CALL] and list(rows["strike"]) == [100, 100]
 
 
 # ---- entry_state ----------------------------------------------------------
@@ -100,17 +144,7 @@ def test_entry_healthy_reports_spread():
     st = sd.entry_state(one(), 0, mcap=20e9)
     assert st["status"] == "ok" and st["reason"] is None
     assert st["rel_spread"] == pytest.approx((0.2 / 2.1 + 0.2 / 1.9) / 2)
-
-
-@pytest.mark.parametrize("kw", [
-    {"put_e": (0.0, 0.5)},        # zero bid
-    {"call_e": (2.0, 2.0)},       # locked
-    {"put_e": (2.2, 2.0)},        # crossed
-    {"call_e": (NAN, 2.2)},       # NaN
-])
-def test_entry_bad_quotes_are_undetermined(kw):
-    st = sd.entry_state(one(**kw), 0, mcap=20e9)
-    assert st["status"] == "undetermined" and st["reason"] == "entry_quote_unusable"
+    assert st["priced"].cost == pytest.approx(2.1 + 1.9)
 
 
 def test_entry_missing_mcap_and_no_pair():
@@ -131,31 +165,31 @@ def test_entry_null_mcap_is_missing_mcap(null):
 
 def test_exit_rung1_at_half_is_mid_sum():
     chunk = one()
-    c, p = sd.atm_legs(chunk, 0)
+    c, p = legs(chunk)
     value, label = sd.exit_value(chunk, c, p, 0.5)
     assert value == pytest.approx(1.2 + 0.8) and label == "rung1"
 
 
 def test_exit_rung2_uses_alpha_zero():
     chunk = one(call_x=(0.0, 0.5, 2), put_x=(0.0, 0.4, 2))
-    c, p = sd.atm_legs(chunk, 0)
+    c, p = legs(chunk)
     assert sd.exit_value(chunk, c, p, 0.5) == (0.0, "rung2")
     assert sd.exit_value(chunk, c, p, 1.0) == (0.0, "rung2")
     mixed = one(call_x=(0.0, 0.5, 2))
-    c, p = sd.atm_legs(mixed, 0)
+    c, p = legs(mixed)
     value, label = sd.exit_value(mixed, c, p, 0.5)
     assert value == pytest.approx(0.8) and label == "rung2"
 
 
 def test_exit_one_rung3_leg_is_worst_case_even_with_rung1_other_leg():
     chunk = one(call_x=(NAN, NAN, 3))
-    c, p = sd.atm_legs(chunk, 0)
+    c, p = legs(chunk)
     assert sd.exit_value(chunk, c, p, 0.5) == (0.0, sd.EXIT_UNQUOTED)
 
 
 def test_exit_locked_quote_priced_as_rung1():
     chunk = one(call_x=(1.0, 1.0, 1))
-    c, p = sd.atm_legs(chunk, 0)
+    c, p = legs(chunk)
     value, label = sd.exit_value(chunk, c, p, 0.5)
     assert value == pytest.approx(1.0 + 0.8) and label == "rung1"
 
@@ -165,19 +199,12 @@ def test_exit_locked_quote_priced_as_rung1():
 def test_exit_value_bad_alpha_raises_on_rung2_and_rung3(alpha, msg):
     for chunk in (one(call_x=(0.0, 0.5, 2), put_x=(0.0, 0.4, 2)),  # all rung 2
                   one(call_x=(NAN, NAN, 3))):                      # rung 3
-        c, p = sd.atm_legs(chunk, 0)
+        c, p = legs(chunk)
         with pytest.raises(ValueError, match=msg):
             sd.exit_value(chunk, c, p, alpha)
 
 
-# ---- entry_cost and lots --------------------------------------------------
-
-def test_entry_cost_sums_buy_prices():
-    chunk = one()
-    c, p = sd.atm_legs(chunk, 0)
-    assert sd.entry_cost(chunk, c, p, 0.5) == pytest.approx(2.1 + 1.9)
-    assert sd.entry_cost(chunk, c, p, 0.0) == pytest.approx(2.2 + 2.0)
-
+# ---- lots -----------------------------------------------------------------
 
 def test_lots_floor_floor_of_one_and_nonfinite():
     assert sd.lots(3.0) == math.floor(CAPITAL_PER_TRADE / (3.0 * CONTRACT_MULTIPLIER))
@@ -196,45 +223,38 @@ def test_lots_exact_division_does_not_round_down():
 
 # ---- decide ---------------------------------------------------------------
 
-def test_rl_cutoff_taken_and_below():
+def test_gate_taken_and_not_taken_pass_through():
     events = pd.DataFrame([ev("hi", 1.0), ev("lo", 0.5)])
-    out = sd.decide(events, prior(), "R_L", good("hi", "lo")).set_index("event_id")
+    out = sd.decide(events, good("hi", "lo"), only("hi")).set_index("event_id")
     assert out.loc["hi", "status"] == "taken" and pd.isna(out.loc["hi", "reason"])
-    assert out.loc["hi", "cutoff"] == pytest.approx(0.952)
-    assert out.loc["lo", "status"] == "not_taken" and out.loc["lo", "reason"] == "below_cutoff"
+    assert out.loc["lo", "status"] == "not_taken" and out.loc["lo", "reason"] == "below_gate_threshold"
 
 
-def test_rl_thin_history_is_undetermined():
-    events = pd.DataFrame([ev("hi", 1.0)])
-    out = sd.decide(events, prior(99), "R_L", good("hi"))
-    assert out.loc[0, "status"] == "undetermined" and out.loc[0, "reason"] == "thin_history"
-    assert sd.decide(events, prior(100), "R_L", good("hi")).loc[0, "status"] == "taken"
+def test_decide_requires_a_gate_callable():
+    with pytest.raises(ValueError, match="G_PROD needs a gate callable"):
+        sd.decide(pd.DataFrame([ev("hi", 1.0)]), good("hi"), None)
 
 
-def test_rl_ignores_same_month_and_later_history():
-    future = pd.DataFrame({"event_date": ["2024-06-05"] * 120 + ["2024-07-01"] * 120, "edge": [100.0] * 240})
-    events = pd.DataFrame([ev("hi", 1.0)])
-    out = sd.decide(events, pd.concat([prior(), future]), "R_L", good("hi"))
-    assert out.loc[0, "cutoff"] == pytest.approx(0.952)
-    only_future = sd.decide(events, future, "R_L", good("hi"))
-    assert only_future.loc[0, "reason"] == "thin_history"
+def test_decision_columns_have_no_cutoff():
+    out = sd.decide(pd.DataFrame([ev("hi", 1.0)]), good("hi"), GATE)
+    assert list(out.columns) == sd.DECISION_COLS and "cutoff" not in out.columns
 
 
 def test_rel_spread_recorded_from_chunk():
-    out = sd.decide(pd.DataFrame([ev("hi", 1.0)]), EMPTY, "R_L2", good("hi"))
+    out = sd.decide(pd.DataFrame([ev("hi", 1.0)]), good("hi"), GATE)
     assert out.loc[0, "rel_spread"] == pytest.approx((0.2 / 2.1 + 0.2 / 1.9) / 2)
 
 
 def test_missing_implied_is_missing_forecast_and_bad_entry_unusable():
     events = pd.DataFrame([ev("m", 1.0, implied=NAN), ev("u", 1.0)])
-    chunk = lad._pack([rec("m", 100.0, pair(100)), rec("u", 100.0, pair(100, put_e=(0.0, 0.5)))], {})
-    out = sd.decide(events, prior(), "R_L", chunk).set_index("event_id")
+    chunk = lad._pack([rec("m", 100.0, pair(100)), rec("u", 100.0, pair(100, put_e=(2.2, 2.0)))], {})
+    out = sd.decide(events, chunk, GATE).set_index("event_id")
     assert out.loc["m", "reason"] == "missing_forecast" and out.loc["m", "status"] == "undetermined"
     assert out.loc["u", "reason"] == "entry_quote_unusable" and out.loc["u", "status"] == "undetermined"
 
 
 def test_missing_pred_is_missing_forecast():
-    out = sd.decide(pd.DataFrame([ev("p", 1.0, pred=NAN)]), EMPTY, "R_L2", good("p"))
+    out = sd.decide(pd.DataFrame([ev("p", 1.0, pred=NAN)]), good("p"), GATE)
     assert out.loc[0, "status"] == "undetermined" and out.loc[0, "reason"] == "missing_forecast"
 
 
@@ -242,67 +262,51 @@ def test_missing_pred_is_missing_forecast():
 @pytest.mark.parametrize("field", ["pred_abs_move", "implied_move"])
 def test_null_forecast_input_is_missing_forecast(field, null):
     event = dict(ev("n", 1.0), **{field: null})
-    out = sd.decide(pd.DataFrame([event]), EMPTY, "R_L2", good("n"))
+    out = sd.decide(pd.DataFrame([event]), good("n"), GATE)
     assert out.loc[0, "status"] == "undetermined" and out.loc[0, "reason"] == "missing_forecast"
 
 
 @pytest.mark.parametrize("null", [None, pd.NA])
 def test_null_mcap_is_missing_mcap(null):
     event = dict(ev("m", 1.0), mcap_usd=null)
-    out = sd.decide(pd.DataFrame([event]), EMPTY, "R_L2", good("m"))
+    out = sd.decide(pd.DataFrame([event]), good("m"), GATE)
     assert out.loc[0, "status"] == "undetermined" and out.loc[0, "reason"] == "missing_mcap"
 
 
 @pytest.mark.parametrize("null", [None, pd.NA])
 def test_missing_forecast_beats_null_mcap(null):
     event = dict(ev("b", 1.0, implied=NAN), mcap_usd=null)
-    out = sd.decide(pd.DataFrame([event]), EMPTY, "R_L2", good("b"))
+    out = sd.decide(pd.DataFrame([event]), good("b"), GATE)
     assert out.loc[0, "reason"] == "missing_forecast"
 
 
-def test_zero_bid_atm_leg_with_passing_edge_is_never_taken():
-    chunk = lad._pack([rec("z", 100.0, pair(100, put_e=(0.0, 0.5)))], {})
-    events = pd.DataFrame([ev("z", 1.0)])
-    for rule in sd.RULES:
-        out = sd.decide(events, prior(), rule, chunk)
-        assert out.loc[0, "status"] == "undetermined" and out.loc[0, "reason"] == "entry_quote_unusable"
-        assert (out["status"] != "taken").all()
-
-
 def test_event_absent_from_chunk_is_no_ladder_chunk():
-    out = sd.decide(pd.DataFrame([ev("ghost", 1.0)]), EMPTY, "R_L2", good("other"))
+    out = sd.decide(pd.DataFrame([ev("ghost", 1.0)]), good("other"), GATE)
     assert out.loc[0, "status"] == "undetermined" and out.loc[0, "reason"] == "no_ladder_chunk"
 
 
 def test_put_only_event_is_no_atm_pair():
     chunk = lad._pack([rec("po", 100.0, [(0, 100, 1.8, 2.0, 0.6, 1.0, 1)])], {})
-    out = sd.decide(pd.DataFrame([ev("po", 1.0)]), EMPTY, "R_L2", chunk)
+    out = sd.decide(pd.DataFrame([ev("po", 1.0)]), chunk, GATE)
     assert out.loc[0, "status"] == "undetermined" and out.loc[0, "reason"] == "no_atm_pair"
-
-
-def test_edge_exactly_at_cutoff_is_taken():
-    flat = pd.DataFrame({"event_date": ["2024-01-15"] * 120, "edge": [0.5] * 120})
-    out = sd.decide(pd.DataFrame([ev("eq", 0.5)]), flat, "R_L", good("eq"))
-    assert out.loc[0, "cutoff"] == 0.5 and out.loc[0, "edge"] == 0.5
-    assert out.loc[0, "status"] == "taken"
 
 
 def test_spread_exactly_max_is_not_filtered():
     chunk = lad._pack([rec("s", 100.0, pair(100, put_e=(7.0, 9.0), call_e=(7.0, 9.0)))], {})
-    out = sd.decide(pd.DataFrame([ev("s", 1.0)]), EMPTY, "R_L2", chunk)
+    out = sd.decide(pd.DataFrame([ev("s", 1.0)]), chunk, GATE)
     assert out.loc[0, "rel_spread"] == 0.25
     assert out.loc[0, "status"] == "taken" and pd.isna(out.loc[0, "reason"])
 
 
 def test_mcap_exactly_floor_is_not_filtered():
-    out = sd.decide(pd.DataFrame([ev("m", 1.0, mcap=GATE_MCAP_FLOOR)]), EMPTY, "R_L2", good("m"))
+    out = sd.decide(pd.DataFrame([ev("m", 1.0, mcap=GATE_MCAP_FLOOR)]), good("m"), GATE)
     assert out.loc[0, "status"] == "taken"
 
 
 def test_universe_filters_are_not_taken():
     chunk = lad._pack([rec("small", 100.0, pair(100))], {})
     events = pd.DataFrame([ev("small", 1.0, mcap=0.5e9)])
-    out = sd.decide(events, prior(), "R_L", chunk).set_index("event_id")
+    out = sd.decide(events, chunk, GATE).set_index("event_id")
     assert set(out.index) == {"small"}
     assert out.loc["small", "status"] == "not_taken" and out.loc["small", "reason"] == "universe_filter"
 
@@ -314,16 +318,16 @@ def test_in_universe_is_production_gate_floor_only():
         assert not sd.in_universe(null)
 
 
-def test_five_billion_name_is_now_in_the_universe():
+def test_five_billion_name_is_in_the_universe():
     # Under the old $10B short-vol floor this name was filtered; production's STR-THRU universe takes it.
-    out = sd.decide(pd.DataFrame([ev("five", 1.0, mcap=5e9)]), EMPTY, "R_L2", good("five"))
+    out = sd.decide(pd.DataFrame([ev("five", 1.0, mcap=5e9)]), good("five"), GATE)
     assert out.loc[0, "status"] == "taken" and pd.isna(out.loc[0, "reason"])
 
 
-def test_wide_spread_name_in_universe_is_now_taken():
-    # Rel spread 0.67 (> the old 25% term): production applies no spread term, so the straddle takes it; rel_spread is still recorded.
+def test_wide_spread_name_in_universe_is_taken():
+    # Rel spread 0.67: production applies no spread term, so the straddle takes it; rel_spread is still recorded.
     chunk = lad._pack([rec("wide", 100.0, pair(100, put_e=(1.0, 2.0), call_e=(1.0, 2.0)))], {})
-    out = sd.decide(pd.DataFrame([ev("wide", 1.0, mcap=5e9)]), EMPTY, "R_L2", chunk)
+    out = sd.decide(pd.DataFrame([ev("wide", 1.0, mcap=5e9)]), chunk, GATE)
     assert out.loc[0, "rel_spread"] > 0.25
     assert out.loc[0, "status"] == "taken" and pd.isna(out.loc[0, "reason"])
 
@@ -333,29 +337,23 @@ def _bad_quote_chunk(eid):
     return lad._pack([rec(eid, 10.0, pair(10, call_e=(1.5, 2.5), put_e=(1.0, 2.0)))], {})
 
 
-@pytest.mark.parametrize("rule", ["R_L", "R_L2"])
-def test_bad_quote_straddle_is_not_taken(rule):
-    out = sd.decide(pd.DataFrame([ev("bq", 1.0)]), prior(), rule, _bad_quote_chunk("bq"))
-    assert out.loc[0, "status"] == "not_taken" and out.loc[0, "reason"] == "bad_quote"
-
-
-def test_bad_quote_exactly_30_percent_is_not_refused():
-    # Mids 1.5 + 1.5 = 3.0 at spot 10 is exactly 30.0%, which production allows (strictly greater is refused).
-    chunk = lad._pack([rec("eq", 10.0, pair(10, call_e=(1.0, 2.0), put_e=(1.0, 2.0)))], {})
-    out = sd.decide(pd.DataFrame([ev("eq", 1.0)]), EMPTY, "R_L2", chunk)
-    assert out.loc[0, "status"] == "taken" and pd.isna(out.loc[0, "reason"])
-
-
-def test_bad_quote_skips_the_gate_callable():
+def test_bad_quote_straddle_is_not_taken_and_the_gate_is_not_called():
     calls = []
 
     def gate(event):
         calls.append(event["event_id"])
         return "taken", None
 
-    out = sd.decide(pd.DataFrame([ev("bq", 1.0)]), EMPTY, sd.GATE_RULE, _bad_quote_chunk("bq"), gate=gate)
+    out = sd.decide(pd.DataFrame([ev("bq", 1.0)]), _bad_quote_chunk("bq"), gate)
     assert calls == []
     assert out.loc[0, "status"] == "not_taken" and out.loc[0, "reason"] == "bad_quote"
+
+
+def test_bad_quote_exactly_30_percent_is_not_refused():
+    # Mids 1.5 + 1.5 = 3.0 at spot 10 is exactly 30.0%, which production allows (strictly greater is refused).
+    chunk = lad._pack([rec("eq", 10.0, pair(10, call_e=(1.0, 2.0), put_e=(1.0, 2.0)))], {})
+    out = sd.decide(pd.DataFrame([ev("eq", 1.0)]), chunk, GATE)
+    assert out.loc[0, "status"] == "taken" and pd.isna(out.loc[0, "reason"])
 
 
 def test_normal_chunk_still_reaches_the_gate_callable():
@@ -365,93 +363,24 @@ def test_normal_chunk_still_reaches_the_gate_callable():
         calls.append(event["event_id"])
         return "taken", None
 
-    out = sd.decide(pd.DataFrame([ev("g", 1.0)]), EMPTY, sd.GATE_RULE, good("g"), gate=gate)
+    out = sd.decide(pd.DataFrame([ev("g", 1.0)]), good("g"), gate)
     assert calls == ["g"]
     assert out.loc[0, "status"] == "taken" and pd.isna(out.loc[0, "reason"])
 
 
-def test_history_rows_keeps_only_the_straddle_universe():
-    events = pd.DataFrame([ev("lo", 2.0, mcap=0.5e9), ev("hi", 0.5, mcap=20e9), ev("nan", 3.0, mcap=NAN)])
-    decisions = sd.decide(events, EMPTY, "R_L2", good("lo", "hi", "nan"))
-    rows = sd.history_rows(decisions, events)
-    assert list(rows.columns) == ["event_date", "edge"]
-    assert list(rows["edge"]) == [0.5]
-
-
-def test_subfloor_history_does_not_move_the_rl_cutoff():
-    # 120 in-universe edges 0.00..1.19 and 120 sub-floor edges of 100.0, all dated in the same prior month.
-    hist = pd.DataFrame([ev(f"in{i}", i / 100.0, date="2024-01-15", mcap=20e9) for i in range(120)]
-                        + [ev(f"lo{i}", 100.0, date="2024-01-15", mcap=0.5e9) for i in range(120)])
-    decisions = sd.decide(hist, EMPTY, "R_L2", good(*hist["event_id"]))
-    target = pd.DataFrame([ev("hi", 1.0)])
-    with_floor = sd.decide(target, sd.history_rows(decisions, hist), "R_L", good("hi")).loc[0, "cutoff"]
-    absent = sd.decide(target, decisions.iloc[:120][["event_date", "edge"]], "R_L", good("hi")).loc[0, "cutoff"]
-    unfiltered = sd.decide(target, decisions[["event_date", "edge"]], "R_L", good("hi")).loc[0, "cutoff"]
-    assert with_floor == pytest.approx(0.952) and with_floor == absent
-    assert unfiltered > 1.0  # the sub-floor edges would have moved the cutoff
-
-
-def _mixed_chunk(bad_id, good_ids):
-    """One BAD_QUOTE event (spot 10, entry cost 35% of spot) and healthy ATM straddles at spot 100."""
-    recs = [rec(bad_id, 10.0, pair(10, call_e=(1.5, 2.5), put_e=(1.0, 2.0)))]
-    recs += [rec(e, 100.0, pair(100)) for e in good_ids]
-    return lad._pack(recs, {})
-
-
-def test_history_rows_drops_bad_quote_events():
-    events = pd.DataFrame([ev("n1", 0.5, date="2024-01-15"), ev("bq", 100.0, date="2024-01-16"),
-                           ev("n2", 1.0, date="2024-01-17")])
-    decisions = sd.decide(events, EMPTY, "R_L2", _mixed_chunk("bq", ["n1", "n2"]))
-    assert decisions.set_index("event_id").loc["bq", "reason"] == "bad_quote"
-    rows = sd.history_rows(decisions, events)
-    assert list(rows.columns) == ["event_date", "edge"]
-    assert list(rows["event_date"]) == ["2024-01-15", "2024-01-17"]
-    assert list(rows["edge"]) == pytest.approx([0.5, 1.0])
-
-
-def test_bad_quote_event_does_not_move_the_rl_cutoff():
-    # 120 healthy edges 0.00..1.19 in one prior month, plus one BAD_QUOTE event with a huge edge in the same month.
-    normal = [ev(f"in{i}", i / 100.0, date="2024-01-15") for i in range(120)]
-    bad = ev("bq", 100.0, date="2024-01-16")
-    hist = pd.DataFrame(normal + [bad])
-    chunk = _mixed_chunk("bq", [f"in{i}" for i in range(120)])
-    decisions = sd.decide(hist, EMPTY, "R_L2", chunk)
-    assert decisions.loc[len(hist) - 1, "reason"] == "bad_quote"
-    target = pd.DataFrame([ev("hi", 1.0)])
-    filtered = sd.decide(target, sd.history_rows(decisions, hist), "R_L", good("hi")).loc[0, "cutoff"]
-    without = sd.decide(pd.DataFrame(normal), EMPTY, "R_L2", good(*[f"in{i}" for i in range(120)]))
-    without_cut = sd.decide(target, sd.history_rows(without, pd.DataFrame(normal)), "R_L", good("hi")).loc[0, "cutoff"]
-    unfiltered = sd.decide(target, decisions[["event_date", "edge"]], "R_L", good("hi")).loc[0, "cutoff"]
-    assert filtered == pytest.approx(0.952) and filtered == without_cut
-    assert unfiltered > filtered  # the BAD_QUOTE edge would have moved the cutoff (0.96 against 0.952)
-
-
-def test_rl2_takes_zero_and_ignores_history():
-    events = pd.DataFrame([ev("zero", 0.0), ev("neg", -0.1)])
-    out = sd.decide(events, EMPTY, "R_L2", good("zero", "neg")).set_index("event_id")
-    assert out.loc["zero", "status"] == "taken" and pd.isna(out.loc["zero", "reason"])
-    assert out.loc["neg", "status"] == "not_taken" and out.loc["neg", "reason"] == "below_zero"
-    assert out["cutoff"].isna().all()
-
-
-def test_unknown_rule_raises():
-    with pytest.raises(ValueError, match=r"unknown rule 'R_X'"):
-        sd.decide(pd.DataFrame([ev("hi", 1.0)]), prior(), "R_X", good("hi"))
-
-
 def test_trade_counts_keep_undetermined_separate():
     events = pd.DataFrame([ev("u", 1.0, implied=NAN), ev("lo", 0.5), ev("hi", 1.0)])
-    counts = sd.trade_counts(sd.decide(events, prior(), "R_L", good("u", "lo", "hi")))
+    counts = sd.trade_counts(sd.decide(events, good("u", "lo", "hi"), only("hi")))
     assert counts == {"taken": 1, "not_taken": 1, "undetermined": 1}
 
 
 def test_decide_reads_no_exit_quotes():
     events = pd.DataFrame([ev("hi", 1.0)])
     chunk = good("hi")
-    with_exit = sd.decide(events, EMPTY, "R_L2", chunk)
+    with_exit = sd.decide(events, chunk, GATE)
     for key in ("bid_x", "ask_x", "exit_rung"):
         del chunk[key]
-    without_exit = sd.decide(events, EMPTY, "R_L2", chunk)
+    without_exit = sd.decide(events, chunk, GATE)
     pd.testing.assert_frame_equal(with_exit, without_exit)
     assert without_exit.loc[0, "status"] == "taken"
 
@@ -462,7 +391,7 @@ def _scoring_fixture():
     chunk = lad._pack([rec("A", 100.0, pair(100)),
                        rec("B", 100.0, pair(100, call_x=(NAN, NAN, 3)))], {})
     events = pd.DataFrame([ev("A", 1.0), ev("B", 1.0)])
-    return chunk, events, sd.decide(events, EMPTY, "R_L2", chunk)
+    return chunk, events, sd.decide(events, chunk, GATE)
 
 
 def test_score_pnl_dollars_and_unquoted_rows():
@@ -484,16 +413,14 @@ def test_rung_shares_sum_to_one_and_empty_is_dict():
     shares = sd.rung_shares(sd.score(chunk, events, decisions, 0.5))
     assert shares == {"rung1": 0.5, sd.EXIT_UNQUOTED: 0.5}
     assert sum(shares.values()) == pytest.approx(1.0)
-    bad = lad._pack([rec("A", 100.0, pair(100, put_e=(0.0, 0.5))),
-                     rec("B", 100.0, pair(100, put_e=(0.0, 0.5)))], {})
-    none = sd.decide(events, EMPTY, "R_L2", bad)
+    none = sd.decide(events, chunk, NOT_TAKEN)
     assert sd.rung_shares(sd.score(chunk, events, none, 0.5)) == {}
 
 
 def test_score_missing_event_raises():
     chunk = lad._pack([rec("A", 100.0, pair(100))], {})
     events = pd.DataFrame([ev("Z", 1.0)])
-    forced = sd.decide(events, EMPTY, "R_L2", chunk).assign(status="taken")  # defence-in-depth: taken but absent
+    forced = sd.decide(events, chunk, GATE).assign(status="taken")  # defence-in-depth: taken but absent
     with pytest.raises(ValueError, match=r"taken event 'Z' is missing from the chunk or events"):
         sd.score(chunk, events, forced, 0.5)
 
@@ -501,7 +428,7 @@ def test_score_missing_event_raises():
 def test_score_taken_event_absent_from_events_raises():
     chunk = lad._pack([rec("Z", 100.0, pair(100))], {})
     events = pd.DataFrame([ev("A", 1.0)])  # Z is in the chunk but not in events
-    forced = sd.decide(pd.DataFrame([ev("Z", 1.0)]), EMPTY, "R_L2", chunk).assign(status="taken")
+    forced = sd.decide(pd.DataFrame([ev("Z", 1.0)]), chunk, GATE).assign(status="taken")
     with pytest.raises(ValueError, match=r"taken event 'Z' is missing from the chunk or events"):
         sd.score(chunk, events, forced, 0.5)
 
@@ -509,7 +436,7 @@ def test_score_taken_event_absent_from_events_raises():
 def test_score_taken_event_without_legs_raises():
     chunk = lad._pack([rec("P", 100.0, [(0, 100, 1.8, 2.0, 0.6, 1.0, 1)])], {})
     events = pd.DataFrame([ev("P", 1.0)])
-    forced = sd.decide(events, EMPTY, "R_L2", chunk).assign(status="taken")  # defence-in-depth: taken, no ATM pair
+    forced = sd.decide(events, chunk, GATE).assign(status="taken")  # defence-in-depth: taken, no ATM pair
     with pytest.raises(ValueError, match=r"taken event 'P' has no ATM straddle"):
         sd.score(chunk, events, forced, 0.5)
 
@@ -519,7 +446,7 @@ def test_score_taken_event_without_legs_raises():
 def test_score_bad_alpha_raises_with_no_taken_trades(alpha, msg):
     chunk = lad._pack([rec("A", 100.0, pair(100))], {})
     events = pd.DataFrame([ev("A", 1.0)])
-    none_taken = sd.decide(events, EMPTY, "R_L2", chunk).assign(status="not_taken")
+    none_taken = sd.decide(events, chunk, GATE).assign(status="not_taken")
     with pytest.raises(ValueError, match=msg):
         sd.score(chunk, events, none_taken, alpha)
 
@@ -558,11 +485,11 @@ def test_missing_exit_chain_decides_as_covered_and_scores_worst_case():
     events = pd.DataFrame([ev("E", 1.0)])
     exit_rows = [(EXPIRY, 0, r, k, 0.8, 1.0) for r in "PC" for k in (90, 100, 110)]
     covered, missing = _ladder_chunk(exit_rows), _ladder_chunk(None)
-    dec_cov = sd.decide(events, EMPTY, "R_L2", covered).loc[0]
-    dec_miss = sd.decide(events, EMPTY, "R_L2", missing).loc[0]
+    dec_cov = sd.decide(events, covered, GATE).loc[0]
+    dec_miss = sd.decide(events, missing, GATE).loc[0]
     assert dec_miss["status"] == "taken" and dec_cov["status"] == "taken"
     assert dec_miss["rel_spread"] == dec_cov["rel_spread"]
-    scored = sd.score(missing, events, sd.decide(events, EMPTY, "R_L2", missing), 0.5).set_index("event_id")
+    scored = sd.score(missing, events, sd.decide(events, missing, GATE), 0.5).set_index("event_id")
     assert scored.loc["E", "exit_value"] == 0.0
     assert scored.loc["E", "rung"] == sd.EXIT_UNQUOTED
 
@@ -571,7 +498,7 @@ def test_missing_exit_chain_decides_as_covered_and_scores_worst_case():
 
 def test_mid_marks_values_a_rung2_leg_at_alpha_and_keeps_the_label():
     chunk = one(call_x=(0.0, 0.5, 2))  # call rung 2 (bid 0.0), put rung 1 (mid 0.8)
-    c, p = sd.atm_legs(chunk, 0)
+    c, p = legs(chunk)
     assert sd.exit_value(chunk, c, p, 0.5) == (pytest.approx(0.8), "rung2")
     value, label = sd.exit_value(chunk, c, p, 0.5, True)
     assert value == pytest.approx(0.25 + 0.8) and label == "rung2"  # the call sells at its mid, 0.25
@@ -579,10 +506,10 @@ def test_mid_marks_values_a_rung2_leg_at_alpha_and_keeps_the_label():
 
 def test_mid_marks_keeps_rung3_and_equals_the_primary_when_rung1():
     chunk = one(call_x=(NAN, NAN, 3))
-    c, p = sd.atm_legs(chunk, 0)
+    c, p = legs(chunk)
     assert sd.exit_value(chunk, c, p, 0.5, True) == (0.0, sd.EXIT_UNQUOTED)
     healthy = one()
-    c, p = sd.atm_legs(healthy, 0)
+    c, p = legs(healthy)
     assert sd.exit_value(healthy, c, p, 0.5, True) == sd.exit_value(healthy, c, p, 0.5)
 
 
@@ -590,7 +517,7 @@ def test_mid_marks_score_keeps_the_taken_set_and_changes_only_the_rung2_row():
     chunk = lad._pack([rec("A", 100.0, pair(100, call_x=(0.0, 0.5, 2))),
                        rec("B", 100.0, pair(100, call_x=(NAN, NAN, 3)))], {})
     events = pd.DataFrame([ev("A", 1.0), ev("B", 1.0)])
-    decisions = sd.decide(events, EMPTY, "R_L2", chunk)
+    decisions = sd.decide(events, chunk, GATE)
     primary = sd.score(chunk, events, decisions, 0.5).set_index("event_id")
     pd.testing.assert_frame_equal(sd.score(chunk, events, decisions, 0.5, mid_marks=False).set_index("event_id"), primary)
     mid = sd.score(chunk, events, decisions, 0.5, mid_marks=True).set_index("event_id")
@@ -598,3 +525,36 @@ def test_mid_marks_score_keeps_the_taken_set_and_changes_only_the_rung2_row():
     assert mid.loc["A", "exit_value"] == pytest.approx(primary.loc["A", "exit_value"] + 0.25)
     assert mid.loc["A", "pnl_dollars"] == pytest.approx(primary.loc["A", "pnl_dollars"] + 0.25 * 100 * primary.loc["A", "lots"])
     assert mid.loc["B", "exit_value"] == 0.0 and mid.loc["B", "rung"] == sd.EXIT_UNQUOTED
+
+
+# ---- M0 gate agreement section (Amendment 6, merged A6-3a) -----------------
+
+def _m0_rows():
+    """M0's ten determined events: four taken by a score-based G_PROD stub, six refused below the registered threshold."""
+    ids = [f"G{k}" for k in range(10)]
+    scores = {e: (REGISTERED_THRESHOLD + 0.01 if k < 4 else REGISTERED_THRESHOLD - 0.01) for k, e in enumerate(ids)}
+
+    def gate(event):
+        ret = scores[event["event_id"]]
+        return ("taken", None) if ret >= REGISTERED_THRESHOLD else ("not_taken", "below_gate_threshold")
+
+    dec = sd.decide(pd.DataFrame([ev(e, 3.0) for e in ids]), good(*ids), gate)
+    m0 = dec.assign(gate_score=dec["event_id"].map(scores))
+    kept = m0[(m0["status"] == "taken") | (m0["reason"] == "below_gate_threshold")].assign(entry_cost=4.0, exit_value_mid=4.4)
+    return kept, set(kept.loc[kept["status"] == "taken", "event_id"])
+
+
+def test_m0_gate_section_renders_at_the_bar():
+    kept, taken = _m0_rows()
+    assert len(taken) == 4
+    text = ga.section(kept, {e: 0.01 for e in taken})  # stored set equals M0's taken set: Jaccard 1.0
+    assert ga.HEADING in text and "| bar |" in text
+
+
+def test_m0_gate_section_refuses_a_disjoint_stored_set_below_the_bar():
+    kept, _ = _m0_rows()
+    disjoint = {"G5": 0.01, "G6": 0.02}  # covered, but refused by M0: Jaccard 0
+    with pytest.raises(OpsError) as caught:
+        ga.section(kept, disjoint)
+    assert caught.value.problem.details["reason"] == "gate_agreement_below_bar"
+    assert "not production-faithful" in ga.section(kept, disjoint, accepted_gap="x")

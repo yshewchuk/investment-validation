@@ -12,8 +12,7 @@ from engine.v2.ops.errors import OpsError
 from experiments import size_pnl_gprod_report as gprod_report
 from experiments.size_pnl_gprod_report import _agreement
 
-PREFIX = ("### Sensitivity (Amendment 3): production gate refit once through 2024, not refit per model "
-          "(favours M0 forecast scale); not the pre-registered verdict: ")
+PREFIX = f"### {gprod_report.LABEL}: "  # the Amendment 6 G_PROD label, as every section title carries it
 EVENTS = [f"E{i}" for i in range(1, 9)]
 DATES = dict(zip(EVENTS + ["E9"], ["2025-01-15", "2025-02-15", "2025-04-15", "2025-05-15",
                                    "2025-07-15", "2025-08-15", "2025-10-15", "2025-11-15", "2025-12-15"]))
@@ -22,7 +21,6 @@ TICK = {e: "AAA" if i % 2 == 0 else "BBB" for i, e in enumerate(EVENTS)}
 ROLE_MODEL = {"M0": "m0", "H-sq": "hsq", "H-abs": "habs", "E-raw": "eraw", "E-log": "elog", "N-raw": "nraw", "N-log": "nlog"}
 LABEL_OF = {"m0": "M0", "hsq": "H-sq", "habs": "H-abs", "eraw": "E-raw", "elog": "E-log", "nraw": "N-raw", "nlog": "N-log"}
 ROSTER = {"pairs": {"H": "testable", "E": "testable", "N": "testable"}}
-FRAME = pd.DataFrame({"event_id": EVENTS})
 RAW = list(LABEL_OF)
 GATE_SCORE, ENTRY_COST, EXIT_VALUE_MID = 0.06, 1.0, 1.1  # every row's gate inputs
 # Production selected every covered event: M0's agreement is then 1.0 on the default fixture (the bar passes).
@@ -60,7 +58,8 @@ def _det(gate):
 
 
 def _run(gate, *, outer=None, stored=STORED, quarter=QUARTER, accepted_gap=None, ladder=None):
-    return gprod_report.sections(gate, FRAME, label_of=LABEL_OF, role_model=ROLE_MODEL, roster=ROSTER,
+    """The sections over the G_PROD rows themselves, as size_pnl_assemble passes them (the events are those with a G_PROD row)."""
+    return gprod_report.sections(gate, gate, label_of=LABEL_OF, role_model=ROLE_MODEL, roster=ROSTER,
                                  outer_models=set(LABEL_OF) if outer is None else outer,
                                  quarter_of=quarter, tick=TICK, stored_gate=stored, accepted_gap=accepted_gap, ladder=ladder)
 
@@ -110,7 +109,7 @@ def test_coverage_table_counts_and_pnl_by_hand():
             ("m0", "E7"): ("undetermined", 0.0, 0.0), ("m0", "E8"): ("undetermined", 0.0, 0.0)}
     rows = {r["model_id"]: r for r in _rows(_run(_gate(_cells(over)), accepted_gap="test")[0])}
     m0 = rows["M0"]
-    assert (m0["E_events"], m0["covered"], m0["undetermined"], m0["coverage"]) == ("8", "6", "2", "0.75")
+    assert (m0["gate_events"], m0["covered"], m0["undetermined"], m0["coverage"]) == ("8", "6", "2", "0.75")
     assert m0["trades"] == "3"
     assert m0["total_pnl"] == "60"  # 10 + 20 + 30 on the taken rows; untaken rows count 0
     assert m0["pnl_per_covered_event"] == "10"  # 60 / 6
@@ -160,10 +159,29 @@ def test_no_gate_rows_gives_no_sections():
     assert _run(_gate(_cells()).iloc[0:0]) == []
 
 
-def test_events_outside_e_never_count():
+def test_an_event_with_only_a_g_prod_row_counts_in_the_gate_events():
+    """The G_PROD sections cover every event that has a G_PROD row (E9 has one, for M0 only), so M0's covered set grows to nine events."""
     secs = _run(_gate(_cells() + [("m0", "E9", "taken", 100.0, 100.0, GATE_SCORE, ENTRY_COST, EXIT_VALUE_MID)]))
-    m0 = {r["model_id"]: r for r in _rows(secs[0])}["M0"]
-    assert (m0["E_events"], m0["covered"], m0["total_pnl"]) == ("8", "8", "8")
+    rows = {r["model_id"]: r for r in _rows(secs[0])}
+    assert (rows["M0"]["gate_events"], rows["M0"]["covered"], rows["M0"]["total_pnl"]) == ("9", "9", "108")  # 8 x 1.0 + 100
+    assert (rows["H-sq"]["gate_events"], rows["H-sq"]["covered"]) == ("9", "8")  # the other models have no E9 row
+
+
+def test_an_event_absent_from_quarter_of_does_not_raise():
+    """E9 has determined G_PROD rows for the pair H (H-sq, H-abs) and an undetermined row for E-raw, and is absent from the
+    quarter_of mapping (as when E_str dropped it): sections takes its quarter from the G_PROD rows, so the pair's contrast
+    covers E9 and does not raise KeyError."""
+    extra = [("hsq", "E9", "taken", 1.0, 1.0, GATE_SCORE, ENTRY_COST, EXIT_VALUE_MID),
+             ("habs", "E9", "taken", 1.0, 1.0, GATE_SCORE, ENTRY_COST, EXIT_VALUE_MID),
+             ("eraw", "E9", "undetermined", 0.0, 0.0, GATE_SCORE, ENTRY_COST, EXIT_VALUE_MID)]
+    gate = _gate(_cells() + extra)
+    assert "E9" not in QUARTER
+    secs = gprod_report.sections(gate, gate, label_of=LABEL_OF, role_model=ROLE_MODEL, roster=ROSTER,
+                                 outer_models=set(LABEL_OF), quarter_of=QUARTER, tick={**TICK, "E9": "BBB"},
+                                 stored_gate=STORED, accepted_gap=None, ladder=None)
+    row = _find(_rows(secs[1]), "H2", "H", "primary")
+    assert row["status"] == "ok"  # a contrast summary, not too_few_quarters_or_tickers or an exception
+    assert row["n"] == "9"  # E1..E8 plus E9, where both members are determined
 
 
 def test_direct_sections_refuses_a_blank_accepted_gap_on_an_empty_gate_frame():

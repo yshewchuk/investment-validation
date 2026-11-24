@@ -381,8 +381,7 @@ def _unbound_outer(ready):
 
 
 def _model_state():
-    edges = pd.DataFrame({"event_date": pd.Series([], dtype="datetime64[ns]"), "edge": pd.Series([], dtype=float)})
-    return {"scored": {"as_is": []}, "edges": edges}
+    return {"scored": {"as_is": []}}
 
 
 def _rows(mid, book, arm, dec, taken, events, taken_mid=None, secured=None, sessions=None):
@@ -424,11 +423,13 @@ def _kept(frame, bad):
 
 
 def _month(mid, events, scored, bad, chunk, start_m, st, *, emit_from=None, sessions=None, gate=None):
-    """Pass B for one model and calendar month: drop the ``bad`` ids from the events, the scored frames and the straddle
-    inputs, then steps 7a-7d on Pass A's frames. Warm-up months (before OUTER[0]) apply the same mask (they feed history)
-    but only add history and emit no rows. ``sessions`` (the Amendment 2 account dates) is None in the synthetic run: then the
-    secured-cash lookup is not called and the rows carry no account columns; a dict (possibly empty) keeps them.
-    ``gate`` (Amendment 3) is a per-model month decider from size_pnl_gprod.month_decider; it adds the G_PROD straddle rows on output months only; it never touches ``st['edges']`` or the short-vol frames."""
+    """Pass B for one model and calendar month: drop the ``bad`` ids from the events and the scored frames, then steps 7a-7d
+    on Pass A's frames. Warm-up months (before OUTER[0]) apply the same mask (they feed history) but only add history and emit
+    no rows. ``sessions`` (the Amendment 2 account dates) is None in the synthetic run: then the secured-cash lookup is not
+    called and the rows carry no account columns; a dict (possibly empty) keeps them.
+    The straddle book is G_PROD only (Amendment 6). ``gate`` is a per-model month decider from size_pnl_gprod.month_decider; the
+    inner and synthetic stages run without it (the fold is trained through 2024, so it cannot score 2023-2024 honestly), so they
+    emit no straddle rows. ``st`` carries only the short-vol scored frames."""
     output = start_m >= (pd.Timestamp(OUTER[0]) if emit_from is None else emit_from)
     events = _kept(events, bad)
     ids, frames = set(events["event_id"].astype(str)), []
@@ -441,17 +442,10 @@ def _month(mid, events, scored, bad, chunk, start_m, st, *, emit_from=None, sess
         secured = None if sessions is None else shortvol.secured(chunk, events, mine, name)
         frames.append(_rows(mid, "short_vol", "as_is", mine, shortvol.score(chunk, events, mine, name, ALPHA), events, taken_mid=taken_mid,
                             secured=secured, sessions=sessions))
-    first = None
-    for rule in straddle.RULES:
-        dec = straddle.decide(events, st["edges"], rule, chunk)
-        first = dec if first is None else first
-        if output: frames.append(_rows(mid, "straddle", rule, dec, straddle.score(chunk, events, dec, ALPHA), events,
-                                       taken_mid=straddle.score(chunk, events, dec, ALPHA, mid_marks=True), sessions=sessions))
     if gate is not None and output:
         dec = gate(events, chunk)
         frames.append(_rows(mid, "straddle", straddle.GATE_RULE, dec, straddle.score(chunk, events, dec, ALPHA),
                             events, taken_mid=straddle.score(chunk, events, dec, ALPHA, mid_marks=True), sessions=sessions))
-    st["edges"] = pd.concat([st["edges"], straddle.history_rows(first, events)], ignore_index=True)  # Amendment 5: the cutoff history is the straddle universe only
     return frames
 
 
