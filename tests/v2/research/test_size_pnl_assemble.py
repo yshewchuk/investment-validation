@@ -692,7 +692,9 @@ def test_headline_sections_depend_on_the_mid_column_and_harsh_sections_do_not(tm
     harsh = HARSH + "T4 Short-vol, as is"
     # A uniform per-trade shift cancels in a paired contrast when both models of a pair take the same number of trades per event
     # (this fixture has equal counts), so the headline T10 is unchanged; the headline T4 is a per-trade total and moves.
-    assert _section_lines(texts["plain"], "### T10") == _section_lines(texts["mid"], "### T10") == _section_lines(texts["shifted"], "### T10")
+    # The T10 comparison is on the table rows only: the plain run has no mid column, so its basis note line differs.
+    t10_rows = lambda text: [line for line in _section_lines(text, "### T10") if line.startswith("|")]
+    assert t10_rows(texts["plain"]) == t10_rows(texts["mid"]) == t10_rows(texts["shifted"])
     assert _section_lines(texts["plain"], "### T4") == _section_lines(texts["mid"], "### T4") != _section_lines(texts["shifted"], "### T4")
     assert _section_lines(texts["mid"], harsh) == _section_lines(texts["shifted"], harsh)  # the harsh sections read the stored primary P&L
     # Rendered values. H-sq (no median role, so no bump) takes four as-is trades of 10, 20, 30, 40: total 100.00 over
@@ -757,6 +759,17 @@ def test_decisions_without_the_mid_column_get_a_not_testable_harsh_note(tmp_path
     text = (out / "REPORT.md").read_text(encoding="utf-8")
     assert "### Harsh fills (reported only)\n\nnot_testable: pnl_dollars_mid_not_in_decisions" in text
     assert HARSH + "T4" not in text  # no harsh table without the mid column: the headline is the stored primary marks
+
+
+def test_no_mid_column_marks_basis_note_says_fallback(tmp_path):
+    out = build(tmp_path)
+    assemble_mod.assemble(out, plan_frame(), admitted=None)
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    marks = "\n".join(_section_lines(text, "### Marks basis"))
+    assert "The decisions carry no marks_mid columns, so the headline fell back to the stored primary marks" in marks
+    assert "the report is not on the mid basis" in marks
+    assert "T10 reads the stored primary marks (no marks_mid columns in the decisions)." in "\n".join(_section_lines(text, "### T10"))
+    assert "T10 reads the mid marks" not in text
 
 
 def test_non_finite_mid_pnl_on_a_taken_row_refuses(tmp_path):
@@ -913,6 +926,23 @@ def test_g_prod_rows_never_enter_e_or_the_primary_tables_but_reach_the_accounts(
     # nets (0.6 - 0.5) x 100 = 10, so final = 200000 + 6600 + 6810 + 7040 = 220450 (the total-return cell is not pinned: 0.10225 sits on a rounding edge).
     assert any(line.startswith("| straddle | E-log | G_PROD | 3 | 3 | 220450.00 |") for line in gated_account)
     assert not any(line.startswith("| straddle | E-log | G_PROD |") for line in _section_lines(plain_text, HARSH_ACCOUNT))
+
+
+def _with_endpoints(rows):
+    """Every row carries the breakeven endpoints: alpha 0 is the primary P&L less 1, alpha 1 is the primary P&L plus 1."""
+    return [{**row, "pnl_dollars_a0": row["pnl_dollars"] - 1.0, "pnl_dollars_a1": row["pnl_dollars"] + 1.0} for row in rows]
+
+
+def test_breakeven_section_includes_gprod_rows(tmp_path):
+    out = build(tmp_path, rows_fn=lambda rows: _with_endpoints(_with_gate_rows(rows)))
+    assemble_mod.assemble(out, plan_frame(), admitted=None)
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    breakeven = [_cells(line) for line in _section_lines(text, "### Breakeven alpha per model and book") if line.startswith("| ")]
+    gprod = [cells for cells in breakeven if cells[2] == "G_PROD"]
+    assert gprod, "the breakeven table has no G_PROD rows"
+    # E-log's G_PROD taken rows: E02 (2024) and E03, E04 (2025). Alpha 0 is pnl - 1 per row, alpha 1 is pnl + 1 (E03 pays 31, E04 41).
+    assert ["E-log", "straddle", "G_PROD", "2024", "1"] in [c[:5] for c in gprod]
+    assert ["E-log", "straddle", "G_PROD", "2025", "2", "70.00", "74.00"] in [c[:7] for c in gprod]
 
 
 # ---- Amendment 5: short-vol E and straddle E_str are separate populations ----

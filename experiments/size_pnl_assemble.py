@@ -35,6 +35,8 @@ AMENDMENT_5_NOTE = ("Amendment 5 (2026-11-23): the straddle universe was changed
 MARKS_NOTE = ("the headline marks for every per-trade table, contrast and the T10 verdict are marks_mid (alpha 0.5, every usable leg at the mid, "
               "rung-3 unchanged); this is a post-hoc revision by the user made after results were seen; the pre-registered primary "
               "(rung-2 zero-bid legs at alpha 0) is reported as harsh fills, reported only, not a verdict basis; Amendment 1 named marks_mid a sensitivity.")
+MARKS_NOTE_PRIMARY = ("The decisions carry no marks_mid columns, so the headline fell back to the stored primary marks (rung-2 zero-bid legs at alpha 0) "
+                      "and the report is not on the mid basis.")
 # name -> (predicted sign, arm -> legs, arms). A leg is (book, arm_or_rule value, sign); d = sum(sign * (median - mean)).
 # Judgement call: H3 crosses each short-vol arm with the long rule R_L only; R_L2 is not in H3.
 HYPOTHESES = {
@@ -283,6 +285,8 @@ def _verdicts(classify_in, missing_years, inner_present=False, basis="mid"):
     verdicts += "\n\n" + AMENDMENT_5_NOTE
     if basis == "mid":
         verdicts += "\n\n" + "T10 reads the mid marks (post-hoc revision by the user, 2026-11-24); the pre-registered primary-marks verdict is the harsh-fills section."
+    elif basis == "primary":
+        verdicts += "\n\n" + "T10 reads the stored primary marks (no marks_mid columns in the decisions)."
     else:
         verdicts += "\n\n" + "T10 here reads the harsh fills (rung-2 zero-bid legs at alpha 0): reported only, not a verdict basis."
     return verdicts
@@ -399,16 +403,18 @@ def _sections(out, outer, inputs, inner, tickers, stored_gate=None):
             f"short-vol non-trades (e.g. width_declined) stay in E at P&L 0. "
             f"per-quarter candidates and dropped counts are not recorded in decisions.parquet (not_testable); run totals from the receipt: "
             f"common_dropped={outer['common_dropped']}, scoreability_dropped={outer['scoreability_dropped']}.")
+    has_mid = "pnl_dollars_harsh" in frame.columns  # the headline is the mid marks only when the decisions carry the mid column
+    marks_note = MARKS_NOTE if has_mid else MARKS_NOTE_PRIMARY
     sections = [
         _run_section(outer, undet_e, undet_str),
-        f"### Marks basis (post-hoc revision by the user, 2026-11-24)\n\n{MARKS_NOTE}",
+        f"### Marks basis (post-hoc revision by the user, 2026-11-24)\n\n{marks_note}",
         report.t1_roster(_roster_rows(roster, outer_models, inputs, inner, label_of)),
         report.t2_in_e(frame[frame["book"] == "short_vol"][["event_id", "quarter"]].drop_duplicates(), note),
         _not_testable("T3 Forecast calibration", "labels_not_in_decisions"),
         *o_tables,
         report.t8_rungs(_shares(frame), models=[label_of[m] for m in outer["models"]]),
         _not_testable("T9 Pool sensitivity", "native_pool_arm_not_produced"),
-        _verdicts(classify_c, missing_years, inner_present),
+        _verdicts(classify_c, missing_years, inner_present, basis="mid" if has_mid else "primary"),
     ]
     if inner_present:  # the inner window, after the outer tables: never the headline
         ctx_i = _context(inner_frame)
@@ -429,7 +435,11 @@ def _sections(out, outer, inputs, inner, tickers, stored_gate=None):
             _shown_h, classify_ho = _contrasts(combined_harsh, ctx_c["events"], roster, role_model, label_of, outer_models, ctx_c["quarter_of"], tick)
         # no inner window: the pooled harsh frame is the outer one, so its contrasts are reused
         sections += [_harsh(text) for text in (*harsh, _verdicts(classify_ho, missing_years, inner_present, basis="harsh"))]
-    sections += [breakeven.section(combined)]  # Amendment 6b: breakeven alpha per model, book and year, on the pooled evaluated frame
+    breakeven_frame = combined  # Amendment 6b: breakeven alpha per model, book and year, on the pooled evaluated frame
+    if not gate_raw.empty:  # Amendment 3: the G_PROD taken rows join the breakeven table too
+        taken_gate = gate_raw[gate_raw["status"] == "taken"]
+        breakeven_frame = pd.concat([combined, taken_gate.assign(model_id=taken_gate["model_id"].map(label_of), taken=True)])
+    sections += [breakeven.section(breakeven_frame)]
     if not gate_raw.empty:  # Amendment 3: the G_PROD sections, after the Amendment 1 ones and before the accounts
         sections += gprod_report.sections(gate_raw, frame[frame["book"] == "straddle"], label_of=label_of, role_model=role_model, roster=roster, outer_models=outer_models,
                                           quarter_of=ctx_o["quarter_of"], tick=tick, stored_gate=stored_gate)
