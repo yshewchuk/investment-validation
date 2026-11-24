@@ -1,13 +1,17 @@
 import hashlib
+import json
 import math
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from experiments import size_pnl_shortvol as sv
+from experiments import size_width_account as account
 from experiments import size_width_errmodel as errmodel
 from experiments import size_width_fake as fake
 from experiments import size_width_tuning as tuning
+from experiments.size_pnl_pool import build_pool, pool_history
 from experiments.size_pnl_shortvol import NAMES, Refusal
 from experiments.size_width_sizing import GRID
 from tests.v2.research.test_size_pnl_shortvol import chunk_of, events_for
@@ -72,7 +76,15 @@ def test_z_differs_between_draws_and_events_and_not_with_other_events():
     assert a[0] != a[1]
     assert fake.draw_z(["E1"], 0)[0] == a[1]
     assert fake.draw_z(["E1", "E0", "E9"], 0)[0] == a[1]
-    assert fake.z_matrix(["E0", "E1", "E2"], n=4).shape == (4, 3)
+
+
+def test_z_matrix_holds_the_recipe_value_of_each_draw_and_event():
+    ids = ["E0", "E1", "E2"]
+    z = fake.z_matrix(ids, n=4)
+    assert z.shape == (4, 3)
+    for d in range(4):
+        for j, e in enumerate(ids):
+            assert z[d, j] == _recipe_z(e, d)
 
 
 # ---- fake forecasts -------------------------------------------------------
@@ -136,6 +148,21 @@ def test_run_fake_writes_tuning_c_that_frozen_reads_and_is_reproducible(tmp_path
     assert caught.value.details["reason"] == "tuning_receipt_changed"
     again = fake.run_fake(months, table, labels, model, sessions, tmp_path, "hash-1", n=2, draws=DRAW)
     assert again["body"] == res["body"]
+    receipt = json.loads((tmp_path / "receipts" / "tuning_C.json").read_text(encoding="utf-8"))
+    meta = receipt["fake"]
+    assert meta["N"] == 2 and meta["seed_tag"] == "exp189-v1"
+    assert meta["model"]["L"] == pytest.approx(model["L"])
+    assert meta["calibration"]["ok"] is True
+    assert receipt["arm"] == "C" and receipt["inputs_hash"] == "hash-1" and receipt["window"] == "2023H2-2024"
+
+
+def test_real_calibration_failure_omits_c_and_writes_no_receipt(tmp_path):
+    table, labels, model = _world()
+    months, sessions = _months()
+    res = fake.run_fake(months, table, labels, {**model, "s": 3.0}, sessions, tmp_path, "hash-1", n=2, draws=DRAW)
+    assert res["status"] == "fake_not_calibrated"
+    assert res["calibration"]["reason"] == "fake_not_calibrated" and res["calibration"]["ok"] is False
+    assert not (tmp_path / "receipts" / "tuning_C.json").exists()
 
 
 def test_uncalibrated_fake_writes_no_receipt_and_runs_no_draws(tmp_path, monkeypatch):
@@ -174,6 +201,78 @@ def test_anchor_scores_every_structure_and_k_and_t4_marks_thin_cells(monkeypatch
     assert "### T4 anchor (perfect forecast, 2023-24, descriptive only)" in md
     assert all(name in md for name in NAMES)
     assert "n/a" in md
+
+
+def _direct(months, table, labels, pred, sessions, name="CND-PS", k=1.0):
+    """(trades, total_return) of the last month's taken set, by the module functions directly: no fake._run, no Sweep.
+    Mirrors Sweep._decide at a fixed k: score every month, decide on the whole history, price the taken rows at mid marks."""
+    pool = build_pool(table.assign(pred_move=table.index.astype(str).map(pred)), labels)
+    history, chunk_last, ev_last = [], None, None
+    for chunk, events, _output in months:
+        ev = events.assign(pred_move=events["event_id"].astype(str).map(pred) * k)
+        sims = sv.simulate(chunk, ev, pool, draws=DRAW)
+        history.append(sv.score_events(chunk, ev, sims, name))
+        chunk_last, ev_last = chunk, ev
+    dec = sv.decide(pd.concat(history, ignore_index=True))
+    last_ids = set(ev_last["event_id"].astype(str))
+    taken = dec[dec["event_id"].astype(str).isin(last_ids) & (dec["structure"] == name) & (dec["status"] == "taken")]
+    mid = sv.score(chunk_last, ev_last, taken, name, 0.5, mid_marks=True)
+    sec = sv.secured(chunk_last, ev_last, taken, name)
+    rows = mid.merge(sec, on="event_id")
+    rows["entry_date"] = rows["event_id"].map(lambda e: sessions[e][0])
+    rows["exit_date"] = rows["event_id"].map(lambda e: sessions[e][1])
+    rows = rows.rename(columns={"exit_value": "exit_value_mid"})
+    rows["exit_value"] = rows["exit_value_mid"]
+    return len(taken), float(account.simulate_account(rows, "mid")["total_return"])
+
+
+def _hand_draw_pred(model, table, labels, d):
+    """Draw ``d``'s forecasts by hand from the documented formula; NaN where the label is not > 0."""
+    y = labels["abs_move"].reindex(table.index).to_numpy(dtype=float)
+    ok = np.isfinite(y) & (y > 0)
+    z = np.array([_recipe_z(str(e), d) for e in table.index])
+    f = np.exp(model["L"] + model["b"] * (np.log(np.where(ok, y, 1.0)) - model["mean_log_y"]) + model["s"] * z)
+    return pd.Series(np.where(ok, f, np.nan), index=table.index.astype(str))
+
+
+def test_run_anchor_matches_the_direct_route(monkeypatch):
+    _small_window(monkeypatch)
+    table, labels, _ = _world()
+    months, sessions = _months()
+    actual = labels["abs_move"].reindex(table.index).to_numpy(dtype=float)
+    ok = np.isfinite(actual) & (actual > 0)
+    pred = pd.Series(np.where(ok, actual, np.nan), index=table.index.astype(str))
+
+    res = fake.run_anchor(months, table, labels, sessions, draws=DRAW)
+    n_direct, ret_direct = _direct(months, table, labels, pred, sessions)
+    assert n_direct > 0  # the check is not vacuous
+    assert res["CND-PS"][1.0]["trades"] == n_direct
+    assert res["CND-PS"][1.0]["ret"] == pytest.approx(ret_direct)
+
+    hist = pool_history(table.assign(pred_move=pred), labels)
+    err = hist.loc[hist["pred_abs_move"].notna(), "err_move"]
+    assert len(err) > 0 and (err == 0.0).all()
+
+
+@pytest.mark.parametrize("d", [0, 1])
+def test_run_draw_matches_the_direct_route_with_a_hand_computed_fake_forecast(d, monkeypatch):
+    _small_window(monkeypatch)
+    table, labels, model = _world()
+    months, sessions = _months()
+    pred = _hand_draw_pred(model, table, labels, d)
+
+    res = fake.run_draw(months, table, labels, model, d, sessions, draws=DRAW)
+    n_direct, ret_direct = _direct(months, table, labels, pred, sessions)
+    assert n_direct > 0  # the check is not vacuous
+    assert res["CND-PS"][1.0]["trades"] == n_direct
+    assert res["CND-PS"][1.0]["ret"] == pytest.approx(ret_direct)
+
+
+def test_t4_markdown_renders_300_trades_and_marks_299_n_a():
+    scores = {"CND-PS": {1.0: {"ret": 0.0123, "se": 0.0, "trades": 300},
+                         1.5: {"ret": 0.0123, "se": 0.0, "trades": 299}}}
+    md = fake.t4_markdown(scores)
+    assert "| CND-PS | 1.23 | n/a |" in md
 
 
 # ---- arm C shape in the tuning module -------------------------------------
