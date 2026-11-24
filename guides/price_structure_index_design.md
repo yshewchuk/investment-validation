@@ -69,7 +69,7 @@ The reference is `engine.structures.price_structure` itself, with `ExpirySelecto
 
 **Strike rules, by kind.**
 - `atm`/`moneyness`: `gap = np.abs(strike_orig - target)`, `strike_orig[gap.argmin()]`: first row at the minimum, equal to `idxmin`. Ties between two listed strikes go to whichever is listed first in row order, NOT the lower strike.
-- `delta`: `|delta|` gap in row order, first minimum, NaN skipped (`nanargmin`); the "needs a delta column" check runs on the same-right group.
+- `delta`: `|delta|` gap in row order, first minimum, NaN skipped (`nanargmin`); the "needs a delta column" check (missing or all-NaN) runs on the same-right group.
 - `bracket`, `grid_step`, `offset_from`: the same numpy expressions on the cached ascending grid. `offset_from` first filters the grid to strikes strictly above (`moneyness > 0`) or below the anchor, then takes `argmin(|grid - (anchor + moneyness * spot)|)`; its error is "no listed strike {above|below} {anchor:.4f} at this expiry". Ties for `offset_from` go to the lower grid index, which differs from `atm`; do not unify. `bracket` takes the nearest listed strike at or below (above) spot and uses `isclose` only when `steps` is set; `grid_step` anchors use the lowest `isclose` hit.
 - `same_as`, `mirror`, `fixed`: the returned value is the TARGET (`resolved[ref]`, the mirror, `self.strike`), never the matched listed strike; contract lookup then runs `isclose` again.
 - Right restriction: the same-right group is used when non-empty, else the all-rights group at the expiry, as the legacy `rows = same_right` fallback.
@@ -91,7 +91,7 @@ The reference is `engine.structures.price_structure` itself, with `ExpirySelecto
 
 ## 5. Equivalence battery and closure test
 
-`tests/v2/research/test_chain_index_equivalence.py`. The subject is `price_structure_indexed`; the reference is `engine.structures.price_structure` called on a fresh, identical snapshot (no copied oracle: the original stays). Each case asserts equal `StructurePrice.to_dict()` and field types, or the same exception TYPE and `str`:
+`tests/v2/research/test_chain_index_equivalence.py`. The subject is `price_structure_indexed`; the reference is `engine.structures.price_structure` called on a fresh, identical snapshot (no copied oracle: the original stays). Each case asserts the two `StructurePrice` objects equal field by field (`Timestamp` values and `.unit`, floats exact, which `to_dict()` strings would hide) and `to_dict()` equal, or the same exception TYPE and `str`:
 - Every key of `STRUCTURES`, default parameters, on AMC, BMO and `None` sessions; width and `steps` sweeps for the five short-vol builders, including zero-quantity reference legs.
 - `pin=`: entry onto a post-print chain, `closing=True`, a pinned expiry absent on the exit chain, an unlisted pinned strike, a pin naming no leg, a duplicate pin name, a `Resolution` pin with another ticker or structure (`ResolutionMismatch`).
 - Coarse ladders: the KEN and ABM geometries of `guides/coarse_ladder_collision.md`, with the exact `LadderTooCoarse` text.
@@ -105,7 +105,7 @@ The reference is `engine.structures.price_structure` itself, with `ExpirySelecto
 
 `tools/px_ledger_regression.py` re-prices the board's recorded structures from the prediction ledger and requires exact agreement. **The supervisor runs it after the heavy run; it never runs in CI on real data.** It opens the ledger read-only, reads only the paths given on the command line and writes nothing in the repo, so `--no-ledger` does not apply.
 
-For each prediction row with `strategy`, `structure_params`, a quote date and recorded legs and `entry_cost`, it rebuilds the structure from `STRUCTURES`, loads that date's chain through the board's loader, and prices with BOTH `price_structure` and `price_structure_indexed` at the recorded fill. **Pass**: every row identical (all `StructurePrice.to_dict()` fields, or the same exception type and message). Otherwise it exits non-zero and prints up to 20 mismatching row ids. Drift versus the ledger's recorded contract and cost is reported only. Progress goes to stderr (stage start/end, done/total, rate, ETA, RSS); stdout is one JSON summary. `--max-bytes` and `--max-rows` (200,000) refuse before decoding the ledger; `--limit` and `--sample-seed` bound a run; skipped rows are counted by reason; verify mode is on.
+For each prediction row with `strategy`, `structure_params`, a quote date and recorded legs and `entry_cost`, it rebuilds the structure from `STRUCTURES`, loads that date's chain through the board's loader, and prices with BOTH `price_structure` and `price_structure_indexed` at the recorded fill. **Pass**: every row identical (all `StructurePrice` fields compared as in section 5, or the same exception type and message). Otherwise it exits non-zero and prints up to 20 mismatching row ids. Drift versus the ledger's recorded contract and cost is reported only. Progress goes to stderr (stage start/end, done/total, rate, ETA, RSS); stdout is one JSON summary. `--max-bytes` and `--max-rows` (200,000) refuse before decoding the ledger; `--limit` and `--sample-seed` bound a run; skipped rows are counted by reason; verify mode is on.
 
 ## 7. Benchmark script
 
