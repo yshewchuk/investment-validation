@@ -95,6 +95,8 @@ def well_formed(body):
 def frozen_bands(out, inputs_hash):
     """The frozen tuning_band body under ``out``; refuses when the receipt is missing, malformed, for other inputs, or changed."""
     data = receipts.load_receipt(Path(out) / "receipts" / "tuning_band.json")
+    if not isinstance(inputs_hash, str) or not inputs_hash:  # refused on replay as on publication
+        raise Refusal(_CONFLICT, "tuning band receipt does not match this run's inputs", {"reason": "tuning_receipt_changed"})
     if ((data.get("experiment"), data.get("arm"), data.get("window")) != ("EXP-189", "band", WINDOW)
             or data.get("inputs_hash") != inputs_hash or not well_formed(data.get("body"))):
         raise Refusal(_CONFLICT, "tuning band receipt does not match this run's inputs", {"reason": "tuning_receipt_changed"})

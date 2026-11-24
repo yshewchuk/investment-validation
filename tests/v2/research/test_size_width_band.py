@@ -130,6 +130,17 @@ def test_other_inputs_hash_refuses(tmp_path):
     assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
+def test_replay_refuses_an_empty_or_missing_inputs_hash(tmp_path):
+    bands = build_bands({n: {"B": CURVE} for n in NAMES})
+    receipts.write_receipt(tmp_path / "receipts" / "tuning_band.json",
+                           {"experiment": "EXP-189", "arm": "band", "inputs_hash": "", "window": WINDOW, "body": bands})
+    for h in ("", None):
+        with pytest.raises(Refusal) as exc:
+            frozen_bands(tmp_path, h)
+        assert exc.value.details["reason"] == "tuning_receipt_changed"
+        assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
 def test_wrong_arm_refuses(tmp_path):
     bands = build_bands({n: {"B": CURVE} for n in NAMES})
     receipts.write_receipt(tmp_path / "receipts" / "tuning_band.json",

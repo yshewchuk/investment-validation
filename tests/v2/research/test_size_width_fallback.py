@@ -102,6 +102,17 @@ def _body(bands):
     return out
 
 
+NARROW = (0.9, 1.1)
+
+
+def _phi_body(name, bands_by_phi):
+    """A valid frozen body where ``name`` has its own (lo, hi) at every phi in ``bands_by_phi``; the other structures are no_positive_peak."""
+    body = _body({n: None for n in sv.NAMES})
+    cells = {str(p): {"lo": lo, "hi": hi, "peak_k": min(max(1.0, lo), hi), "flags": []} for p, (lo, hi) in bands_by_phi.items()}
+    body[name] = {"primary": "B", "curves": {"B": cells}}
+    return body
+
+
 def _fb(tmp_path, band=WIDE):
     """A FallbackSweep whose only band is NAME's ``band``, read back from the tuning_band receipt written under ``tmp_path``."""
     bands = {n: None for n in sv.NAMES}
@@ -257,6 +268,26 @@ def test_no_positive_peak_structure_gets_no_band_and_no_trials(tmp_path, monkeyp
 
 def test_valid_receipt_gives_the_band_range(tmp_path):
     assert _fb(tmp_path).bands[NAME] == WIDE
+
+
+def test_phi_selects_its_own_band_and_its_own_recovery(tmp_path, monkeypatch):
+    _small_window(monkeypatch)
+    by_phi = {0.80: WIDE, 0.90: WIDE, 0.95: NARROW}
+    write_bands(tmp_path / "p080", _phi_body(NAME, by_phi), "h1")
+    write_bands(tmp_path / "p095", _phi_body(NAME, by_phi), "h1")
+    fb80 = FallbackSweep(_factors(), tmp_path / "p080", "h1", 0.8)
+    fb95 = FallbackSweep(_factors(), tmp_path / "p095", "h1", 0.95)
+    assert fb80.bands[NAME] == (0.5, 3.0)
+    assert fb95.bands[NAME] == (0.9, 1.1)
+    fb80, fb95 = _run(fb80, _scene()), _run(fb95, _scene())
+    # phi 0.8 holds the wide band: the coarse events are recovered at rho 2.55
+    assert {t["event_id"] for t in fb80.trials} == set(PRIOR + CUR)
+    assert all(t["rho"] == pytest.approx(2.55) for t in fb80.trials)
+    assert len(fb80.rows([(NAME, E_ARM)], WINDOW)) == 3
+    # phi 0.95 holds the narrow band, which has no feasible rho on this ladder: every trial stays infeasible
+    assert {t["event_id"] for t in fb95.trials} == set(PRIOR + CUR)
+    assert all(t["rho"] is None for t in fb95.trials)
+    assert fb95.rows([(NAME, E_ARM)], WINDOW).empty
 
 
 def test_a_non_unit_factor_recovers_at_the_first_feasible_rho():
