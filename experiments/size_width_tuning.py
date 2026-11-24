@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from engine.pnl_sim import DRAWS
 from experiments import size_pnl_receipts as receipts
 from experiments import size_width_account as account
 from experiments.size_pnl_shortvol import NAMES, Refusal
@@ -14,6 +15,7 @@ from experiments.size_width_sweep import E_ARM, INNER, WINDOWS, admit_k
 
 MIN_TRADES, SAME_K_SHARE = 300, 0.8
 FAKE_DRAWS = 20
+FAKE_SIM_DRAWS = DRAWS
 FAKE_SEED_TAG = "exp189-v1"
 EDGES = (min(GRID), max(GRID))
 TWIN = ("TWIN-P", "TWIN-P5")
@@ -119,6 +121,13 @@ def admit_draws(n):
     raise Refusal(_CONFLICT, "tuning C draw count is not the protocol N", {"reason": "fake_draws_not_protocol", "n": n})
 
 
+def admit_sim_draws(d):
+    """The simulation draw count ``d`` when it is the protocol (FAKE_SIM_DRAWS, read at call time) as a plain int; anything else is refused."""
+    if type(d) is int and d == FAKE_SIM_DRAWS:
+        return d
+    raise Refusal(_CONFLICT, "tuning C simulation draw count is not the protocol", {"reason": "fake_sim_draws_not_protocol", "draws": d})
+
+
 def _finite_real(x):
     """True for a finite int or float that is not a bool (a bool is not a number here)."""
     if isinstance(x, bool) or not isinstance(x, (int, float)):
@@ -155,6 +164,7 @@ def _valid(arm, receipt):
             return False
         try:
             admit_draws(fake.get("N"))
+            admit_sim_draws(fake.get("sim_draws"))
         except Refusal:
             return False
         if fake.get("seed_tag") != FAKE_SEED_TAG or not fake_model_ok(fake.get("model")):

@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from engine.pnl_sim import DRAWS
 from experiments import size_pnl_shortvol as sv
 from experiments import size_width_account as account
 from experiments import size_width_errmodel as errmodel
@@ -58,6 +59,12 @@ def _months():
 def _small_draws(monkeypatch):
     """Protocol N is tuning.FAKE_DRAWS (20); the tests that run a 2-draw stage patch the constant to 2."""
     monkeypatch.setattr(tuning, "FAKE_DRAWS", 2)
+
+
+@pytest.fixture(autouse=True)
+def _small_sim_draws(monkeypatch):
+    """The small runs simulate DRAW draws, not the protocol DRAWS (4000), so the protocol simulation count is patched to DRAW here."""
+    monkeypatch.setattr(tuning, "FAKE_SIM_DRAWS", DRAW)
 
 
 def _per_draw(peaks=None, trades=None):
@@ -372,7 +379,7 @@ def _c_frozen(root, receipt):
 def test_units_c_is_b_and_frozen_checks_the_arm_c_shape(tmp_path):
     assert tuning.units("C") == tuning.units("B")
     body = {n: {"k": 1.0, "flags": [], "members": [n], "scores": {}} for n in NAMES}
-    fake_meta = {"N": 20, "seed_tag": "exp189-v1", "model": C_MODEL, "calibration": {"ok": True}}
+    fake_meta = {"N": 20, "seed_tag": "exp189-v1", "model": C_MODEL, "calibration": {"ok": True}, "sim_draws": DRAW}
     receipt = {"experiment": "EXP-189", "arm": "C", "inputs_hash": "h", "window": "2023H2-2024", "body": body,
                "fake": fake_meta}
     assert set(_c_frozen(tmp_path / "valid", receipt)) == set(NAMES)
@@ -399,7 +406,7 @@ def test_write_tuning_c_is_private_and_not_a_public_entry():
 def test_write_tuning_c_refuses_an_uncalibrated_fake_and_writes_nothing(tmp_path, monkeypatch):
     _small_draws(monkeypatch)
     with pytest.raises(Refusal) as caught:
-        fake._write_tuning_c(tmp_path, {}, "h", C_MODEL, {"ok": False, "reason": "fake_not_calibrated"}, 2)
+        fake._write_tuning_c(tmp_path, {}, "h", C_MODEL, {"ok": False, "reason": "fake_not_calibrated"}, 2, DRAW)
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.details["reason"] == "fake_not_calibrated"
     assert not (tmp_path / "receipts" / "tuning_C.json").exists()
@@ -419,7 +426,7 @@ def test_run_fake_refuses_a_reduced_draw_count_before_calibration_and_writes_not
 
 def test_write_tuning_c_refuses_a_reduced_draw_count_with_an_ok_calibration_and_writes_nothing(tmp_path):
     with pytest.raises(Refusal) as caught:
-        fake._write_tuning_c(tmp_path, {}, "h", C_MODEL, {"ok": True}, 2)
+        fake._write_tuning_c(tmp_path, {}, "h", C_MODEL, {"ok": True}, 2, DRAW)
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.details["reason"] == "fake_draws_not_protocol"
     assert not (tmp_path / "receipts" / "tuning_C.json").exists()
@@ -435,7 +442,7 @@ BAD_MODELS = {
 @pytest.mark.parametrize("name", list(BAD_MODELS))
 def test_write_tuning_c_refuses_a_malformed_fake_model_and_writes_nothing(name, tmp_path):
     with pytest.raises(Refusal) as caught:
-        fake._write_tuning_c(tmp_path, {}, "h", BAD_MODELS[name], {"ok": True}, 20)
+        fake._write_tuning_c(tmp_path, {}, "h", BAD_MODELS[name], {"ok": True}, 20, DRAW)
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.details["reason"] == "fake_model_invalid"
     assert not (tmp_path / "receipts" / "tuning_C.json").exists()
@@ -517,7 +524,7 @@ def test_run_fake_refuses_a_non_int_protocol_n_before_any_work(n, tmp_path, monk
 
 def test_c_receipt_with_wrong_seed_missing_or_bad_model_is_refused_and_a_valid_one_accepted(tmp_path):
     body = {n: {"k": 1.0, "flags": [], "members": [n], "scores": {}} for n in NAMES}
-    valid = {"N": 20, "seed_tag": "exp189-v1", "model": C_MODEL, "calibration": {"ok": True}}
+    valid = {"N": 20, "seed_tag": "exp189-v1", "model": C_MODEL, "calibration": {"ok": True}, "sim_draws": DRAW}
     bad = {
         "seed_tag_other": {**valid, "seed_tag": "other"},
         "model_missing": {k: v for k, v in valid.items() if k != "model"},
@@ -534,3 +541,63 @@ def test_c_receipt_with_wrong_seed_missing_or_bad_model_is_refused_and_a_valid_o
     receipt = {"experiment": "EXP-189", "arm": "C", "inputs_hash": "h", "window": "2023H2-2024", "body": body,
                "fake": valid}
     assert set(_c_frozen(tmp_path / "valid", receipt)) == set(NAMES)
+
+
+def test_run_fake_refuses_a_non_protocol_sim_draw_count_before_any_work(tmp_path, monkeypatch):
+    monkeypatch.setattr(tuning, "FAKE_SIM_DRAWS", DRAWS)
+    table, labels, model = _world()
+    months, sessions = _months()
+    monkeypatch.setattr(fake, "calibration", lambda *a, **k: pytest.fail("no calibration for a non-protocol sim draw count"))
+    monkeypatch.setattr(fake, "run_draw", lambda *a, **k: pytest.fail("no draws for a non-protocol sim draw count"))
+    with pytest.raises(Refusal) as caught:
+        fake.run_fake(months, table, labels, model, sessions, tmp_path, "hash-1", draws=DRAW)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.details["reason"] == "fake_sim_draws_not_protocol"
+    assert not (tmp_path / "receipts" / "tuning_C.json").exists()
+
+
+@pytest.mark.parametrize("sim_draws", [DRAW, None, True], ids=["200", "missing", "true"])
+def test_frozen_refuses_a_c_receipt_whose_sim_draws_is_not_the_protocol(sim_draws, tmp_path, monkeypatch):
+    monkeypatch.setattr(tuning, "FAKE_SIM_DRAWS", DRAWS)
+    body = {n: {"k": 1.0, "flags": [], "members": [n], "scores": {}} for n in NAMES}
+    fake_meta = {"N": 20, "seed_tag": "exp189-v1", "model": C_MODEL, "calibration": {"ok": True}}
+    if sim_draws is not None:
+        fake_meta["sim_draws"] = sim_draws
+    with pytest.raises(Refusal) as caught:
+        _c_frozen(tmp_path, {"experiment": "EXP-189", "arm": "C", "inputs_hash": "h", "window": "2023H2-2024",
+                             "body": body, "fake": fake_meta})
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.details["reason"] == "tuning_receipt_changed"
+
+
+def test_frozen_accepts_a_c_receipt_whose_sim_draws_is_the_protocol(tmp_path, monkeypatch):
+    monkeypatch.setattr(tuning, "FAKE_SIM_DRAWS", DRAWS)
+    body = {n: {"k": 1.0, "flags": [], "members": [n], "scores": {}} for n in NAMES}
+    receipt = {"experiment": "EXP-189", "arm": "C", "inputs_hash": "h", "window": "2023H2-2024", "body": body,
+               "fake": {"N": 20, "seed_tag": "exp189-v1", "model": C_MODEL, "calibration": {"ok": True},
+                        "sim_draws": DRAWS}}
+    assert set(_c_frozen(tmp_path, receipt)) == set(NAMES)
+
+
+@pytest.mark.parametrize("empty", [[], iter([])], ids=["list", "generator"])
+def test_run_fake_refuses_no_months_before_calibration_and_writes_nothing(empty, tmp_path, monkeypatch):
+    table, labels, model = _world()
+    _, sessions = _months()
+    monkeypatch.setattr(fake, "calibration", lambda *a, **k: pytest.fail("no calibration without months"))
+    monkeypatch.setattr(fake, "run_draw", lambda *a, **k: pytest.fail("no draws without months"))
+    with pytest.raises(Refusal) as caught:
+        fake.run_fake(empty, table, labels, model, sessions, tmp_path, "hash-1", draws=DRAW)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.details["reason"] == "months_empty"
+    assert not (tmp_path / "receipts" / "tuning_C.json").exists()
+
+
+def test_run_fake_stores_the_sim_draw_count_in_the_receipt(tmp_path, monkeypatch):
+    _small_window(monkeypatch)
+    _small_draws(monkeypatch)
+    table, labels, model = _world()
+    months, sessions = _months()
+    res = fake.run_fake(months, table, labels, model, sessions, tmp_path, "hash-1", n=2, draws=DRAW)
+    assert res["status"] == "ok"
+    receipt = json.loads((tmp_path / "receipts" / "tuning_C.json").read_text(encoding="utf-8"))
+    assert receipt["fake"]["sim_draws"] == DRAW

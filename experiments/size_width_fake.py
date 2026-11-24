@@ -109,28 +109,32 @@ def calibration(model, table, labels, n=N_DRAWS):
     return errmodel.calibrate(model, inner["pred_move"].to_numpy(dtype=float), label, z_matrix(ids, n))
 
 
-def _write_tuning_c(out, body, inputs_hash, model, cal, n):
+def _write_tuning_c(out, body, inputs_hash, model, cal, n, sim_draws):
     """Only run_fake calls this, with the calibration it computed for the same model."""
     if cal.get("ok") is not True:
         raise Refusal("EXPERIMENT_IDENTITY_CONFLICT", "tuning C refused: the fake forecast is not calibrated to M0",
                       {"reason": "fake_not_calibrated"})
     n = tuning.admit_draws(n)
+    sim_draws = tuning.admit_sim_draws(sim_draws)
     if not tuning.fake_model_ok(model):
         raise Refusal("EXPERIMENT_IDENTITY_CONFLICT", "tuning C refused: the fake error model is malformed",
                       {"reason": "fake_model_invalid"})
     return receipts.write_receipt(Path(out) / "receipts" / "tuning_C.json", {
         "experiment": "EXP-189", "arm": "C", "inputs_hash": inputs_hash, "window": "2023H2-2024", "body": body,
-        "fake": {"N": n, "seed_tag": SEED_TAG, "model": model, "calibration": cal}})
+        "fake": {"N": n, "seed_tag": SEED_TAG, "model": model, "calibration": cal, "sim_draws": sim_draws}})
 
 
 def run_fake(months, table, labels, model, sessions, out, inputs_hash, *, n=N_DRAWS, draws=DRAWS):
     """Calibrate the fake, else run draws 0..n-1 and write the tuning_C receipt. Returns {"status": "ok", "body", "calibration", "pooled"}
     or {"status": "fake_not_calibrated", "calibration"} (no draws, no receipt)."""
     n = tuning.admit_draws(n)
+    tuning.admit_sim_draws(draws)
     if not tuning.fake_model_ok(model):
         raise Refusal("EXPERIMENT_IDENTITY_CONFLICT", "tuning C refused: the fake error model is malformed",
                       {"reason": "fake_model_invalid"})
     months = list(months)  # materialised once: every draw and the result comprehension see the full months
+    if not months:
+        raise Refusal("EXPERIMENT_IDENTITY_CONFLICT", "tuning C needs at least one month", {"reason": "months_empty"})
     started = time.time()
     _say(f"stage start n={n} draws={draws} rss={_rss():.0f}MiB")
     cal = calibration(model, table, labels, n)
@@ -145,7 +149,7 @@ def run_fake(months, table, labels, model, sessions, out, inputs_hash, *, n=N_DR
         _say(f"draw {d + 1}/{n} elapsed={elapsed:.1f}s eta={elapsed / (d + 1) * (n - d - 1):.1f}s "
              f"rate={(d + 1) / max(elapsed, 1e-9) * 60:.1f}draws/min rss={_rss():.0f}MiB")
     body = tune_c(per_draw)
-    _write_tuning_c(out, body, inputs_hash, model, cal, n)
+    _write_tuning_c(out, body, inputs_hash, model, cal, n, draws)
     _say(f"stage end elapsed={time.time() - started:.1f}s status=ok rss={_rss():.0f}MiB")
     return {"status": "ok", "body": body, "calibration": cal, "pooled": pool_draws(per_draw)}
 
