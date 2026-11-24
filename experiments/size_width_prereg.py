@@ -11,6 +11,8 @@ This module never writes experiments/LEDGER.csv: it has no register function and
 appends to the ledger. The PLANNED row is registered by the supervisor once the spec is on main.
 """
 import argparse
+import csv
+import io
 import json
 import sys
 from pathlib import Path
@@ -63,21 +65,26 @@ def check_id_free(experiments_dir=None):
 
 
 def _planned_hashes(ledger_path):
-    """Spec hashes of every PLANNED row for EXP-189, in file order. A missing ledger gives an empty list."""
-    p = Path(ledger_path)
-    if p.exists():
-        try:
-            size = p.stat().st_size
-        except OSError:
-            raise _refuse("ledger_malformed", "ledger is unreadable or malformed") from None
-        if size > 16 << 20:
-            raise _refuse("ledger_malformed", "ledger larger than 16 MiB")
+    """Spec hashes of every PLANNED row for EXP-189, in file order.
+
+    A missing ledger gives an empty list. The read is bounded to 16 MiB from one handle.
+    """
+    path = Path(ledger_path)
+    if not path.exists():
+        return []
     try:
-        frame = lib.ledger_read(p)
-    except (lib.LedgerError, ValueError, OSError):
+        text = _read_bounded(path, 16 << 20)
+    except (OSError, ValueError):
+        raise _refuse("ledger_malformed", "ledger is unreadable, not a regular file or larger than 16 MiB") from None
+    reader = csv.DictReader(io.StringIO(text, newline=""))
+    header = reader.fieldnames or []
+    if any(column not in header for column in lib.LEDGER_COLUMNS):
+        raise _refuse("ledger_malformed", "ledger header lacks a required column")
+    try:
+        return [row.get("spec_hash") for row in reader
+                if row.get("id") == EXPERIMENT_ID and row.get("stage") == "planned"]
+    except csv.Error:
         raise _refuse("ledger_malformed", "ledger is unreadable or malformed") from None
-    rows = frame[(frame["id"] == EXPERIMENT_ID) & (frame["stage"] == "planned")]
-    return rows["spec_hash"].tolist()
 
 
 def require_preregistration(spec_path=SPEC_PATH, ledger_path=None, run_log_path=None, experiments_dir=None) -> dict:
