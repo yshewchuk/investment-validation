@@ -95,6 +95,11 @@ def test_z_matrix_holds_the_recipe_value_of_each_draw_and_event():
             assert z[d, j] == _recipe_z(e, d)
 
 
+def test_z_matrix_accepts_an_iterator_and_matches_the_list():
+    ids = ["E0", "E1", "E2"]
+    np.testing.assert_array_equal(fake.z_matrix(iter(ids), 3), fake.z_matrix(ids, 3))
+
+
 # ---- fake forecasts -------------------------------------------------------
 
 def test_fake_pred_is_the_model_formula_with_nan_for_bad_labels_and_str_index():
@@ -106,6 +111,12 @@ def test_fake_pred_is_the_model_formula_with_nan_for_bad_labels_and_str_index():
     assert got.index.tolist() == ids and all(isinstance(i, str) for i in got.index)
     assert got.iloc[0] == pytest.approx(expected)
     assert got.iloc[1:].isna().all()
+
+
+def test_fake_pred_accepts_an_iterator_and_matches_the_list():
+    ids = ["E0", "E1", "E2", "E9"]
+    labels = pd.DataFrame({"abs_move": [2.5, 0.0, -1.0]}, index=["E0", "E1", "E2"])
+    pd.testing.assert_series_equal(fake.fake_pred(MODEL, iter(ids), labels, 2), fake.fake_pred(MODEL, ids, labels, 2))
 
 
 # ---- tuning C -------------------------------------------------------------
@@ -185,6 +196,25 @@ def test_run_fake_writes_tuning_c_that_frozen_reads_and_is_reproducible(tmp_path
     assert meta["model"]["L"] == pytest.approx(model["L"])
     assert meta["calibration"]["ok"] is True
     assert receipt["arm"] == "C" and receipt["inputs_hash"] == "hash-1" and receipt["window"] == "2023H2-2024"
+    assert receipt["body"] == json.loads(json.dumps(res["body"]))
+    for key in ("rmse_rel", "mae_rel"):
+        assert meta["calibration"][key] == pytest.approx(res["calibration"][key], abs=0.05)
+
+
+def test_run_fake_and_run_draw_accept_generators_and_match_the_list(tmp_path, monkeypatch):
+    _small_window(monkeypatch)
+    _small_draws(monkeypatch)
+    table, labels, model = _world()
+    months, sessions = _months()
+    as_list = fake.run_fake(months, table, labels, model, sessions, tmp_path / "list", "hash-1", n=2, draws=DRAW)
+    as_gen = fake.run_fake(
+        (m for m in months), table, labels, model, sessions, tmp_path / "gen", "hash-1", n=2, draws=DRAW)
+    assert as_gen["body"] == as_list["body"]
+    assert as_list["pooled"]["CND-PS"][1.0]["trades"] > 0
+    assert as_gen["pooled"]["CND-PS"][1.0]["trades"] == as_list["pooled"]["CND-PS"][1.0]["trades"]
+
+    one = fake.run_draw(months, table, labels, model, 0, sessions, draws=DRAW, names=NAMES)
+    assert fake.run_draw(months, table, labels, model, 0, sessions, draws=DRAW, names=iter(NAMES)) == one
 
 
 def test_real_calibration_failure_omits_c_and_writes_no_receipt(tmp_path, monkeypatch):

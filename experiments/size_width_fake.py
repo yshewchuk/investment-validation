@@ -35,15 +35,18 @@ def draw_seed(event_id, d):
 
 def draw_z(event_ids, d):
     """One standard normal per event for draw ``d``; an event's z depends only on (event, draw)."""
-    return np.array([np.random.default_rng(draw_seed(str(e), d)).standard_normal() for e in event_ids], dtype=float)
+    ids = list(event_ids)
+    return np.array([np.random.default_rng(draw_seed(str(e), d)).standard_normal() for e in ids], dtype=float)
 
 
 def z_matrix(event_ids, n=N_DRAWS):
-    return np.array([draw_z(event_ids, d) for d in range(n)], dtype=float)
+    ids = list(event_ids)
+    return np.array([draw_z(ids, d) for d in range(n)], dtype=float)
 
 
 def fake_pred(model, event_ids, labels, d):
     """Fake forecasts of draw ``d`` indexed by str event id; NaN where the label is not finite and > 0 (never imputed)."""
+    event_ids = list(event_ids)
     y = labels["abs_move"].reindex(event_ids).to_numpy(dtype=float)
     ok = np.isfinite(y) & (y > 0)
     fake = errmodel.fake_forecast(model, np.where(ok, y, 1.0), draw_z(event_ids, d))
@@ -53,6 +56,7 @@ def fake_pred(model, event_ids, labels, d):
 def _run(months, table, labels, pred, sessions, *, draws, names):
     """One full sweep on the forecast Series ``pred``: the pool of a model whose forecasts are ``pred`` (crush stays M0's),
     then the unit score of every (structure, k) on the inner window."""
+    months, names = list(months), tuple(names)
     pool = build_pool(table.assign(pred_move=table.index.astype(str).map(pred)), labels)
     sweep = Sweep(names=names)
     for chunk, events, output in months:
@@ -63,11 +67,13 @@ def _run(months, table, labels, pred, sessions, *, draws, names):
 
 def run_draw(months, table, labels, model, d, sessions, *, draws=DRAWS, names=NAMES):
     """Draw ``d`` of the seeded fake model: the sweep scores of that model's forecasts."""
+    names = tuple(names)
     return _run(months, table, labels, fake_pred(model, table.index, labels, d), sessions, draws=draws, names=names)
 
 
 def run_anchor(months, table, labels, sessions, *, draws=DRAWS, names=NAMES):
     """Perfect-forecast anchor: the forecast is the actual move (same gate, marks and exit). Descriptive only."""
+    names = tuple(names)
     actual = labels["abs_move"].reindex(table.index).to_numpy(dtype=float)
     ok = np.isfinite(actual) & (actual > 0)
     pred = pd.Series(np.where(ok, actual, np.nan), index=[str(e) for e in table.index])
@@ -124,6 +130,7 @@ def run_fake(months, table, labels, model, sessions, out, inputs_hash, *, n=N_DR
     if not tuning.fake_model_ok(model):
         raise Refusal("EXPERIMENT_IDENTITY_CONFLICT", "tuning C refused: the fake error model is malformed",
                       {"reason": "fake_model_invalid"})
+    months = list(months)  # materialised once: every draw and the result comprehension see the full months
     started = time.time()
     _say(f"stage start n={n} draws={draws} rss={_rss():.0f}MiB")
     cal = calibration(model, table, labels, n)
