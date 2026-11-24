@@ -6,7 +6,7 @@ import pandas as pd
 
 from engine.structures import BUY
 from experiments import size_pnl_shortvol as sv
-from experiments.size_width_band import PHIS, band_range, rho_ladder, tier, well_formed
+from experiments.size_width_band import PHIS, band_range, frozen_bands, rho_ladder, tier
 from experiments.size_width_sweep import TAKEN_COLS, ALPHA, E_ARM, INNER, Sweep, admit_k, in_window, scaled
 from experiments.size_width_tuning import evaluate
 
@@ -56,13 +56,12 @@ def _mean(values):
 class FallbackSweep(Sweep):
     """Arm E is the only arm: ladder_too_coarse rows are recovered at the nearest feasible rho when the structure has a band.
     It reuses Sweep's per-event-k path, so the k column is the effective multiplier."""
-    def __init__(self, factors, body, phi):
-        """``body`` is the frozen tuning_band body from ``frozen_bands(out, inputs_hash)``, which does the identity, hash and shape checks; ``well_formed`` re-checks its shape here."""
+    def __init__(self, factors, out, inputs_hash, phi):
+        """Bands come only from the frozen tuning_band receipt under ``out``: ``frozen_bands`` refuses a missing, changed or malformed receipt, so a run without the receipt cannot start."""
         super().__init__()
+        body = frozen_bands(out, inputs_hash)
         if phi not in PHIS:
             raise ValueError(f"phi must be one of {PHIS}")
-        if not well_formed(body):
-            raise ValueError("tuning_band body is malformed")
         if any(n not in factors for n in sv.NAMES):
             raise ValueError(f"no factor for {[n for n in sv.NAMES if n not in factors]}")
         self.phi = phi

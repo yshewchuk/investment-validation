@@ -4,8 +4,9 @@ import pytest
 from experiments import size_pnl_shortvol as sv
 from experiments import size_width_fallback as fbm
 from experiments.size_pnl_pool import build_pool
+from experiments.size_pnl_shortvol import Refusal
 from experiments.size_width_account import simulate_account
-from experiments.size_width_band import PHIS, rho_ladder
+from experiments.size_width_band import PHIS, rho_ladder, write_bands
 from experiments.size_width_fallback import FallbackSweep, accounts, floor_ok, recover, recovery, split_trades, t9
 from experiments.size_width_sweep import ALPHA, E_ARM, Sweep, scaled
 from tests.v2.research.test_size_pnl_shortvol import _tables, chunk_of, events_for
@@ -83,10 +84,12 @@ def _body(bands):
     return out
 
 
-def _fb(band=WIDE):
+def _fb(tmp_path, band=WIDE):
+    """A FallbackSweep whose only band is NAME's ``band``, read back from the tuning_band receipt written under ``tmp_path``."""
     bands = {n: None for n in sv.NAMES}
     bands[NAME] = band
-    return FallbackSweep(_factors(), _body(bands), 0.9)
+    write_bands(tmp_path, _body(bands), "h1")
+    return FallbackSweep(_factors(), tmp_path, "h1", 0.9)
 
 
 # ---- the floor re-check ----------------------------------------------------
@@ -170,9 +173,9 @@ def test_recover_never_looks_at_exp_pnl_sim(monkeypatch):
 
 # ---- FallbackSweep ----------------------------------------------------------
 
-def test_fallback_run_takes_the_recovered_events_at_their_effective_k(monkeypatch):
+def test_fallback_run_takes_the_recovered_events_at_their_effective_k(tmp_path, monkeypatch):
     _small_window(monkeypatch)
-    fb = _run(_fb(), _scene())
+    fb = _run(_fb(tmp_path), _scene())
     rows = fb.rows([(NAME, E_ARM)], WINDOW)
     assert not rows.empty
     assert (rows["k"] == 2.55).all()
@@ -184,49 +187,81 @@ def test_fallback_run_takes_the_recovered_events_at_their_effective_k(monkeypatc
     assert set(hist["status"]) == {"scored"}
 
 
-def test_without_a_band_nothing_is_recovered_or_taken(monkeypatch):
+def test_without_a_band_nothing_is_recovered_or_taken(tmp_path, monkeypatch):
     _small_window(monkeypatch)
-    fb = _run(_fb(band=None), _scene())
+    fb = _run(_fb(tmp_path, band=None), _scene())
     assert fb.rows([(NAME, E_ARM)], WINDOW).empty
     assert fb.trials == []
 
 
-def test_factors_are_validated():
-    body = _body({n: None for n in sv.NAMES})
+def test_factors_are_validated(tmp_path):
+    write_bands(tmp_path, _body({n: None for n in sv.NAMES}), "h1")
     with pytest.raises(ValueError):
-        FallbackSweep({n: 1.0 for n in sv.NAMES if n != NAME}, body, 0.9)
+        FallbackSweep({n: 1.0 for n in sv.NAMES if n != NAME}, tmp_path, "h1", 0.9)
     with pytest.raises(ValueError):
-        FallbackSweep({**_factors(), NAME: 1.1}, body, 0.9)
+        FallbackSweep({**_factors(), NAME: 1.1}, tmp_path, "h1", 0.9)
 
 
-def test_a_malformed_body_is_refused():
+def test_a_malformed_body_is_never_published(tmp_path):
     body = _body({n: WIDE for n in sv.NAMES})
     del body[NAME]
     with pytest.raises(ValueError, match="malformed"):
-        FallbackSweep(_factors(), body, 0.9)
+        write_bands(tmp_path, body, "h1")
 
 
-def test_phi_outside_phis_is_refused():
-    with pytest.raises(ValueError, match="phi must be one of"):
-        FallbackSweep(_factors(), _body({n: WIDE for n in sv.NAMES}), 0.5)
+def test_no_receipt_refuses_the_sweep(tmp_path):
+    with pytest.raises(Refusal) as err:
+        FallbackSweep(_factors(), tmp_path, "h1", 0.9)
+    assert err.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert err.value.details["reason"] == "tuning_receipt_missing"
 
 
-def test_no_positive_peak_structure_gets_no_band_and_no_trials(monkeypatch):
+def test_a_receipt_for_other_inputs_refuses_the_sweep(tmp_path):
+    write_bands(tmp_path, _body({n: WIDE for n in sv.NAMES}), "h1")
+    with pytest.raises(Refusal) as err:
+        FallbackSweep(_factors(), tmp_path, "h2", 0.9)
+    assert err.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert err.value.details["reason"] == "tuning_receipt_changed"
+
+
+def test_phi_outside_phis_is_refused(tmp_path):
+    write_bands(tmp_path, _body({n: WIDE for n in sv.NAMES}), "h1")
+    with pytest.raises(ValueError, match="phi"):
+        FallbackSweep(_factors(), tmp_path, "h1", 0.5)
+
+
+def test_no_positive_peak_structure_gets_no_band_and_no_trials(tmp_path, monkeypatch):
     _small_window(monkeypatch)
-    fb = _run(_fb(band=None), _scene())
+    fb = _run(_fb(tmp_path, band=None), _scene())
     assert fb.bands[NAME] is None
     assert fb.trials == []
 
 
-def test_valid_body_gives_the_band_range():
-    assert _fb().bands[NAME] == WIDE
+def test_valid_receipt_gives_the_band_range(tmp_path):
+    assert _fb(tmp_path).bands[NAME] == WIDE
+
+
+def test_a_non_unit_factor_recovers_at_the_first_feasible_rho():
+    # k = 1.25, band (0.5, 3.0). rho_ladder(0.5, 3.0, 1.25) spans rho in [0.5/1.25, 3.0/1.25] = [0.4, 2.4] in multiples of 0.05.
+    # The width multiplier k * rho must be >= 2.55 (the k = 1 recovery at 2.55 is the first feasible rung there), so
+    # rho >= 2.55 / 1.25 = 2.04. 2.04 is not a multiple of 0.05; ladder order is nearest 1 first, and every rung below
+    # 2.05 (k * rho <= 2.5) is infeasible, so the first feasible rung is rho = 2.05, with k * rho = 2.5625.
+    chunk, events, sims = _coarse()
+    k = 1.25
+    frame = sv.score_events(chunk, scaled(events, k), sims, NAME, alpha=ALPHA)
+    assert list(frame["reason"]) == ["ladder_too_coarse"]
+    out, found = recover(chunk, events, sims, NAME, frame, k, rho_ladder(*WIDE, k))
+    assert found == {"A": 2.05}
+    recovered = out[out["event_id"].astype(str).isin([e for e, rho in found.items() if rho is not None])]
+    assert len(recovered) == 1 and recovered["status"].tolist() == ["scored"]
+    assert recovered["k"].tolist() == pytest.approx([k * 2.05])
 
 
 # ---- recovery, T9, accounts ---------------------------------------------------
 
-def test_recovery_counts_the_recovered_trades_and_no_others(monkeypatch):
+def test_recovery_counts_the_recovered_trades_and_no_others(tmp_path, monkeypatch):
     _small_window(monkeypatch)
-    fb = _run(_fb(), _scene())
+    fb = _run(_fb(tmp_path), _scene())
     rows = fb.rows([(NAME, E_ARM)], WINDOW)
     assert not rows.empty
     trades = split_trades(fb, WINDOW)
@@ -253,16 +288,16 @@ def test_recovery_counts_the_recovered_trades_and_no_others(monkeypatch):
     assert got["taken_ret"] == pytest.approx(others["ret"].mean())
 
 
-def test_an_empty_fallback_sweep_gives_unique_columns_and_no_recovery():
-    fb = _fb()
+def test_an_empty_fallback_sweep_gives_unique_columns_and_no_recovery(tmp_path):
+    fb = _fb(tmp_path)
     frame = split_trades(fb, WINDOW)
     assert frame.empty and frame.columns.is_unique
     assert recovery(fb, WINDOW) == {"recovered": 0, "recovered_ret": None, "taken_ret": None}
 
 
-def test_t9_counts_by_hand(monkeypatch):
+def test_t9_counts_by_hand(tmp_path, monkeypatch):
     _small_window(monkeypatch)
-    fb = _run(_fb(), _scene())
+    fb = _run(_fb(tmp_path), _scene())
     base = _run(Sweep(), _scene())
     rows = t9(fb, base, 0.9, WINDOW)
     assert len(rows) == 1
@@ -280,16 +315,16 @@ def test_t9_counts_by_hand(monkeypatch):
     assert row["taken_trades"] == 0 and row["taken_ret"] is None
 
 
-def test_t9_counts_the_fallback_infeasible_events():
-    fb = _run(_fb((0.9, 1.1)), _scene())  # the narrow band holds no feasible rho on this ladder
+def test_t9_counts_the_fallback_infeasible_events(tmp_path):
+    fb = _run(_fb(tmp_path, (0.9, 1.1)), _scene())  # the narrow band holds no feasible rho on this ladder
     row = t9(fb, None, 0.8, WINDOW)[0]
     assert row["declined"] == 6 and row["recovered"] == 0 and row["fallback_infeasible"] == 6
     assert row["share"] == 0.0 and row["rho"] == {} and row["recovered_trades"] == 0
 
 
-def test_accounts_base_takes_six_and_fallback_adds_the_recovered_trades(monkeypatch):
+def test_accounts_base_takes_six_and_fallback_adds_the_recovered_trades(tmp_path, monkeypatch):
     _small_window(monkeypatch)
-    fb = _run(_fb(), _scene())
+    fb = _run(_fb(tmp_path), _scene())
     base = _run(Sweep(), _scene())
     got = accounts(fb, base, {"jun": WINDOW})["jun"]
     base_rows = base.rows([(n, 1.0) for n in sv.NAMES], WINDOW)
@@ -303,9 +338,9 @@ def test_accounts_base_takes_six_and_fallback_adds_the_recovered_trades(monkeypa
     assert not any(s == NAME for s, _ in pairs(base_rows))
 
 
-def test_accounts_hand_oracle_for_the_three_recovered_trades(monkeypatch):
+def test_accounts_hand_oracle_for_the_three_recovered_trades(tmp_path, monkeypatch):
     _small_window(monkeypatch)
-    fb = _run(_fb(), _scene())
+    fb = _run(_fb(tmp_path), _scene())
     mine = fb.rows([(NAME, E_ARM)], WINDOW)
     assert len(mine) == 3
     assert (mine["entry_date"] == pd.Timestamp("2024-06-11")).all()
