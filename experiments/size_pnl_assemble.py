@@ -440,8 +440,8 @@ def assemble(out_dir, plan, *, admitted, expected=None, spec_hash=None, snapshot
     this one frame, so a changed ticker changes the binding and refuses."""
     if not isinstance(out_dir, (str, os.PathLike)):
         raise _refuse("report_out_dir_invalid", "out_dir must be a path")
-    if board_ledger is not None and not isinstance(board_ledger, (str, os.PathLike)):
-        raise _refuse("report_board_ledger_invalid", "board_ledger must be a directory path or None")
+    if board_ledger is not None and (not isinstance(board_ledger, (str, os.PathLike)) or not os.fspath(board_ledger).strip()):  # blank path refuses too, as in size_pnl_sources._config
+        raise _refuse("report_board_ledger_invalid", "board_ledger must be a non-blank path or None")
     if stored_gate is not None and not gprod_report.stored_gate_valid(stored_gate):
         raise _refuse("report_stored_gate_invalid", "stored_gate must be {scored, selected} lists of event id strings, selected within scored")
     if not isinstance(plan, pd.DataFrame) or plan.columns.empty:

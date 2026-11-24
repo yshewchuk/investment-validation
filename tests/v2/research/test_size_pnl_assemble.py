@@ -575,9 +575,10 @@ def test_out_dir_that_is_not_a_path_refuses_as_out_dir_invalid(tmp_path):
     assert caught.value.details["reason"] == "report_out_dir_invalid"
 
 
-def test_board_ledger_that_is_not_a_path_refuses_as_board_ledger_invalid(tmp_path):
+@pytest.mark.parametrize("board_ledger", [123, "", "  "], ids=["not_a_path", "empty", "blank"])
+def test_board_ledger_that_is_not_a_path_refuses_as_board_ledger_invalid(tmp_path, board_ledger):
     with pytest.raises(Refusal) as caught:
-        assemble_mod.assemble(tmp_path, plan_frame(), admitted=None, board_ledger=123)
+        assemble_mod.assemble(tmp_path, plan_frame(), admitted=None, board_ledger=board_ledger)
     assert caught.value.code == CONFLICT
     assert caught.value.details["reason"] == "report_board_ledger_invalid"
 
