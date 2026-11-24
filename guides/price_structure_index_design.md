@@ -56,10 +56,10 @@ class Resolution:
 ```
 
 - `resolve_structure(structure, snapshot, *, pin=None) -> Resolution`: spot, then per leg expiry, strike, contract lookup, quote validation; after the last leg, the collision check. It takes no fill, because nothing before pricing depends on `alpha`.
-- `price_resolution(resolution, snapshot, fill, *, closing=False) -> StructurePrice`: per leg the identical calls `fill.price`, `fill.cash_flow`, `FillModel.is_wide` on the stored bid/ask, with `side` flipped through the opposite map when `closing`. It requires `snapshot` to be the object the Resolution was resolved on (weak reference) and raises `ValueError` otherwise; it never re-reads quotes.
+- `price_resolution(resolution, snapshot, fill, *, closing=False) -> StructurePrice`: per leg the identical calls `fill.price`, `fill.cash_flow`, `FillModel.is_wide` on the stored bid/ask, with `side` flipped through the opposite map when `closing`. It requires `snapshot` to be the object the Resolution was resolved on (weak reference) and raises `ResolutionMismatch(RuntimeError)` otherwise; it never re-reads quotes. The type is deliberately not `ValueError`/`StructureError`: `engine/score.py` and `engine/replay.py` catch those and write `NO_CHAIN`, which would hide a caller bug.
 - `price_structure_indexed(structure, snapshot, fill, *, pin=None, closing=False)` is `price_resolution(resolve_structure(...), ...)`, with `price_structure`'s signature; it is the function the battery compares with `engine.structures.price_structure`.
 - **`closing` is a pricing-time argument.** A Resolution is direction-free: legs carry opening sides.
-- **`pin=`** keeps its meaning: a pinned leg takes `expiry` and `strike` from the pin by name, skips both selectors, and the strike enters the cross-leg `resolved` dict so later unpinned legs can reference it. Entries naming no leg are ignored; a duplicate name keeps the last. `pin` accepts `Sequence[ResolvedLeg]` (no identity check, as today) and also a `Resolution` or its `.legs`. A `Resolution` pin is identity-checked: a different `ticker` or `structure` raises `ValueError` before any leg runs. Bare `.legs` carry no identity and keep the legacy rule.
+- **`pin=`** keeps its meaning: a pinned leg takes `expiry` and `strike` from the pin by name, skips both selectors, and the strike enters the cross-leg `resolved` dict so later unpinned legs can reference it. Entries naming no leg are ignored; a duplicate name keeps the last. `pin` accepts `Sequence[ResolvedLeg]` (no identity check, as today) and also a `Resolution` or its `.legs`. A `Resolution` pin is identity-checked: a different `ticker` or `structure` raises `ResolutionMismatch` before any leg runs. Bare `.legs` carry no identity and keep the legacy rule.
 - **Exit reuse.** The entry `Resolution` replaces `pin=entry_price.legs`: `exit_res = resolve_structure(structure, exit_snapshot, pin=entry_res)`, then `price_resolution(exit_res, exit_snapshot, fill, closing=True)`. The pinned path still checks the expiry exists on the exit chain and the contract is listed.
 
 ## 3. Exact-equivalence rules
@@ -71,7 +71,7 @@ The reference is `engine.structures.price_structure` itself, with `ExpirySelecto
 **Strike rules, by kind.**
 - `atm`/`moneyness`: `gap = np.abs(strike_orig - target)`, `strike_orig[gap.argmin()]`: first row at the minimum, equal to `idxmin`. Ties between two listed strikes go to whichever is listed first in row order, NOT the lower strike.
 - `delta`: `|delta|` gap in row order, first minimum, NaN skipped (`nanargmin`); the "needs a delta column" check runs on the same-right group.
-- `bracket`, `grid_step`, `offset_from`: the same numpy expressions on the cached ascending grid. `offset_from` first filters the grid to strikes strictly above (`moneyness > 0`) or below the anchor, then takes `argmin(|grid - (anchor + moneyness * spot)|)`; its error is "no listed strike {above|below} {anchor}". Ties for `offset_from` go to the lower grid index, which differs from `atm`; do not unify. `bracket` and `grid_step` anchors use the lowest grid index of the `isclose` hits.
+- `bracket`, `grid_step`, `offset_from`: the same numpy expressions on the cached ascending grid. `offset_from` first filters the grid to strikes strictly above (`moneyness > 0`) or below the anchor, then takes `argmin(|grid - (anchor + moneyness * spot)|)`; its error is "no listed strike {above|below} {anchor:.4f} at this expiry". Ties for `offset_from` go to the lower grid index, which differs from `atm`; do not unify. `bracket` and `grid_step` anchors use the lowest grid index of the `isclose` hits.
 - `same_as`, `mirror`, `fixed`: the returned value is the TARGET (`resolved[ref]`, the mirror, `self.strike`), never the matched listed strike; contract lookup then runs `isclose` again.
 - Right restriction: the same-right group is used when non-empty, else the all-rights group at the expiry, as the legacy `rows = same_right` fallback.
 
@@ -96,14 +96,14 @@ The reference is `engine.structures.price_structure` itself, with `ExpirySelecto
 
 `tests/v2/research/test_chain_index_equivalence.py`. The subject is `price_structure_indexed`; the reference is `engine.structures.price_structure` called on a fresh, identical snapshot (no copied oracle: the original stays). Each case asserts equal `StructurePrice.to_dict()` and field types, or the same exception TYPE and `str`:
 - Every key of `STRUCTURES`, default parameters, on AMC, BMO and `None` sessions; width and `steps` sweeps for the five short-vol builders, including zero-quantity reference legs.
-- `pin=`: entry onto a post-print chain, `closing=True`, a pinned expiry absent on the exit chain, an unlisted pinned strike, a pin naming no leg, a duplicate pin name, a `Resolution` pin with another ticker or structure (`ValueError`).
+- `pin=`: entry onto a post-print chain, `closing=True`, a pinned expiry absent on the exit chain, an unlisted pinned strike, a pin naming no leg, a duplicate pin name, a `Resolution` pin with another ticker or structure (`ResolutionMismatch`).
 - Coarse ladders: the KEN and ABM geometries in `guides/coarse_ladder_collision.md`, $5 and $10 ladders, the exact `LadderTooCoarse` text.
 - Every refusal in section 4, each expiry-rule and strike-selector error, a calls-only chain for a put leg (all-rights fallback), crossed, negative and NaN quotes, a `ValueError` on leg 1 with a `StructureError` on leg 2, missing spot, missing column.
 - `isclose` edges: a target just inside and just outside tolerance, two listed strikes inside one tolerance, duplicate rows for one contract, equidistant strikes in both row orders, `nearest_dte` ties in both orders.
 - Ineligible shapes (NaN or float32 strike, tz-aware expiry, two `dte` for one expiry, duplicate index labels, empty chain) match `price_structure` via the plain path.
 - A seeded property test: 200 random chains per structure; results equal or both refuse identically.
-- Call-order independence, verify mode (an in-place `rows` edit raises `ChainSnapshotMutated`), `price_resolution` refusing another snapshot, and a planted-defect control (a deliberately wrong tie rule must fail the battery).
-- **Closure test** (`tests/v2/research/test_chain_index_closure.py`): `engine/chain_index.py` is absent from `source_closure(root, ["experiments/size_search.py", "experiments/magnitude_search_worker.py"])`, and the content hashes of `engine/structures.py` and `engine/fills.py` equal `origin/main`'s.
+- Call-order independence, verify mode (an in-place `rows` edit raises `ChainSnapshotMutated`), `price_resolution` refusing another snapshot (`ResolutionMismatch`), and a planted-defect control (a deliberately wrong tie rule must fail the battery).
+- **Closure test** (`tests/v2/research/test_chain_index_closure.py`): `engine/chain_index.py` is absent from `source_closure(root, [...])` for each bound root: `experiments/size_search.py`, `magnitude_search_worker.py`, `size_search_binding.py`, `v2_magnitude_search.py`, `size_pnl_shortvol.py`, `size_width_sweep.py` and the EXP-188 `run.py`; and the content hashes of `engine/structures.py` and `engine/fills.py` equal `origin/main`'s.
 
 ## 6. Real-data regression tool
 
@@ -117,7 +117,7 @@ For each prediction row with `strategy`, `structure_params`, a quote date and re
 
 ## 8. Retirement, with a pre-stated trigger
 
-**Trigger:** the v14-bound experiments have ended: EXP-188, EXP-189 and the EXP-188 feedback rerun. Then, in one PR: `price_structure` becomes a thin wrapper over the twin, the original selection code in `engine/structures.py` is deleted, and a frozen copy of the original moves into the test tree as the oracle that the battery compares against. The entry is recorded in `guides/rearchitecture_tech_debt.md`. Until then both implementations stay and the battery compares them directly.
+**Trigger:** the v14-bound experiments have ended: EXP-188, EXP-189 and the EXP-188 feedback rerun. Then, in one PR: `price_structure` becomes a thin wrapper over the twin, the original selection code in `engine/structures.py` is deleted, and a frozen copy of the original moves into the test tree as the oracle that the battery compares against. The twin's imports from `engine.structures` then become circular, so the wrapper imports the twin lazily inside `price_structure`. The entry is `TD-13` in `guides/rearchitecture_tech_debt.md`. Until then both implementations stay and the battery compares them directly.
 
 ## 9. Split list
 
@@ -125,9 +125,9 @@ Estimates (code / test / doc lines):
 
 | Slice | Content | Estimate | Binding |
 | --- | --- | --- | --- |
-| **(a)** | `engine/chain_index.py`: index, eligibility, plain path, memo, verify mode, `Resolution`, `resolve_structure`, `price_resolution`, `price_structure_indexed`; the battery and closure test. Built by pxidx1; if it passes about 300 code lines it splits into index+expiry, then strike+split. | 300 / 450 / 10 | Neutral |
+| **(a)** | `engine/chain_index.py`: index, eligibility, plain path, memo, verify mode, `Resolution`, `resolve_structure`, `price_resolution`, `price_structure_indexed`; the battery and closure test. Built by pxidx1 as two PRs: (a1) plain path, index, expiry rules, eligibility, memo, verify mode, closure test: 280 / 250 / 5; (a2) strike rules, contract lookup, `Resolution` and the split: 250 / 250 / 10. | 530 / 500 / 15 | Neutral |
 | **(b)** | Real-data ledger regression tool, and the benchmark script as its own PR. Supervisor runs the tool after the heavy run. | 130 / 70 / 10 and 120 / 50 / 5 | Neutral |
-| **(c)** | EXP-189 adapter adopts the twin (`experiments/`, separate experiment slice; the board keeps `price_structure`). | set in its own Spec | Experiment-owned |
+| **(c)** | EXP-189 adapter adopts the twin (`experiments/`, separate experiment slice; the board keeps `price_structure`). | 60 / 80 / 5 (its Spec confirms) | Experiment-owned |
 | **(d)** | Retirement, later, on the section 8 trigger. | about 40 / 30 / 5 (net deletion) | Edits bound file, after the experiments end |
 
 ## 10. Standard tools
