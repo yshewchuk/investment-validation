@@ -97,6 +97,7 @@ EXP-189 has its own `spec.yaml` (M0 reference by EXP-188's sealed plan id, arms,
 2. **Grid.** Recommended: ten points up to 3.0. Alternatives: add 4.0 (most candidates decline at `WIDTH_MAX`), or drop 0.5 and 0.67.
 3. **`N` draws.** Recommended 20 (fewer than 10 not recommended; raise if curves are too noisy to rank).
 4. **Arm D.** Recommended: include (cheap, real-path only). Drop it if the user prefers fewer candidates.
+5. **Tolerance fraction `phi` and fallback step (section 12).** Recommended `phi = 0.90` of the peak, `rho` step 0.05. Alternatives: `phi = 0.95` (narrower band, fewer recoveries) or 0.80 (wider band, more recoveries, more risk of trading a worse geometry).
 
 ## 11. Split list (code slices, NOT started until this design merges)
 
@@ -109,3 +110,32 @@ EXP-189 has its own `spec.yaml` (M0 reference by EXP-188's sealed plan id, arms,
 | W5 | Report T2-T7, success table, proposed rule, driver and smoke, runbook | ~150 / ~140 / 100 | W4 |
 
 Each slice stays near 150 code lines and adds only new `size_width_*` modules; EXP-188's `size_pnl_*` code is imported unchanged.
+
+## 12. How much flexibility widths give: tolerance band, nearest-feasible fallback, snap deviation (user 2026-11-24)
+
+**Question.** Listed strikes rarely match the target width. `size_pnl_shortvol.resolve` snaps each leg to the nearest listed strike and declines the candidate (`ladder_too_coarse`) when two legs collapse onto one strike. Supervisor measurement from the 2025 run (not re-verified here; section 12.2 reproduces it): for M0 at `k = 1`, that decline hit about 27% of short-vol candidates at market cap >= $10B and about 40% at $1-10B, the largest single reason for not trading. How wide a range of widths is nearly as good as the best, and can a nearby feasible geometry recover those candidates? All of this is M0, production's rule as base, tuned on 2023-24, 2025 labelled NOT blind for widths.
+
+**12.1 (a) Tolerance band.** Per structure, from the sweep curve (score versus `k`, section 5 objective): the **tolerance band** is the contiguous range of `k` around the argmax in which the score stays at or above a **fraction `phi` of the peak**. Recommended `phi = 0.90` (open decision 5); linear interpolation of the score between grid points locates the two ends, and the band is reported as a **width ratio** (`k` relative to production, `k = 1`) and as a ratio to the actual move (from the anchor, section 3). It is computed on both curves (B real path, C fake draws; C is primary because it is smoother) and from the oracle anchor for reference. A peak that is not positive gives `no_positive_peak` (no band, no fallback for that structure); a band touching the grid edge is `band_open` (flagged, not widened). A band is frozen from 2023-24 in the `tuning_band` receipt before 2025 runs.
+
+**12.2 (c) How today's trades deviate from target (descriptive, M0, `k = 1`).** For each taken trade the **realised width** is the width the listed strikes carry, recomputed in `width_moneyness` units (the structure's outer span from the anchor, divided by spot and by the structure's outer multiple, `SHORT_VOL_OUTER`, `PLATEAU_CENTRE` or `FIVE_STRIKE_PEAK` in `engine/forecast_sizing.py`), over the **target width** `forecast_params` returned. T8 prints quantiles (10, 25, 50, 75, 90) of realised/target per structure and market-cap tier (>= $10B, $1-10B, below) for 2023-24 and 2025, the decline share by reason and tier (a mismatch with the 27% and 40% above is a finding), and return per taken trade by deviation bucket (below 0.9, 0.9 to 1.1, above 1.1). Whether the deviation costs P&L is read two ways: the curve-implied cost (the C curve evaluated at the realised versus the target ratio) and the bucketed returns. The bucketed reading is **descriptive only**: snap deviation correlates with price level and ladder spacing, so no causal claim is made.
+
+**12.3 (b) Nearest-feasible-width fallback.** A new arm `fallback` (M0, at `k = 1` and at each section 7 candidate's tuned `k`) changes one thing: when a candidate would be declined `ladder_too_coarse` or `structure_unresolved` (not `width_declined`, which has no geometry, and not `negative_floor` or `entry_not_debit`, which are economic refusals, kept), try widths `target * rho`, `rho` stepping by 0.05 inside the structure's tolerance band, nearest to the target first (smallest `|log rho|`, the smaller `rho` on ties). The first `rho` whose snapped geometry has distinct legs, passes the zero-floor re-check and gives a debit entry is used; if none lies in the band the candidate is declined exactly as today. Everything else is unchanged: the gate (`exp_pnl_sim` for the new geometry is a dot product on the ladder simulation already built, no extra Black-Scholes work), the trailing cutoff (recovered candidates' scores enter the cutoff history as determined candidates, as any other), marks, exit and accounts. The choice of `rho` never looks at P&L or labels. T9 reports per structure and tier: declined candidates, recovered, recovered share, the `rho` distribution, recovered trades taken after the gate, their return per trade and P&L under both mark sets **against the trades already taken** (no fallback needed), and the cash-secured account with versus without the fallback.
+
+**12.4 Decisions this section feeds (pre-stated).** (i) **Recommended tolerance band per structure**: the frozen band, with `phi`, flatness and the `band_open` flags. (ii) **Fallback adoption, yes or no.** **Yes** iff in the cash-secured seven-structure account the `fallback` arm exceeds the same arm without it in each of the six cells of section 7 ({2025, 2023H2, 2024} x both mark sets), **and** the recovered trades' mean return per trade is not negative under either mark set in 2025 and in 2023-24 pooled, **and** at least 100 trades are recovered in 2025 (below that: `insufficient_recovery`, answer **no**). Otherwise **no**. Judgement calls (mine): the 100-trade floor and the use of the account cells rather than a magnitude cutoff. As in section 7 the board change is the user's separate decision, and the DYN-SV chooser review applies (the chooser reads width features). EXP-188 is rerun afterwards if either the widths or the fallback change.
+
+**12.5 Failure semantics (R1-R6).**
+
+| Case | Result |
+| --- | --- |
+| R1 structure whose peak is not positive | `no_positive_peak`; no band, no fallback for it; counted |
+| R1 a decline reason outside the fallback set | unchanged; counted by reason |
+| R1 no feasible `rho` in the band | declined as today, counted `fallback_infeasible` |
+| R1 fewer than 100 recovered trades in 2025 | `insufficient_recovery`; adoption answer no |
+| Realised width not computable (a leg missing) | the trade is left out of T8's quantiles and counted `deviation_unavailable`; never imputed |
+| R2 | geometry search is dot products on the existing ladder table, estimated at a few percent of the sweep cost (not measured; the slice smoke measures); progress at a bounded cadence as in section 6 |
+| R3 | no randomness added |
+| R4 | `tuning_band` receipt atomic and immutable, bound to the inputs receipt; the `fallback` arm refuses without it (`tuning_receipt_missing`) |
+| R5 | `model_id` unchanged |
+| R6 | band frozen from 2023-24 before 2025; fallback decisions made month by month before that month's labels are read; no label or P&L enters the choice of `rho` |
+
+**Slice W6 (added to section 11; NOT started until this design merges):** realised-width and decline-share tables (T8), tolerance-band computation and `tuning_band` receipt, the `fallback` geometry search and arm, T9 and the adoption rule: about 160 code lines, 170 test lines, 80 doc words, after W4. W5's report also lists T8 and T9 and the two answers.
