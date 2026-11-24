@@ -189,6 +189,14 @@ def test_write_bands_refuses_a_malformed_body(tmp_path):
         assert not (tmp_path / "receipts" / "tuning_band.json").exists()
 
 
+def test_write_bands_requires_a_non_empty_string_inputs_hash(tmp_path):
+    bands = build_bands({n: {"B": CURVE} for n in NAMES})
+    for h in (None, "", 5):
+        with pytest.raises(ValueError, match="inputs_hash must be a non-empty string"):
+            write_bands(tmp_path, bands, h)
+        assert not (tmp_path / "receipts" / "tuning_band.json").exists()
+
+
 def _good():
     """A builder output with B, C and anchor curves, plus one structure whose every band is no_positive_peak."""
     curves = {n: {"B": CURVE, "C": CURVE, "anchor": CURVE} for n in NAMES}

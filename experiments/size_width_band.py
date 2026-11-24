@@ -58,6 +58,8 @@ def build_bands(curves):
 
 def write_bands(out, bands, inputs_hash):
     """Publishes ``bands`` as the write-once tuning_band receipt under ``out``; returns the receipt."""
+    if not isinstance(inputs_hash, str) or not inputs_hash:
+        raise ValueError("inputs_hash must be a non-empty string")
     if not well_formed(bands):
         raise ValueError("tuning_band body is malformed")
     return receipts.write_receipt(Path(out) / "receipts" / "tuning_band.json",

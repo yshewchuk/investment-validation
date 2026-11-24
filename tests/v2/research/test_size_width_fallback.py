@@ -60,6 +60,24 @@ def _scene():
     return chunk, prior, cur, sessions
 
 
+MCAP_BY_TIER = {"ge_10B": 20e9, "1B_10B": 3e9, "lt_1B": 5e8}
+# disjoint id groups per tier; the ids are the PRIOR / CUR ids of _scene, split across the three market-cap tiers
+PRIOR_BY_TIER = {"ge_10B": PRIOR[:3], "1B_10B": PRIOR[3:5], "lt_1B": PRIOR[5:]}
+CUR_BY_TIER = {"ge_10B": CUR[:3], "1B_10B": CUR[3:5], "lt_1B": CUR[5:]}
+
+
+def _tiered_scene():
+    """_scene with the same chunk, dates and sessions, but events of mixed market caps: one events_for call per tier."""
+    chunk = chunk_of(*[(e, {}) for e in PRIOR + CUR], strikes=COARSE)
+    prior = pd.concat([events_for(*PRIOR_BY_TIER[t], date="2024-05-10", mcap=MCAP_BY_TIER[t]) for t in MCAP_BY_TIER],
+                      ignore_index=True)
+    cur = pd.concat([events_for(*CUR_BY_TIER[t], date="2024-06-10", mcap=MCAP_BY_TIER[t]) for t in MCAP_BY_TIER],
+                    ignore_index=True)
+    sessions = {e: (pd.Timestamp("2024-05-15"), pd.Timestamp("2024-05-25")) for e in PRIOR}
+    sessions.update({e: (pd.Timestamp("2024-06-11"), pd.Timestamp("2024-06-21")) for e in CUR})
+    return chunk, prior, cur, sessions
+
+
 def _run(sweep, scene):
     chunk, prior, cur, sessions = scene
     sweep.add_month(chunk, prior, POOL, output=False, sessions=sessions, draws=DRAW)
@@ -313,6 +331,32 @@ def test_t9_counts_by_hand(tmp_path, monkeypatch):
     assert row["recovered_ret"] == pytest.approx(RET_RECOVERED)
     assert row["recovered_pnl"] == pytest.approx(PNL_MID)
     assert row["taken_trades"] == 0 and row["taken_ret"] is None
+
+
+def test_t9_groups_the_trials_by_market_cap_tier(tmp_path, monkeypatch):
+    _small_window(monkeypatch)
+    fb = _run(_fb(tmp_path), _tiered_scene())
+    rows = t9(fb, None, 0.9, WINDOW)
+    # one row per (structure, tier): exactly the three expected tier labels, one row each, all for NAME
+    assert len(rows) == 3
+    assert sorted(r["tier"] for r in rows) == sorted(MCAP_BY_TIER)
+    assert all((r["phi"], r["structure"]) == (0.9, NAME) for r in rows)
+    by_tier = {r["tier"]: r for r in rows}
+    taken = fb.rows([(NAME, E_ARM)], WINDOW)
+    taken_ids = set(taken["event_id"].astype(str)) if not taken.empty else set()
+    total = 0
+    for t, ids in CUR_BY_TIER.items():
+        row = by_tier[t]
+        n = len(ids)  # trials in WINDOW are the CUR events; PRIOR exits outside it
+        total += n
+        assert row["declined"] == n and row["recovered"] == n and row["fallback_infeasible"] == 0
+        assert row["rho"] == {"2.55": n}
+        assert (row["lo"], row["hi"]) == WIDE
+        taken_here = taken_ids & set(ids)
+        if taken_here:  # the universe and spread gate may leave a tier untaken; only check tiers with taken trades
+            assert row["recovered_trades"] == len(taken_here)
+    # a tier-less grouping would give one row with declined == total; the per-tier rows must sum to every trial
+    assert sum(r["declined"] for r in rows) == total == len(CUR)
 
 
 def test_t9_counts_the_fallback_infeasible_events(tmp_path):

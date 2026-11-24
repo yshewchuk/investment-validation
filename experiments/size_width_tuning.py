@@ -5,13 +5,18 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from engine.pnl_sim import DRAWS
 from experiments import size_pnl_receipts as receipts
 from experiments import size_width_account as account
 from experiments.size_pnl_shortvol import NAMES, Refusal
+from experiments.size_width_errmodel import MIN_EVENTS
 from experiments.size_width_sizing import GRID
 from experiments.size_width_sweep import E_ARM, INNER, WINDOWS, admit_k
 
 MIN_TRADES, SAME_K_SHARE = 300, 0.8
+FAKE_DRAWS = 20
+FAKE_SIM_DRAWS = DRAWS
+FAKE_SEED_TAG = "exp189-v1"
 EDGES = (min(GRID), max(GRID))
 TWIN = ("TWIN-P", "TWIN-P5")
 _CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
@@ -51,8 +56,8 @@ def choose(scores):
 
 
 def units(arm):
-    """Unit name -> member structures: A one account, B one per structure, D the TWIN pair and the five centre-peaked structures."""
-    return {"A": {"all": NAMES}, "B": {n: (n,) for n in NAMES},
+    """Unit name -> member structures: A one account, B and C one per structure, D the TWIN pair and the five centre-peaked structures."""
+    return {"A": {"all": NAMES}, "B": {n: (n,) for n in NAMES}, "C": {n: (n,) for n in NAMES},
             "D": {"T": TWIN, "C": tuple(n for n in NAMES if n not in TWIN)}}[arm]
 
 
@@ -109,15 +114,61 @@ def run_inner(sweep, out, inputs_hash):
     return {"tuned": tuned, "results": results}
 
 
+def admit_draws(n):
+    """The draw count ``n`` when it is the protocol N (FAKE_DRAWS, read at call time) as a plain int; anything else is refused."""
+    if type(n) is int and n == FAKE_DRAWS:
+        return n
+    raise Refusal(_CONFLICT, "tuning C draw count is not the protocol N", {"reason": "fake_draws_not_protocol", "n": n})
+
+
+def admit_sim_draws(d):
+    """The simulation draw count ``d`` when it is the protocol (FAKE_SIM_DRAWS, read at call time) as a plain int; anything else is refused."""
+    if type(d) is int and d == FAKE_SIM_DRAWS:
+        return d
+    raise Refusal(_CONFLICT, "tuning C simulation draw count is not the protocol", {"reason": "fake_sim_draws_not_protocol", "draws": d})
+
+
+def _finite_real(x):
+    """True for a finite int or float that is not a bool (a bool is not a number here)."""
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(x))
+    except OverflowError:
+        return False
+
+
+def fake_model_ok(model):
+    """True when ``model`` is a dict whose L, b, s and mean_log_y are finite real numbers, s >= 0, and n an int >= MIN_EVENTS."""
+    if not isinstance(model, dict):
+        return False
+    if not all(_finite_real(model.get(key)) for key in ("L", "b", "s", "mean_log_y")):
+        return False
+    return model["s"] >= 0 and type(model.get("n")) is int and model["n"] >= MIN_EVENTS
+
+
 def _valid(arm, receipt):
-    """True when ``receipt`` is EXP-189 arm ``arm`` on the inner window with a dict body; A, B and D bodies hold exactly the units
-    of ``arm``, each with its members and a grid k (a bool is not a k)."""
+    """True when ``receipt`` is EXP-189 arm ``arm`` on the inner window with a dict body; A, B, C and D bodies hold exactly the units
+    of ``arm``, each with its members and a grid k (a bool is not a k). An arm C receipt also needs a calibrated fake with the
+    protocol N and sim-draws count, the seed tag, and a valid fake model."""
     body = receipt.get("body")
     if not (receipt.get("experiment") == "EXP-189" and receipt.get("arm") == arm and receipt.get("window") == "2023H2-2024"
             and isinstance(body, dict)):
         return False
-    if arm not in ("A", "B", "D"):
+    if arm not in ("A", "B", "C", "D"):
         return True
+    if arm == "C":
+        fake = receipt.get("fake")
+        cal = fake.get("calibration") if isinstance(fake, dict) else None
+        if not (isinstance(cal, dict) and cal.get("ok") is True):
+            return False
+        try:
+            admit_draws(fake.get("N"))
+            admit_sim_draws(fake.get("sim_draws"))
+        except Refusal:
+            return False
+        if fake.get("seed_tag") != FAKE_SEED_TAG or not fake_model_ok(fake.get("model")):
+            return False
     try:
         return set(body) == set(units(arm)) and all(
             isinstance(body[u], dict) and body[u].get("members") == list(m) and admit_k(body[u].get("k")) is not None
