@@ -259,18 +259,26 @@ def _taken(eid, exit_date, rets):
     return row
 
 
-def test_stats_are_the_breakeven_of_the_window_means_and_none_without_rows():
+def _window_sweep(rows):
     sweep = Sweep()
-    sweep.taken[(NAME, 1.0)] = [pd.DataFrame([_taken("a", "2024-03-10", [-0.2, -0.1, 0.1, 0.2, 0.3]),
-                                              _taken("b", "2024-03-12", [-0.4, -0.1, 0.3, 0.4, 0.5])],
-                                             columns=_TAKEN + RET_COLS)]
+    sweep.taken[(NAME, 1.0)] = [pd.DataFrame([_taken(f"e{i}", "2024-03-10", r) for i, r in enumerate(rows)], columns=_TAKEN + RET_COLS)]
+    return sweep
+
+
+def test_stats_are_the_breakeven_of_the_window_means_and_none_without_rows():
     by = {n: 1.0 for n in NAMES}
+    # two rows per ladder column, averaging to 0.20, 0.10, -0.10, -0.20, -0.30 for alpha 0, 0.25, 0.5, 0.75, 1.0
+    sweep = _window_sweep([[0.30, 0.20, 0.00, -0.10, -0.20], [0.10, 0.00, -0.20, -0.30, -0.40]])
     got = driver._stats(sweep, by, WINDOWS["2024"])
-    means = [-0.3, -0.1, 0.2, 0.3, 0.4]
-    expected = breakeven_alpha({a: {"mean": m} for a, m in zip(LADDER, means)})
-    assert got["x"] == pytest.approx(expected) and 0.25 < got["x"] < 0.5
-    assert got["mid"] == pytest.approx(0.2) and got["alpha0"] == pytest.approx(-0.3)
+    # the mean crosses zero between alpha 0.25 and 0.5: 0.25 + 0.10 * 0.25 / 0.20 = 0.375
+    assert got["x"] == pytest.approx(0.375)
+    assert got["mid"] == pytest.approx(-0.10)
+    assert got["alpha0"] == pytest.approx(0.20)
     assert got["trades"] == 2
+    # always positive means: no crossing, breakeven 0.0
+    assert driver._stats(_window_sweep([[0.3, 0.2, 0.1, 0.05, 0.02]] * 2), by, WINDOWS["2024"])["x"] == 0.0
+    # always negative means: no crossing, breakeven 1.0
+    assert driver._stats(_window_sweep([[-0.02, -0.1, -0.2, -0.25, -0.3]] * 2), by, WINDOWS["2024"])["x"] == 1.0
     empty = driver._stats(Sweep(), by, WINDOWS["2025"])
     assert empty == {"trades": 0, "x": None, "mid": None, "alpha0": None}
 
