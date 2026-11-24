@@ -1,6 +1,6 @@
 # Short-vol structure width tuning for the board (design, EXP-189)
 
-**Status: DESIGN ONLY (user decisions 2026-11-24).** The code slices (section 11) are NOT started until this design merges. This PR adds this file only: no code, `spec.yaml` or test, and no edit to EXP-188's design or spec. Experiment id **EXP-189** (slice W1 re-checks that it is free).
+**Status: design merged (user decisions 2026-11-24); code slices (section 11) in progress.** The design PR added this file only, with no code, `spec.yaml` or test, and no edit to EXP-188's design or spec. Experiment id **EXP-189** (slice W1 re-checks that it is free).
 
 **Purpose.** Choose **production's** short-vol structure widths for the board, using production's forecast model only (**M0**, `size_v1_4`); no roster or per-model factor. If the board's widths change (a separate user decision), EXP-188 (`guides/size_decision_pnl_design.md`, production-exact) is rerun on them. EXP-189 has its own spec, pre-registration and PLANNED row, never changes EXP-188's spec or hash, and uses EXP-188's machinery as a library.
 
@@ -88,9 +88,12 @@ EXP-189 has its own `spec.yaml` (arms, grid, `N`, thresholds, success rule), its
 | W3 | Seeded draws, `tuning_C` receipt, anchor, on W4's sweep | ~170 / ~170 / 60 | W2, W4 |
 | W4 | Shared sweep and objective, tunings A, B, D, arm E (per-event `exp_pnl_sim` argmax, curves), 2025 and inner runs | ~170 / ~170 / 60 | W1 (parallel with W2) |
 | W5 | Tolerance bands for three `phi`, `tuning_band` receipt, realised-width and decline tables (T8), `fallback` arm, T9, adoption rule | ~170 / ~170 / 80 | W4 |
-| W6 | Breakeven alpha, report T2-T7, success table, proposed rule, driver and smoke, runbook | ~150 / ~140 / 100 | W5 |
+| W6a | Breakeven alpha (ladder sweep), T7 success table, recommendation, proposed rule | ~110 / ~170 / 20 | W4 |
+| W6b | Driver and smoke, report T2-T6, runbook | ~100 / ~90 / 80 | W5, W6a |
 
 Re-split (supervisor, user 2026-11-24): W2 and W4 run in parallel; W4 builds the shared sweep and objective, W3 adds only seeded draws, `tuning_C` and the anchor.
+
+Re-split (supervisor, 2026-11-24): W6 splits into W6a (pure logic: breakeven alpha, the T7 success table, the recommendation order, the proposed board rule; `size_width_success.py`) and W6b (driver, smoke run, T2-T6, runbook; after W5).
 
 New `size_width_*` modules only; `size_pnl_*` is imported unchanged.
 
