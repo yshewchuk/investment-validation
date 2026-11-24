@@ -29,7 +29,7 @@ def build_sample(chunk, events, sims, *, alpha, size=SAMPLE):
             name = shortvol.NAMES[(len(sample) + k) % len(shortvol.NAMES)]
             priced, legs, _ = shortvol.resolve_priced(chunk, i, name, ev["pred_move"], fill)
             entered = None if legs is None else shortvol.entry(priced)
-            if entered is None or not (math.isfinite(entered[0]) and entered[0] >= shortvol.MIN_DEBIT):
+            if entered is None or not (math.isfinite(entered[0]) and entered[0] > 0):
                 continue
             exits = [{"strike": leg["strike"], "side": shortvol._CLOSE[leg["side"]], "qty": leg["qty"]}
                      for leg in legs if leg["qty"] > 0]

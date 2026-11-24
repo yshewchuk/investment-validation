@@ -6,6 +6,7 @@ at exit by the rung rules. Pure functions over numpy/pandas: no I/O, no ledger. 
 call ``simulate``, ``score_events``, ``decide`` and ``score`` per quarter (future); no production caller
 yet. Progress logging: none needed (pure per-quarter functions).
 """
+import dataclasses
 import math
 
 import numpy as np
@@ -20,7 +21,8 @@ from engine.score import _mean_relative_spread
 from engine.structures import (BUY, PUT, SELL, STRUCTURES, ChainSnapshot, LadderTooCoarse, StructureError,
                                price_structure)
 from experiments.size_pnl_account import secured_per_contract
-from experiments.size_pnl_pool import MIN_WINDOW, put_means, structure_pnl
+from experiments.size_pnl_ladder import _SELECTOR
+from experiments.size_pnl_pool import put_means, structure_pnl
 from experiments.size_pnl_straddle import EXIT_UNQUOTED, lots
 
 NAMES = tuple(sorted(FORECAST_SIZED))
@@ -30,9 +32,6 @@ _OUT_COLS = ["event_id", "structure", "entry_cost", "exit_value", "rung", "lots"
              "pnl_dollars"]
 _CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
 _CLOSE = {BUY: SELL, SELL: BUY}
-# A numerical guard against float-noise debits, not a market rule: the design and _short_vol_rule
-# set no minimum debit.
-MIN_DEBIT = 1e-6
 
 
 class Refusal(ValueError):
@@ -63,6 +62,10 @@ def pinned(name):
         if leg.right != PUT:
             raise Refusal(_CONFLICT, f"{name}: leg {leg.name} is a call",
                           {"reason": "call_leg_refused", "structure": name, "field": leg.name})
+        # engine.structures and engine.v2.research._pricing each define an ExpirySelector, so compare the fields, not the objects.
+        if dataclasses.asdict(leg.expiry) != dataclasses.asdict(_SELECTOR):
+            raise Refusal(_CONFLICT, f"{name}: leg {leg.name} expiry selector differs from the ladder's",
+                          {"reason": "factory_default_mismatch", "structure": name, "field": leg.name})
     return spec
 
 
@@ -80,16 +83,6 @@ def _put_slots(chunk, i):
 def _sign(side):
     """+1 for a buy, -1 for a sell."""
     return 1.0 if side == BUY else -1.0
-
-
-def _floor_ok(legs):
-    """EXP-133's zero floor in dollars: the traded payoff is >= 0 at every traded strike."""
-    traded = [leg for leg in legs if leg["qty"] > 0]
-    for at in [leg["strike"] for leg in traded]:
-        payoff = sum(_sign(leg["side"]) * leg["qty"] * max(leg["strike"] - at, 0.0) for leg in traded)
-        if payoff < -1e-9:
-            return False
-    return True
 
 
 def chain_snapshot(chunk, i):
@@ -136,8 +129,6 @@ def resolve_priced(chunk, i, name, pred, fill):
         # and structure_value needs exact grid equality.
         legs.append({"name": leg.name, "strike": float(chunk["strike"][hit[0]]), "side": leg.side,
                      "qty": float(leg.qty), "idx": int(hit[0])})
-    if not _floor_ok(legs):
-        return None, None, "negative_floor"
     return priced, legs, None
 
 
@@ -218,7 +209,7 @@ def score_events(chunk, events, sims, name, *, alpha=0.5):
             else:
                 cost, rel = entered
                 row.update(entry_cost=cost, rel_spread=rel)
-                if not (math.isfinite(cost) and cost >= MIN_DEBIT):
+                if not cost > 0:
                     row["reason"] = "entry_not_debit"
                 else:
                     exits = [{"strike": leg["strike"], "side": _CLOSE[leg["side"]], "qty": leg["qty"]}
@@ -249,7 +240,7 @@ def decide(scored):
             continue
         name, month = row["structure"], pd.Timestamp(row["event_date"]).to_period("M")
         if (name, month) not in cache:  # the cutoff depends only on the month
-            cache[(name, month)] = trailing_cutoff(history.get(name), row["event_date"], min_window=MIN_WINDOW)
+            cache[(name, month)] = trailing_cutoff(history.get(name), row["event_date"])
         bar = cache[(name, month)]
         if bar is not None:
             cut[k] = bar
@@ -322,8 +313,8 @@ def score(chunk, events, decisions, name, alpha, *, drop_unquoted=False, mid_mar
         bound = _num(dec["entry_cost"])
         if not (math.isfinite(bound) and abs(bound - cost) <= 1e-9 and _num(dec["alpha"]) == float(alpha)):
             raise ValueError("decision was not priced at this alpha")
-        if not (math.isfinite(cost) and cost >= MIN_DEBIT):
-            raise ValueError(f"taken event {eid!r} has an entry debit below {MIN_DEBIT} a share ({cost!r})")
+        if not cost > 0:
+            raise ValueError(f"taken event {eid!r} has an entry cost that is not a debit ({cost!r})")
         traded = [leg for leg in legs if leg["qty"] > 0]
         rungs = [int(chunk["exit_rung"][leg["idx"]]) for leg in traded]
         if 3 in rungs:  # defined-risk floor: the whole structure is marked at zero

@@ -12,7 +12,7 @@ from engine.forecast_sizing import FORECAST_SIZED, forecast_params
 from engine.pnl_sim import expected_pnl
 from engine.portfolio import CONTRACT_MULTIPLIER
 from engine.score import _mean_relative_spread
-from engine.structures import CALL, PUT, STRUCTURES, ChainSnapshot, price_structure
+from engine.structures import CALL, PUT, STRUCTURES, ChainSnapshot, ExpirySelector, price_structure
 from experiments import size_pnl_ladder as lad
 from experiments import size_pnl_shortvol as sv
 from experiments.size_pnl_pool import build_pool
@@ -166,6 +166,19 @@ def test_score_refuses_a_drifted_factory(monkeypatch):
     assert caught.value.details["reason"] == "factory_default_mismatch"
 
 
+def test_pinned_refuses_a_leg_expiry_off_the_ladder_selector(monkeypatch):
+    real = STRUCTURES["TWIN-P"]
+    off = ExpirySelector(kind="first_post_event", max_dte=30)
+    monkeypatch.setitem(STRUCTURES, "TWIN-P",
+                        lambda: dataclasses.replace(real(), legs=tuple(dataclasses.replace(leg, expiry=off)
+                                                                       for leg in real().legs)))
+    with pytest.raises(sv.Refusal) as caught:
+        sv.pinned("TWIN-P")
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.details["reason"] == "factory_default_mismatch"
+    assert caught.value.details["structure"] == "TWIN-P"
+
+
 @pytest.mark.parametrize("index", [0, 1])
 def test_pinned_refuses_any_call_leg(monkeypatch, index):
     # Index 0 is the short anchor leg (side SELL) and index 1 a long wing: each refuses on its own.
@@ -239,10 +252,12 @@ def test_missing_mirror_strike_is_unresolved():
     assert sv.resolve(chunk, 0, "TWIN-P", PRED) == (None, "structure_unresolved")
 
 
-def test_negative_floor_refuses(monkeypatch):
+def test_flipped_condor_now_resolves(monkeypatch):
+    # The EXP-133 zero floor is gone: a short-the-wings condor resolves like any other.
     real = STRUCTURES["CND-PS"]
     monkeypatch.setitem(STRUCTURES, "CND-PS", lambda **kw: flipped(real(**kw)))
-    assert sv.resolve(chunk_of(("A", {})), 0, "CND-PS", PRED) == (None, "negative_floor")
+    legs, reason = sv.resolve(chunk_of(("A", {})), 0, "CND-PS", PRED)
+    assert reason is None and len(legs) > 0
 
 
 def test_unflipped_condor_has_a_floor():
@@ -303,20 +318,30 @@ def test_score_events_reasons(pool):
     nan_leg = chunk_of(("A", {}), entry=lambda k: (NAN, NAN) if k == 94 else quote(k))
     assert run(nan_leg, events_for("A"), pool).loc[0, "reason"] == "entry_quote_unusable"
     flat = chunk_of(("A", {}), entry=lambda k: (1.0, 2.0))  # buys and sells cancel to exactly 0
-    assert run(flat, events_for("A"), pool).loc[0, "reason"] == "entry_not_debit"
+    out = run(flat, events_for("A"), pool).iloc[0]
+    assert out["reason"] == "entry_not_debit" and out["status"] == "undetermined" and math.isnan(out["exp_pnl_sim"])
 
 
-def test_debit_of_a_nanodollar_is_not_a_debit(pool):
-    # Mids are 1.5 everywhere except the BUY at 94 (mid 1.5 + 1e-9): the entry debit is 1e-9 a share, under MIN_DEBIT.
+def test_score_events_negative_cost_is_not_a_debit(pool):
+    # Sells (97, 103) mid 2.5 each exceed buys (94, 106) mid 1.5 each: the entry cost is -2.0 a share.
+    neg = chunk_of(("A", {}), entry=lambda k: (2.0, 3.0) if k in (97, 103) else (1.0, 2.0))
+    out = run(neg, events_for("A"), pool).iloc[0]
+    assert out["entry_cost"] == pytest.approx(-2.0)
+    assert out["reason"] == "entry_not_debit" and out["status"] == "undetermined" and math.isnan(out["exp_pnl_sim"])
+
+
+def test_debit_of_a_nanodollar_is_simulated(pool):
+    # Mids are 1.5 everywhere except the BUY at 94 (mid 1.5 + 1e-9): the entry debit is 1e-9 a share, and any positive debit is simulated.
     thin = chunk_of(("A", {}), entry=lambda k: (1.0, 2.0 + 2e-9) if k == 94 else (1.0, 2.0))
     out = run(thin, events_for("A"), pool).iloc[0]
-    assert out["entry_cost"] == pytest.approx(1e-9, abs=1e-12) and out["reason"] == "entry_not_debit"
+    assert out["entry_cost"] == pytest.approx(1e-9, abs=1e-12)
+    assert out["status"] == "scored" and math.isfinite(out["exp_pnl_sim"]) and pd.isna(out["reason"])
 
 
-def test_score_refuses_a_nanodollar_debit():
+def test_score_accepts_a_nanodollar_debit():
     thin = chunk_of(("A", {}), entry=lambda k: (1.0, 2.0 + 2e-9) if k == 94 else (1.0, 2.0))
-    with pytest.raises(ValueError, match="entry debit below"):
-        sv.score(thin, events_for("A"), taken(thin, "A"), "CND-PS", 0.5)
+    scored = sv.score(thin, events_for("A"), taken(thin, "A"), "CND-PS", 0.5)
+    assert len(scored) == 1 and scored.iloc[0]["entry_cost"] == pytest.approx(1e-9, abs=1e-12)
 
 
 def test_score_events_refuses_bad_alpha(pool):

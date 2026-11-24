@@ -17,7 +17,6 @@ from engine.pnl_sim import (DRAWS, MIN_POOL, MIN_SPOT_FRACTION, ResidualPool, bl
 from engine.v2.ops.errors import fail
 
 COMMON_START = pd.Timestamp("2023-01-01")
-MIN_WINDOW = 100
 TOLERANCE = 1e-9
 _CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
 _TABLE_COLS = ("event_date", "pred_move", "pred_crush")
@@ -131,7 +130,7 @@ def undetermined_reason(pool, history, event_date):
     """Why an event cannot be scored under a model: ``thin_pool``, ``thin_window``, or ``None``."""
     if pool.before(event_date) < MIN_POOL:
         return "thin_pool"
-    if trailing_cutoff(history, event_date, min_window=MIN_WINDOW) is None:
+    if trailing_cutoff(history, event_date) is None:
         return "thin_window"
     return None
 
