@@ -349,7 +349,7 @@ def test_decisions_cover_taken_not_taken_filter_and_undetermined(tmp_path):
             assert pd.isna(out.loc[eid, "reason"])
         else:
             assert out.loc[eid, "reason"] == reason
-    assert list(out.columns) == [c for c in sd.DECISION_COLS if c != "event_id"]
+    assert list(out.columns) == [c for c in sd.DECISION_COLS if c != "event_id"] + ["gate_score"]
 
 
 def test_thin_pool_is_undetermined_not_no(tmp_path):
@@ -378,6 +378,17 @@ def test_threshold_boundary():
     gate = gp.Gate(Constant(below), tuple(FEATURES), fold.REGISTERED_THRESHOLD, inputs, "a", "b")
     out = gp.month_decider(gate, table, labels, START)(pd.DataFrame([ev("hi", 3.0)]), good("hi")).set_index("event_id")
     assert out.loc["hi", "status"] == "not_taken" and out.loc["hi", "reason"] == "below_gate_threshold"
+
+
+def test_gate_score_is_the_fold_prediction_and_nan_when_undetermined():
+    table, labels = history()
+    inputs = inputs_frame(["hi"]).set_index("event_id")[FEATURES].astype(float)
+    gate = gp.Gate(Constant(0.42), tuple(FEATURES), fold.REGISTERED_THRESHOLD, inputs, "a", "b")
+    events = pd.DataFrame([ev("hi", 3.0), ev("absent", 3.0)])
+    out = gp.month_decider(gate, table, labels, START)(events, good("hi", "absent")).set_index("event_id")
+    assert out.loc["hi", "gate_score"] == pytest.approx(0.42)
+    assert out.loc["absent", "status"] == "undetermined"
+    assert np.isnan(out.loc["absent", "gate_score"])
 
 
 def test_month_decider_enforces_label_availability():
