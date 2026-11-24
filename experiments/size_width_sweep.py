@@ -20,6 +20,7 @@ _TAKEN = ["event_id", "event_date", "structure", "k", "entry_date", "exit_date",
           "exit_value_mid", "pnl_dollars", "pnl_dollars_mid", "secured_per_contract"]
 RET_COLS = [f"ret_a{a:.2f}" for a in LADDER]
 _DECLINED = ["event_id", "event_date", "structure", "status", "reason", "arm"]
+TAKEN_COLS = _TAKEN  # public alias for the other width modules
 
 
 def admit_k(k):
@@ -77,8 +78,7 @@ class Sweep:
         events = events[keep]
         ids = set(events["event_id"].astype(str))
         for name in self.names:
-            by_k = {k: self.pricing.score_events(chunk, scaled(events, k), sims, name, alpha=ALPHA) for k in self.ks}
-            for arm, frame in [*by_k.items(), (E_ARM, pick_e(by_k, self.ks))]:
+            for arm, frame in self._frames(chunk, events, sims, name):
                 self._decide(chunk, events, frame, name, arm, ids, output, sessions)
         rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
         print(f"[width_sweep] month events={len(events)} output={output} elapsed={time.time() - started:.1f}s rss={rss:.0f}MiB",
@@ -89,6 +89,11 @@ class Sweep:
         """The declined (not taken) decisions of the last ``add_month``: event_id, event_date, structure, status, reason and arm (a str).
         Empty with those six columns when none, in particular after a burn-in month (``output`` False)."""
         return pd.concat(self.fresh_declined, ignore_index=True) if self.fresh_declined else pd.DataFrame(columns=_DECLINED)
+
+    def _frames(self, chunk, events, sims, name):
+        """[(arm, frame)] for one structure: every grid k, then arm E. Subclasses override this."""
+        by_k = {k: self.pricing.score_events(chunk, scaled(events, k), sims, name, alpha=ALPHA) for k in self.ks}
+        return [*by_k.items(), (E_ARM, pick_e(by_k, self.ks))]
 
     def _decide(self, chunk, events, frame, name, arm, ids, output, sessions):
         """Adds ``frame`` to the history of (name, arm) and, when ``output``, decides, prices and records the taken rows and the declined ones."""
