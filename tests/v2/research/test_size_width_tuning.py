@@ -269,6 +269,15 @@ def test_frozen_refuses_a_unit_k_off_the_grid(tmp_path):
     assert exc.value.details["reason"] == "tuning_receipt_changed"
 
 
+def test_frozen_refuses_a_unit_k_that_is_true(tmp_path):
+    body = _body("A")
+    body["all"]["k"] = True
+    _write_at(tmp_path, "A", body)
+    with pytest.raises(Refusal) as exc:
+        tuning.frozen(tmp_path, "A", "h1")
+    assert exc.value.details["reason"] == "tuning_receipt_changed"
+
+
 def test_run_outer_refuses_a_missing_receipt_before_any_evaluation(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(tuning, "evaluate", lambda *a, **k: calls.append(a) or {})
@@ -308,6 +317,14 @@ def test_run_outer_looks_up_arm_e_rows_under_e_arm(tmp_path):
 
 
 # ---- evaluate -------------------------------------------------------------
+
+@pytest.mark.parametrize("bad", [99.0, "1.0", True])
+def test_evaluate_refuses_a_factor_that_is_not_an_admitted_k(bad):
+    by = {n: 1.0 for n in NAMES}
+    by["CND-PS"] = bad
+    with pytest.raises(ValueError):
+        tuning.evaluate(Sweep(), by, INNER)
+
 
 def test_evaluate_combines_the_structures_into_one_account():
     sw = Sweep()

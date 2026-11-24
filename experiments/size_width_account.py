@@ -1,9 +1,4 @@
-"""EXP-189 account (design section 2): EXP-188 Amendment 2 policy with start_equity 200,000.
-
-Reuses ``experiments.size_pnl_account``: its ``margin`` (EXP-134 ``margin.simulate``, unchanged) and its
-``secured_per_contract``. Only the starting equity differs: every short put is secured at strike x 100,
-cap 66% of marked equity, target share 25% of headroom, expensive-first on entry-date ties.
-"""
+"""EXP-189 account (design section 2): EXP-188 Amendment 2 policy with start_equity 200,000, reusing size_pnl_account."""
 import numpy as np
 import pandas as pd
 

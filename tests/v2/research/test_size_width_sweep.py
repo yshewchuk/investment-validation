@@ -8,7 +8,7 @@ from experiments import size_pnl_shortvol as sv
 from experiments.size_pnl_pool import build_pool
 from experiments.size_pnl_straddle import lots
 from experiments.size_width_sizing import GRID, k_params
-from experiments.size_width_sweep import _TAKEN, E_ARM, WINDOWS, Sweep, in_window, pick_e, scaled
+from experiments.size_width_sweep import _TAKEN, E_ARM, WINDOWS, Sweep, admit_k, in_window, pick_e, scaled
 from tests.v2.research.test_size_pnl_shortvol import _tables, chunk_of, events_for
 
 DRAW = 200
@@ -238,11 +238,18 @@ def test_taken_row_and_scored_row_match_a_hand_derived_condor(monkeypatch):
     assert hit["entry_cost"] == pytest.approx(cost2)
 
 
-@pytest.mark.parametrize("kwargs", [{"ks": ()}, {"ks": (1.0, 1.0)}, {"ks": (99.0,)},
+@pytest.mark.parametrize("kwargs", [{"ks": ()}, {"ks": (1.0, 1.0)}, {"ks": (99.0,)}, {"ks": (True,)}, {"ks": (1.1,)},
                                     {"names": ()}, {"names": (NAME, NAME)}, {"names": ("NOT-A-STRUCTURE",)}])
 def test_sweep_refuses_an_ungridded_or_repeated_admission(kwargs):
     with pytest.raises(ValueError):
         Sweep(**kwargs)
+
+
+def test_admit_k_accepts_grid_reals_and_refuses_everything_else():
+    assert admit_k(1) == 1.0 and admit_k(1.0) == 1.0 and admit_k(2.5) == 2.5
+    for bad in (True, 99.0, "1.0", None):
+        with pytest.raises(ValueError):
+            admit_k(bad)
 
 
 def test_rows_refuses_a_taken_row_with_no_exit_date():

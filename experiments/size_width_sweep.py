@@ -1,9 +1,4 @@
-"""EXP-189 W4: the shared sweep over the k grid for the seven short-vol structures (design sections 3, 5).
-
-k scales the forecast the sizing rule reads (forecast_params at k*f equals size_width_sizing.k_params at k), so EXP-188's
-scoring, cutoffs and marks are unchanged. Arm E picks the grid k with the highest exp_pnl_sim per event and structure
-(ties: nearest 1, then smaller); no realised outcome is read. Progress: one stderr line per month.
-"""
+"""EXP-189 W4: shared k-grid sweep for the seven short-vol structures (design sections 3, 5); arm E = best exp_pnl_sim per event."""
 import resource
 import sys
 import time
@@ -15,14 +10,20 @@ from engine.pnl_sim import DRAWS
 from experiments import size_pnl_shortvol as sv
 from experiments.size_width_sizing import GRID
 
-ALPHA = 0.5
-E_ARM = "E"
+ALPHA, E_ARM = 0.5, "E"
 WINDOWS = {"2023H2": (pd.Timestamp("2023-07-01"), pd.Timestamp("2024-01-01")),
            "2024": (pd.Timestamp("2024-01-01"), pd.Timestamp("2025-01-01")),
            "2025": (pd.Timestamp("2025-01-01"), pd.Timestamp("2026-01-01"))}
 INNER = (pd.Timestamp("2023-07-01"), pd.Timestamp("2025-01-01"))
 _TAKEN = ["event_id", "event_date", "structure", "k", "entry_date", "exit_date", "entry_cost", "exit_value",
           "exit_value_mid", "pnl_dollars", "pnl_dollars_mid", "secured_per_contract"]
+
+
+def admit_k(k):
+    """A grid k: a real number (not a bool or a string) on GRID; anything else is a ValueError."""
+    if isinstance(k, bool) or not isinstance(k, (int, float)) or k not in GRID:
+        raise ValueError(f"k must be one of the grid values, got {k!r}")
+    return float(k)
 
 
 def scaled(events, k):
@@ -54,8 +55,8 @@ def pick_e(by_k, ks):
 class Sweep:
     """Scored history (it feeds each trailing cutoff), taken rows and decline reasons per (structure, arm); arm is a grid k or E_ARM."""
     def __init__(self, ks=GRID, names=sv.NAMES):
-        self.ks, self.names = tuple(ks), tuple(names)
-        if not self.ks or len(set(self.ks)) != len(self.ks) or any(k not in GRID for k in self.ks): raise ValueError(f"ks must be non-empty, unique and in GRID: {self.ks}")
+        self.ks, self.names = tuple(admit_k(k) for k in ks), tuple(names)
+        if not self.ks or len(set(self.ks)) != len(self.ks): raise ValueError(f"ks must be non-empty and unique: {self.ks}")
         if not self.names or len(set(self.names)) != len(self.names) or any(n not in sv.NAMES for n in self.names): raise ValueError(f"names must be non-empty, unique and in sv.NAMES: {self.names}")
         self.scored, self.taken, self.declined = {}, {}, {}
 

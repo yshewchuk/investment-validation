@@ -1,8 +1,4 @@
-"""EXP-189 W4: objective, tie rule, tunings A, B, D, arm E's summary, receipts and 2025 evaluation (design sections 3, 5, 6).
-
-Tuning reads the inner window (2023H2-2024) of the sweep only. Objective: stand-alone $200,000 account return at marks_mid;
-standard error: sd of quarterly returns / sqrt(quarter count), 0.0 under two quarters.
-"""
+"""EXP-189 W4: tuning A, B, D on the inner window, arm E summary, receipts, 2025 evaluation (design sections 3, 5, 6)."""
 import math
 from pathlib import Path
 
@@ -13,12 +9,11 @@ from experiments import size_pnl_receipts as receipts
 from experiments import size_width_account as account
 from experiments.size_pnl_shortvol import NAMES, Refusal
 from experiments.size_width_sizing import GRID
-from experiments.size_width_sweep import E_ARM, INNER, WINDOWS
+from experiments.size_width_sweep import E_ARM, INNER, WINDOWS, admit_k
 
-MIN_TRADES = 300
+MIN_TRADES, SAME_K_SHARE = 300, 0.8
 EDGES = (min(GRID), max(GRID))
 TWIN = ("TWIN-P", "TWIN-P5")
-SAME_K_SHARE = 0.8
 _CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
 
 
@@ -92,7 +87,7 @@ def e_summary(sweep, window=INNER):
 
 def evaluate(sweep, by_structure, window):
     """Seven-structure $200,000 account at marks_mid and each structure's own account in ``window``; ``by_structure``: structure -> k or E_ARM."""
-    pairs = [(n, by_structure[n]) for n in NAMES]
+    pairs = [(n, by_structure[n] if by_structure[n] == E_ARM else admit_k(by_structure[n])) for n in NAMES]
     per = {}
     for pair in pairs:
         one = sweep.rows([pair], window)
@@ -123,13 +118,12 @@ def _valid(arm, receipt):
         return False
     if arm not in ("A", "B", "D"):
         return True
-    return set(body) == set(units(arm)) and all(
-        isinstance(body[u], dict) and body[u].get("members") == list(m) and _grid_k(body[u].get("k"))
-        for u, m in units(arm).items())
-
-
-def _grid_k(k):
-    return not isinstance(k, bool) and isinstance(k, (int, float)) and k in GRID
+    try:
+        return set(body) == set(units(arm)) and all(
+            isinstance(body[u], dict) and body[u].get("members") == list(m) and admit_k(body[u].get("k")) is not None
+            for u, m in units(arm).items())
+    except ValueError:
+        return False
 
 
 def frozen(out, arm, inputs_hash):
