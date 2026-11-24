@@ -55,7 +55,7 @@ C versus B tests whether a smoother simulated objective picks better factors tha
 
 ## 6. Run order, outputs
 
-`inner` (fit, sweeps, tunings A-D, anchor, tolerance band of section 12) writes the `tuning_A`..`tuning_D` and `tuning_band` receipts; `outer` (2025) refuses without all of them. Each arm also runs on the inner window (2023H2, 2024) for the in-sample reading. One heavy job at a time, `bounded_run`, quarter chunks, stderr progress at a bounded cadence (stage start/end, done/total, rate, ETA, RSS). Cost (not measured; the slice smoke measures): C is `N` fast-path simulations of one model; A, B, D are dot products on the real path.
+`inner` (fit, sweeps, tunings A-D, anchor, tolerance band of section 12) writes the `tuning_A`..`tuning_D` and `tuning_band` receipts; `outer` (2025) refuses without the receipt of every arm it runs (an omitted arm, such as C under `fake_not_calibrated`, needs none). Each arm also runs on the inner window (2023H2, 2024) for the in-sample reading. One heavy job at a time, `bounded_run`, quarter chunks, stderr progress at a bounded cadence (stage start/end, done/total, rate, ETA, RSS). Cost (not measured; the slice smoke measures): C is `N` fast-path simulations of one model; A, B, D are dot products on the real path.
 
 `REPORT.md` (2025 tables titled "2025 NOT blind for widths"): T1 error model and calibration; T2 chosen factors beside `k = 1`; T3 sweep curves per structure for B and C (score, standard error, trades, declined share, **flatness**: best minus the score at `k = 1` and its neighbours in standard errors, and the span of `k` within one standard error of the best); T4 anchor; T5 production versus A-D: per trade (return, count), `marks_mid`, seven-structure cash-secured account (both mark sets; final equity, return, drawdown, wanted/funded) for 2025 and the inner halves; T6 per-structure stand-alone accounts; T7 success table (section 7); T8-T9 section 12. No bootstrap interval is added; a flat curve is the main caution.
 
@@ -83,7 +83,7 @@ Candidate X in {A, B, C, D} **passes** iff, in the cash-secured seven-structure 
 | R3 | seeds fixed by the sha256 recipe of section 4 |
 | R4 | receipts atomic, immutable, bound to the inputs receipt; a changed input refuses at replay |
 | R5 | fake models carry ids `synthetic-w-<draw>` and are never reported as models; M0's `model_id` unchanged |
-| R6 | tuning reads 2023-24 only; 2025 refuses without the five receipts; 2025 decisions are written month by month before that month's labels are read (EXP-188 R6) |
+| R6 | tuning reads 2023-24 only; 2025 refuses without the receipt of each arm it runs (`tuning_band` only for the band and `fallback`); 2025 decisions are written month by month before that month's labels are read (EXP-188 R6) |
 
 ## 9. Registration, spec hash
 
@@ -112,7 +112,7 @@ Each slice stays near 150 code lines and adds only new `size_width_*` modules; E
 
 ## 12. Width flexibility: tolerance band, nearest-feasible fallback, snap deviation (user 2026-11-24)
 
-**Question.** `size_pnl_shortvol.resolve` snaps each leg to the nearest listed strike and declines the candidate (`ladder_too_coarse`) when two legs collapse. Supervisor measurement from the 2025 run (not re-verified; T8 reproduces it): for M0 at `k = 1` that decline hit about 27% of short-vol candidates at market cap >= $10B and about 40% at $1-10B, the largest single non-trade reason. How wide a range of widths is nearly as good as the best, and can a nearby feasible geometry recover those candidates? M0 only, tuned on 2023-24, 2025 NOT blind for widths.
+**Question.** `size_pnl_shortvol.resolve` resolves each leg to a listed strike (a mirrored leg through its partner) and declines the candidate (`ladder_too_coarse`) when two legs collapse. Supervisor measurement from the 2025 run (not re-verified; T8 reproduces it): for M0 at `k = 1` that decline hit about 27% of short-vol candidates at market cap >= $10B and about 40% at $1-10B, the largest single non-trade reason. How wide a range of widths is nearly as good as the best, and can a nearby feasible geometry recover those candidates? M0 only, tuned on 2023-24, 2025 NOT blind for widths.
 
 **12.1 (a) Tolerance band.** Per structure, from the sweep curve (section 5 objective): the contiguous range of `k` around the argmax where the score stays at or above a fraction `phi` of the peak (recommended 0.90, open decision 5), ends located by linear interpolation between grid points, reported as a width ratio to production (`k`) and to the actual move (from the anchor). Computed on B's and C's curves (C primary, smoother) and the anchor for reference. A non-positive peak gives `no_positive_peak` (no band, no fallback); a band touching the grid edge is `band_open` (flagged). Frozen from 2023-24 in the `tuning_band` receipt.
 
