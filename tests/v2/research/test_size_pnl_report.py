@@ -9,6 +9,9 @@ import pytest
 
 from experiments.size_pnl_contrast import contrast
 from experiments.size_pnl_report import (
+    CHOOSER_STATEMENT,
+    POST_HOC,
+    TABLE_IDS_NOTE,
     _md_table,
     _per_event,
     build_report,
@@ -334,7 +337,20 @@ def test_cents_and_t3_t6_t9_refusals():
         t3_forecast(pd.DataFrame({"model_id": ["m1"], "pred": [np.nan], "actual": [0.5]}), [])
 
 
+def test_t10_verdicts_disclose_the_post_hoc_revision():
+    pairs = {"p0": {"as_is": _summary(1)}, "p1": {"as_is": _summary(1)}}
+    out = t10_verdicts({"H1": (1, pairs)})
+    assert POST_HOC in out
+    assert "preregistered_original" in out
+
+
+def test_chooser_statement_says_independent_books_and_not_board_pnl():
+    assert "independent books" in CHOOSER_STATEMENT
+    assert "not board P&L" in CHOOSER_STATEMENT
+
+
 def test_build_report_joins_sections():
     amendment = ("Amendment 6 (post-hoc revision by the user, 2026-11-24): short vol is as-is only; the re-tuned arm, T5 "
                  "and the divisor c were removed.")
-    assert build_report(["A", "B"]) == f"# EXP-188 REPORT\n\n{amendment}\n\nA\n\nB\n"
+    assert build_report(["A", "B"]) == (f"# EXP-188 REPORT\n\n{amendment}\n\n{CHOOSER_STATEMENT}\n\n{TABLE_IDS_NOTE}"
+                                        "\n\nA\n\nB\n")

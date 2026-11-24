@@ -4,7 +4,7 @@ Operating steps for `experiments/EXP-188_size_decision_pnl_rescore/run.py --stag
 `guides/size_decision_pnl_design.md`. Only the supervisor runs these steps (one heavy job at a time, never
 beside the v14 run, container 12 GiB). Agents never run them.
 
-`--stage` is `inner` (2023-24 tuning) then `outer` (2025 decisions). The v14 2025 refit predictions are bound by
+`--stage` is `inner` (2023-24 pools, cutoffs and decisions; Amendment 6 removed the tuning stage) then `outer` (2025 decisions). The v14 2025 refit predictions are bound by
 `size_pnl_outer_inputs` (design section 12, #2658). A ready model with no 2025 rows still refuses
 `outer_predictions_unbound`.
 
@@ -30,8 +30,8 @@ python3 tools/bounded_run.py --heavy --cores 8 -- python3 experiments/EXP-188_si
   --stage inner --no-ledger --expected <expected.json> --sources <module>:<func> --sources-config <config.json> --out-dir <out-dir>
 ```
 
-Use an `--out-dir` under `experiments/EXP-188_*/results/`. The run writes `receipts/inputs_inner.json`, one
-`receipts/tuning_<model>.json` per ready model, and `receipts/inner.json`. Receipts are immutable: a rerun with
+Use an `--out-dir` under `experiments/EXP-188_*/results/`. The run writes `receipts/inputs_inner.json`, and
+`receipts/inner.json` (no tuning receipts). Receipts are immutable: a rerun with
 the same inputs replays read-only; changed inputs refuse `EXPERIMENT_IDENTITY_CONFLICT`. Never delete a receipt
 to force a rerun; use a fresh out-dir and a fresh experiment. Without `BOUNDED_RUN_NESTED=1` the runner refuses
 `not_bounded`.
@@ -58,7 +58,7 @@ time from stderr before scheduling the full run.
 ## Outer stage
 
 Run `--stage outer` without `--event-ids`, against the same `--out-dir` as the completed inner run. It refuses
-before any chunk is built unless `inner.json` and every ready model's tuning receipt exist and match this run
+before any chunk is built unless `inner.json` exists and match this run
 (`inner_receipt_mismatch`, `scope_mismatch`, `inner_inputs_mismatch`, `inner_tables_mismatch`). It warms the
 history from 2024-07, decides each 2025 month before reading that month's labels, and writes
 `receipts/inputs_outer.json`, `receipts/outer.json` and `decisions.parquet` (model, book, arm or rule, structure,
@@ -80,5 +80,22 @@ schedule the full run.
 Exit 0 prints a JSON summary on stdout. Exit 2 prints `{"refused": code, "message": ..., "reason": ...}`;
 `reason` is the machine-readable cause (for example `sources_invalid`, `expected_mismatch`, `not_bounded`,
 `no_ready_models`, `key_not_admitted`). Progress goes to stderr: stage start and end with elapsed time and RSS,
-quarters done with rate and ETA, and per-model tuning lines. The synthetic calibration arm
+quarters done with rate and ETA, and per-model progress lines. The synthetic calibration arm
 (`guides/size_pnl_synthetic_calibration_design.md`) is a separate slice that will get its own gated helper and reuses `model_events`.
+
+## Report stage (Amendment 6)
+
+`--stage report --no-ledger` assembles `REPORT.md` from the completed outer receipts; it is read-only and never rescores.
+Inputs beyond the outer run: `--stored-gate` (EXP-187 `transactions_*.csv`, mandatory when G_PROD rows exist),
+optional `--accept-gate-gap TEXT` and `--gate-ladder PATH`, and an optional `board_ledger` directory in `--sources-config`.
+The report is a post-hoc revision by the user (2026-11-24); read it in this order:
+
+1. The header: the Amendment 6 line, the chooser statement (seven independent books, totals are not board P&L) and the
+   table-id note (T5 is retired; T6-T11 keep their ids because `spec.yaml` names them).
+2. T10 verdicts, each labelled "post-hoc revision by the user"; the pre-registered text stays in `spec.yaml`
+   `preregistered_original`. H2 is production-faithful only if the M0 gate agreement section reaches its bar or the user
+   accepts the gap.
+3. The board-match section (`not_available` with a reason when the ledger holds no common events) and the
+   **Production audit** table (18 rows: imports, fixed, kept, out of scope; kept rows are the user's open questions).
+
+The T11 synthetic controls stay in this run (design section 18, open question 1).

@@ -19,6 +19,7 @@ from experiments import size_pnl_account, size_pnl_driver, size_pnl_gate_agreeme
 from experiments import size_pnl_synthetic_eval as synthetic_eval
 from experiments import size_pnl_gprod_report as gprod_report
 from experiments import size_pnl_board_match as board_match
+from experiments import size_pnl_audit
 from experiments.size_pnl_inputs import PAIRS
 from experiments.size_pnl_shortvol import Refusal
 from experiments.size_pnl_straddle import GATE_RULE
@@ -424,6 +425,7 @@ def _sections(out, outer, inputs, inner, tickers, stored_gate=None, accepted_gap
                                           quarter_of=ctx_o["quarter_of"], tick=tick, stored_gate=stored_gate, accepted_gap=accepted_gap, ladder=ladder)
     m0 = raw[(raw["model_id"] == role_model.get("M0")) & (raw["book"] == "short_vol") & (raw["arm_or_rule"] == "as_is")][["event_id", "structure", "event_date"]]
     sections.append(board_match.section(board_ledger, m0, None))  # Amendment 6: the board-match check, research-only
+    sections.append(size_pnl_audit.section())  # Amendment 6: the production-audit table, static text
     every = raw  # raw holds the G_PROD rows too: the Amendment 2 accounts read every row once
     taken_all = every[every["status"] == "taken"].assign(model_id=every["model_id"].map(label_of), taken=True)  # Amendment 2: every taken row, not only E
     universe = every.assign(model_id=every["model_id"].map(label_of))  # Amendment 2: every decision row, of any status, discovers the account keys

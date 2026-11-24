@@ -275,5 +275,5 @@ def test_without_inner_decisions_the_report_is_unchanged_in_shape(tmp_path):
     out = build(tmp_path)
     summary = assemble_mod.assemble(out, plan_frame(), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
-    assert summary["sections"] == 16  # includes main's Amendment 2 account section, the Amendment 6 board-match section and the three G_PROD sections
+    assert summary["sections"] == 17  # includes main's Amendment 2 account section, the Amendment 6 board-match section, the three G_PROD sections and the Amendment 6 production-audit section
     assert "### Inner window" not in text
