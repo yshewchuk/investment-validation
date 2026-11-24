@@ -57,6 +57,7 @@ class Sources:
     crush_table_hash: str = ""
     exclusions: dict = field(default_factory=dict)  # reason -> set of event ids, filled by the table providers
     gate: object = None  # Amendment 3: a size_pnl_gprod.Gate, or None (the pre-registered run)
+    board_ledger: str | None = None  # Amendment 6: optional directory of the board's prediction jsonl, read only by the report
 
 
 def check_sources(src):

@@ -22,7 +22,7 @@ def test_run_py_report_stage_calls_assemble_with_the_plan_frame_and_admitted(tmp
     out_dir, plan, kwargs = calls[0]
     pd.testing.assert_frame_equal(plan, PLAN_FRAME)  # the plan frame itself: assemble derives the tickers and the binding from it
     assert kwargs.pop("admitted") is src.admitted  # check_plan runs inside assemble, on the sources' admitted events
-    assert kwargs == {"expected": src.expected, "spec_hash": "SPEC", "snapshot": "snap-1", "stored_gate": None}  # the requested identity; no tickers or binding; no stored gate given
+    assert kwargs == {"expected": src.expected, "spec_hash": "SPEC", "snapshot": "snap-1", "stored_gate": None, "board_ledger": None}  # the requested identity; no tickers or binding; no stored gate or board ledger given
     assert json.loads(capsys.readouterr().out)["sections"] == 0
 
 
