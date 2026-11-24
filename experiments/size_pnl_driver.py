@@ -382,8 +382,7 @@ def _unbound_outer(ready):
 
 
 def _model_state():
-    edges = pd.DataFrame({"event_date": pd.Series([], dtype="datetime64[ns]"), "edge": pd.Series([], dtype=float)})
-    return {"scored": {"as_is": []}, "edges": edges}
+    return {"scored": {"as_is": []}}
 
 
 def _ends(flag, score_at):
@@ -398,7 +397,7 @@ def _rows(mid, book, arm, dec, taken, events, taken_mid=None, secured=None, sess
     and exit_date (ISO, from ``sessions``) and secured_per_contract (from ``secured``; 0.0 for the straddle, which
     size_pnl_account.straddle_rows later restates as debit x 100, and NaN for short vol without ``secured``), filled on taken rows only.
     With ``sessions`` None the frame has exactly the pre-Amendment 2 columns, so the synthetic run's decisions carry no account columns.
-    ``ends`` (Amendment 6b) is None or (taken_a0, taken_a1), the breakeven endpoint scores; when given, the pnl_dollars_a0/_a1 columns are added."""
+    ``ends`` (Amendment 7) is None or (taken_a0, taken_a1), the breakeven endpoint scores; when given, the pnl_dollars_a0/_a1 columns are added."""
     take = [c for c in [*_MARKS, "entry_cost", "pnl_per_share"] if c not in dec.columns]
     fc = events[["event_id", "pred_move", "pred_crush"]].assign(event_id=events["event_id"].astype(str))
     frame = dec.merge(taken[["event_id", *take]], on="event_id", how="left").merge(fc, on="event_id", how="left")
@@ -432,12 +431,14 @@ def _kept(frame, bad):
 
 
 def _month(mid, events, scored, bad, chunk, start_m, st, *, emit_from=None, sessions=None, gate=None, endpoints=None):
-    """Pass B for one model and calendar month: drop the ``bad`` ids from the events, the scored frames and the straddle
-    inputs, then steps 7a-7d on Pass A's frames. Warm-up months (before OUTER[0]) apply the same mask (they feed history)
-    but only add history and emit no rows. ``sessions`` (the Amendment 2 account dates) is None in the synthetic run: then the
-    secured-cash lookup is not called and the rows carry no account columns; a dict (possibly empty) keeps them.
-    ``gate`` (Amendment 3) is a per-model month decider from size_pnl_gprod.month_decider; it adds the G_PROD straddle rows on output months only; it never touches ``st['edges']`` or the short-vol frames.
-    ``endpoints`` (Amendment 6b) stores the breakeven endpoints; None means ``sessions is not None``, so only the inner pass sets it explicitly."""
+    """Pass B for one model and calendar month: drop the ``bad`` ids from the events and the scored frames, then steps 7a-7d
+    on Pass A's frames. Warm-up months (before OUTER[0]) apply the same mask (they feed history) but only add history and emit
+    no rows. ``sessions`` (the Amendment 2 account dates) is None in the synthetic run: then the secured-cash lookup is not
+    called and the rows carry no account columns; a dict (possibly empty) keeps them.
+    The straddle book is G_PROD only (Amendment 6). ``gate`` is a per-model month decider from size_pnl_gprod.month_decider; the
+    inner and synthetic stages run without it (the fold is trained through 2024, so it cannot score 2023-2024 honestly), so they
+    emit no straddle rows. ``st`` carries only the short-vol scored frames.
+    ``endpoints`` (Amendment 7) stores the breakeven endpoints; None means ``sessions is not None``, so only the inner pass sets it explicitly."""
     output = start_m >= (pd.Timestamp(OUTER[0]) if emit_from is None else emit_from)
     flag = (sessions is not None) if endpoints is None else endpoints
     events = _kept(events, bad)
@@ -452,19 +453,11 @@ def _month(mid, events, scored, bad, chunk, start_m, st, *, emit_from=None, sess
         sv_ends = _ends(flag, lambda a: shortvol.score(chunk, events, mine, name, a, mid_marks=True, repriced=True))
         frames.append(_rows(mid, "short_vol", "as_is", mine, shortvol.score(chunk, events, mine, name, ALPHA), events, taken_mid=taken_mid,
                             secured=secured, sessions=sessions, ends=sv_ends))
-    first = None
-    for rule in straddle.RULES:
-        dec = straddle.decide(events, st["edges"], rule, chunk)
-        first = dec if first is None else first
-        if output: frames.append(_rows(mid, "straddle", rule, dec, straddle.score(chunk, events, dec, ALPHA), events,
-                                       taken_mid=straddle.score(chunk, events, dec, ALPHA, mid_marks=True), sessions=sessions,
-                                       ends=_ends(flag, lambda a: straddle.score(chunk, events, dec, a, mid_marks=True))))
     if gate is not None and output:
         dec = gate(events, chunk)
         frames.append(_rows(mid, "straddle", straddle.GATE_RULE, dec, straddle.score(chunk, events, dec, ALPHA),
                             events, taken_mid=straddle.score(chunk, events, dec, ALPHA, mid_marks=True), sessions=sessions,
                             ends=_ends(flag, lambda a: straddle.score(chunk, events, dec, a, mid_marks=True))))
-    st["edges"] = pd.concat([st["edges"], straddle.history_rows(first, events)], ignore_index=True)  # Amendment 5: the cutoff history is the straddle universe only
     return frames
 
 

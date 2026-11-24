@@ -18,8 +18,9 @@ from engine.forecast_sizing import FORECAST_SIZED, forecast_params
 from engine.portfolio import CONTRACT_MULTIPLIER
 from engine.pnl_sim import DRAWS, trailing_cutoff
 from engine.score import _mean_relative_spread
-from engine.structures import (BUY, PUT, SELL, STRUCTURES, ChainSnapshot, LadderTooCoarse, StructureError,
+from engine.structures import (BUY, PUT, SELL, STRUCTURES, LadderTooCoarse, StructureError,
                                price_structure)
+from experiments import size_pnl_straddle as straddle
 from experiments.size_pnl_account import secured_per_contract
 from experiments.size_pnl_ladder import SELECTOR
 from experiments.size_pnl_pool import put_means, structure_pnl
@@ -90,18 +91,8 @@ def _sign(side):
 
 
 def chain_snapshot(chunk, i):
-    """Event ``i``'s put chain at entry quotes, as ``price_structure`` reads it.
-
-    The ladder already chose the single expiry (first_post_event), so the snapshot carries only it, and
-    event_date = expiry makes the selector's inclusive rule return it.
-    """
-    puts = _put_slots(chunk, i)
-    expiry = pd.Timestamp(chunk["expiry"][i])
-    rows = pd.DataFrame({"expiry": [expiry] * puts.size, "dte": [chunk["dte_entry"][i]] * puts.size,
-                         "strike": chunk["strike"][puts], "right": [PUT] * puts.size,
-                         "bid": chunk["bid_e"][puts], "ask": chunk["ask_e"][puts]})
-    return ChainSnapshot(ticker="", obs_date=expiry, event_date=expiry, rows=rows,
-                         spot=float(chunk["spot_entry"][i]))
+    """Event ``i``'s put chain at entry quotes, as ``price_structure`` reads it (the straddle module's snapshot, puts only)."""
+    return straddle.chain_snapshot(chunk, i, puts_only=True)
 
 
 def resolve_priced(chunk, i, name, pred, fill):

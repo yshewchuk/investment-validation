@@ -1,4 +1,4 @@
-"""EXP-188 Amendment 6b: the breakeven alpha of the report, and the repriced short-vol endpoints. Synthetic fixtures only; no store."""
+"""EXP-188 Amendment 7: the breakeven alpha of the report, and the repriced short-vol endpoints. Synthetic fixtures only; no store."""
 import numpy as np
 import pandas as pd
 import pytest
@@ -177,9 +177,9 @@ def test_t10_notes_name_the_marks_each_verdict_reads(tmp_path):
     assert "T10 reads the mid marks" not in harsh
 
 
-def test_month_straddle_rows_carry_breakeven_endpoints_for_g_prod_and_r_l(monkeypatch):
-    """Pins the Amendment 6b endpoints on the straddle rows of ``_month``: the G_PROD gate arm and both R_L rules carry
-    ``ends``, so their pnl_dollars_a0 / pnl_dollars_a1 are finite. Stubbed scorers: mid-mark pnl_per_share -0.2 at alpha 0
+def test_month_straddle_rows_carry_breakeven_endpoints_for_g_prod(monkeypatch):
+    """Pins the Amendment 7 endpoints on the straddle rows of ``_month``: the straddle book is G_PROD only (Amendment 6), and the
+    G_PROD gate arm carries ``ends``, so its pnl_dollars_a0 / pnl_dollars_a1 are finite. Stubbed scorers: mid-mark pnl_per_share -0.2 at alpha 0
     and 0.4 at alpha 1, one lot, so the dollars are -20.0 and 40.0 (x CONTRACT_MULTIPLIER 100 x 1 lot)."""
     events = pd.DataFrame({"event_id": ["E3"], "event_date": pd.to_datetime(["2025-01-15"]), "pred_move": [5.0], "pred_crush": [-12.0],
                            "pred_abs_move": [5.0], "implied_move": [4.0]})
@@ -201,17 +201,14 @@ def test_month_straddle_rows_carry_breakeven_endpoints_for_g_prod_and_r_l(monkey
     monkeypatch.setattr(driver.shortvol, "decide", lambda scored_: pd.DataFrame(columns=shortvol_cols))
     monkeypatch.setattr(driver.shortvol, "score", lambda *a, **kw: pd.DataFrame(columns=["event_id", "entry_cost", "exit_value", "rung", "lots", "pnl_per_share", "pnl_dollars"]))
     monkeypatch.setattr(driver.shortvol, "secured", lambda *a, **kw: pd.DataFrame(columns=["event_id", "secured_per_contract"]))
-    monkeypatch.setattr(driver.straddle, "decide", lambda events_, history, rule, chunk_, gate=None: taken("taken"))
-    monkeypatch.setattr(driver.straddle, "score", straddle_score)
-    monkeypatch.setattr(driver.straddle, "history_rows", lambda first, events_: pd.DataFrame(columns=["event_date", "edge"]))
+    monkeypatch.setattr(driver.straddle, "score", straddle_score)  # the G_PROD decision comes from the ``gate`` argument, not straddle.decide
 
     frames = driver._month("prod", events, scored, set(), {}, pd.Timestamp(driver.OUTER[0]), driver._model_state(),
                            sessions={}, gate=lambda events_, chunk_: taken("taken"))
     rows = pd.concat(frames, ignore_index=True)
     rows = rows[rows["book"] == "straddle"]
-    for arm in (driver.straddle.GATE_RULE, *driver.straddle.RULES):
-        row = rows[rows["arm_or_rule"] == arm]
-        assert len(row) == 1, arm
-        a0, a1 = float(row["pnl_dollars_a0"].iloc[0]), float(row["pnl_dollars_a1"].iloc[0])
-        assert np.isfinite(a0) and np.isfinite(a1), arm
-        assert a0 == pytest.approx(-20.0) and a1 == pytest.approx(40.0), arm
+    assert list(rows["arm_or_rule"]) == [driver.straddle.GATE_RULE]  # the straddle book is G_PROD only
+    row = rows[rows["arm_or_rule"] == driver.straddle.GATE_RULE]
+    a0, a1 = float(row["pnl_dollars_a0"].iloc[0]), float(row["pnl_dollars_a1"].iloc[0])
+    assert np.isfinite(a0) and np.isfinite(a1)
+    assert a0 == pytest.approx(-20.0) and a1 == pytest.approx(40.0)

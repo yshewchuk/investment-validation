@@ -88,7 +88,7 @@ def test_t10_is_computable_with_inner_2024_and_outer_2025(tmp_path, inner_events
     # E03-E06 (2025Q1-Q4): one event per quarter, 8 in all, so each quarter, year and ticker group sums to +1 in every pair.
     #   H1 (short-vol, predicted +1): d = +1 -> clear.
     #   H2 (straddle, predicted -1, leg sign +1): d = +1 -> reversed (clear(-1) fails: no pair has sign -1).
-    #   H3 (short-vol minus the LONG_RULE straddle): d = +1 - (+1) = 0 -> every sum is 0, no quarter or year has a sign and
+    #   H3 (short-vol minus the G_PROD straddle): d = +1 - (+1) = 0 -> every sum is 0, no quarter or year has a sign and
     #       no interval excludes zero, so neither clear nor directional holds for either sign -> no_difference.
     # The pooled T10 input is the contrast summary, not a table in REPORT.md, so the spy reads the summaries contrast() returns.
     real, summaries = contrast.contrast, []
@@ -106,7 +106,7 @@ def test_t10_is_computable_with_inner_2024_and_outer_2025(tmp_path, inner_events
     assert "are absent from" not in text
     assert "T10 pools the inner" in text
     pooled = [s for s in summaries if s["n_events"] == len(INNER_2024) + len(OUTER_2025)]  # the first is H1, pair H, as_is
-    assert len(pooled) == 12 and pooled[0]["n_events"] == 8  # H1 and H3 one arm each, H2 two rules, over three pairs
+    assert len(pooled) == 9 and pooled[0]["n_events"] == 8  # H1, H2 (G_PROD) and H3 one arm each, over three pairs (the outer G_PROD sections hold 4 events)
     assert {2024, 2025} <= set(pooled[0]["year_signs"]) and pooled[0]["year_signs"][2024] == pooled[0]["year_signs"][2025] == 1
     assert pooled[0]["mean"] == 1.0
 
@@ -168,8 +168,8 @@ def test_inner_tables_carry_the_inner_windows_own_values(tmp_path, inner_events)
     t4 = _model_rows(text, INNER_PREFIX + "T4", "H-sq")
     assert t4 == [["H-sq", "4", "300.00", "75", "1"]]
     assert _model_rows(text, INNER_PREFIX + "T4", "H-abs") == [["H-abs", "4", "312.00", "78", "1"]]
-    assert _model_rows(text, INNER_PREFIX + "T6", "H-sq") == [["H-sq", "R_L", "4", "0", "0", "75"], ["H-sq", "R_L2", "4", "0", "0", "75"]]
-    assert _model_rows(text, INNER_PREFIX + "T6", "H-abs")[0] == ["H-abs", "R_L", "4", "0", "0", "78"]
+    assert _model_rows(text, INNER_PREFIX + "T6", "H-sq") == [["H-sq", "G_PROD", "4", "0", "0", "75"]]
+    assert _model_rows(text, INNER_PREFIX + "T6", "H-abs")[0] == ["H-abs", "G_PROD", "4", "0", "0", "78"]
     inner7 = next(_cells(line) for line in _section_lines(text, INNER_PREFIX + "T7") if line.startswith("| H1 | H | as_is |"))
     outer7 = next(_cells(line) for line in _section_lines(text, "### T7") if line.startswith("| H1 | H | as_is |"))
     assert inner7[3:6] == ["ok", "4", "3"]  # n 4, mean 3 * (+1) per event
@@ -278,7 +278,7 @@ def test_without_inner_decisions_the_report_is_unchanged_in_shape(tmp_path):
     out = build(tmp_path)
     summary = assemble_mod.assemble(out, plan_frame(), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
-    assert summary["sections"] == 15  # 11 headline (run, marks basis, T1-T4, T6-T10), the harsh not_testable note, breakeven, the Amendment 2 accounts, and the Amendment 6 board-match section
+    assert summary["sections"] == 18  # same fixture as the happy path: 15 HEAD sections + the three G_PROD sections (main)
     assert "### Inner window" not in text
 
 

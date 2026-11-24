@@ -354,21 +354,19 @@ def test_month_scores_and_month_take_emit_from(monkeypatch):
     monkeypatch.setattr(driver.shortvol, "simulate", lambda chunk_, events, pool, **kw: {e: "sim" for e in events["event_id"]})
     monkeypatch.setattr(driver.shortvol, "score_events", lambda chunk_, events, sims, name, **kw: pd.DataFrame(
         {"event_id": events["event_id"].to_numpy(), "status": "scored", "reason": None}))
-    monkeypatch.setattr(driver.straddle, "decide", lambda events, edges, rule, chunk_: pd.DataFrame(
-        {"event_date": events["event_date"].to_numpy(), "edge": np.ones(len(events)), "reason": None}))
-    events = pd.DataFrame({"event_id": ["E1", "E2"], "event_date": pd.to_datetime(["2023-06-10", "2023-06-20"]), "mcap_usd": 20e9})  # in the straddle universe
+    events = pd.DataFrame({"event_id": ["E1", "E2"], "event_date": pd.to_datetime(["2023-06-10", "2023-06-20"]), "mcap_usd": 20e9})
     table = pd.DataFrame({"event_date": pd.to_datetime(["2023-01-05"])}, index=pd.Index(["H0"]))
     start, st = pd.Timestamp("2023-06-01"), driver._model_state()
     scored, missing = driver._month_scores("m", table, events, chunk("E1", "E2"), None, start, st)
     assert set(scored) == {("as_is", name) for name in driver.shortvol.NAMES} and missing == set()
     frames = driver._month("m", events, scored, set(), chunk("E1", "E2"), start, st, emit_from=pd.Timestamp("2099-01-01"))
     assert frames == [] and set(st["scored"]) == {"as_is"}
-    assert len(st["scored"]["as_is"]) == len(driver.shortvol.NAMES) and len(st["edges"]) == 2
+    assert len(st["scored"]["as_is"]) == len(driver.shortvol.NAMES) and set(st) == {"scored"}  # st carries only the short-vol frames
 
 
 def test_month_gate_adds_g_prod_rows_on_output_months_only(monkeypatch):
     """The gate= keyword of _month: G_PROD straddle rows on output months only. The gate is not called before emit_from, and
-    the G_PROD rows never feed st['edges'] (only the two straddle rules' first decisions do)."""
+    with gate=None a output month has no straddle rows (the straddle book is G_PROD only; st carries the short-vol frames)."""
     monkeypatch.setattr(driver, "build_pool", lambda table, labels: None)
     monkeypatch.setattr(driver, "_printed", lambda labels, cutoff: labels)
     monkeypatch.setattr(driver.shortvol, "simulate", lambda chunk_, events, pool, **kw: {e: "sim" for e in events["event_id"]})
@@ -378,9 +376,6 @@ def test_month_gate_adds_g_prod_rows_on_output_months_only(monkeypatch):
         {"event_id": pd.Series([], dtype=object), "structure": pd.Series([], dtype=object)}))
     marks = ["event_id", "entry_cost", "exit_value", "rung", "lots", "pnl_per_share", "pnl_dollars"]
     monkeypatch.setattr(driver.shortvol, "score", lambda *args, **kw: pd.DataFrame(columns=marks))
-    monkeypatch.setattr(driver.straddle, "decide", lambda events, edges, rule, chunk_, gate=None: pd.DataFrame(
-        {"event_id": events["event_id"].to_numpy(), "event_date": events["event_date"].to_numpy(), "edge": np.ones(len(events)),
-         "cutoff": np.nan, "rel_spread": 0.1, "status": "not_taken", "reason": "below_cutoff"}))
     monkeypatch.setattr(driver.straddle, "score", lambda *args, **kw: pd.DataFrame(columns=marks))
     events = pd.DataFrame({"event_id": ["E1", "E2"], "event_date": pd.to_datetime(["2023-06-10", "2023-06-20"]),
                            "pred_move": 5.0, "pred_crush": -15.0, "mcap_usd": 20e9})  # in the straddle universe
@@ -392,7 +387,7 @@ def test_month_gate_adds_g_prod_rows_on_output_months_only(monkeypatch):
 
     def gate_stub(events_, chunk_):
         return pd.DataFrame({"event_id": events_["event_id"].to_numpy(), "event_date": events_["event_date"].to_numpy(), "edge": 1.0,
-                             "cutoff": np.nan, "rel_spread": 0.1, "status": "not_taken", "reason": "below_gate_threshold"})
+                             "rel_spread": 0.1, "status": "not_taken", "reason": "below_gate_threshold"})
 
     def run(emit_from, gate):
         st = driver._model_state()
@@ -401,15 +396,21 @@ def test_month_gate_adds_g_prod_rows_on_output_months_only(monkeypatch):
                                emit_from=emit_from, gate=gate)
         return frames, st
 
+    frames, st = run(None, refuse_gate)  # a warm-up month (before OUTER[0]): no rows, and the gate is not called
+    assert frames == [] and set(st) == {"scored"}
+
     frames, st = run(pd.Timestamp("2099-01-01"), refuse_gate)
-    assert frames == [] and len(st["edges"]) == 2
+    assert frames == [] and set(st) == {"scored"}
 
     frames, st = run(pd.Timestamp("2023-01-01"), gate_stub)
     gated = [f for f in frames if (f["arm_or_rule"] == "G_PROD").any()]
     assert len(gated) == 1 and (gated[0]["book"] == "straddle").all() and len(gated[0]) == 2
     assert (gated[0]["status"] == "not_taken").all() and (gated[0]["reason"] == "below_gate_threshold").all()
     assert set(gated[0]["event_id"].astype(str)) == {"E1", "E2"}
-    assert len(st["edges"]) == 2
+    assert set(st) == {"scored"}
+
+    frames, st = run(pd.Timestamp("2023-01-01"), None)  # an output month with no gate bound: no straddle rows at all
+    assert frames and not any((f["arm_or_rule"] == "G_PROD").any() or (f["book"] == "straddle").any() for f in frames)
 
 
 def test_publish_defaults_keep_the_outer_names_and_the_stem_renames_both(tmp_path):
@@ -524,7 +525,7 @@ def test_the_real_scoring_loop_drops_an_event_unscoreable_for_one_model_from_eve
     here, since the production 100 leaves every short-vol row thin on six events. Then E2 (no prior history) and E6 (no prior row in its six-month
     window) are undetermined under every short-vol unit: published as evidence, but outside E. E4 and E5 are determined and form E.
     Predictions are 5.0 except E3 (104.0) and the realised abs_move is 4.0, so on E = {E4, E5} rmse = mae = 1.0.
-    Each straddle P&L is 10 x its event number (E2 20, E4 40, E5 50, E6 60)."""
+    The synthetic run has no straddle book (no gate), so E is the short-vol population alone."""
     min_window_one(monkeypatch)
     def generate(admitted, labels, production, arm):
         entries = fake_entries(labels, arm)
@@ -553,9 +554,10 @@ def test_the_real_scoring_loop_drops_an_event_unscoreable_for_one_model_from_eve
     out = tmp_path / "out"
     summary = driver.run_synthetic(src, out, prereg=OK)
     frame = pd.read_parquet(out / "decisions_synthetic.parquet")
-    units = len(driver.shortvol.NAMES) + len(driver.straddle.RULES)
+    units = len(driver.shortvol.NAMES)  # no gate bound: the synthetic run has no straddle book (Amendment 6)
     assert sorted(frame["event_id"].astype(str).unique()) == ["E2", "E4", "E5", "E6"]  # E1 leaves with the shrinkage gap, E3 for every model
     assert len(set(frame["model_id"])) == 3
+    assert not (frame["book"] == "straddle").any()  # no gate bound: no straddle book
     assert len(frame) == 3 * 4 * units  # one row per model per surviving event per unit
     assert not frame.duplicated(["model_id", "book", "arm_or_rule", "structure", "event_id"]).any()
     taken = frame["status"] == "taken"  # the P&L oracle: a taken row carries 10 x its event's number, every other row carries no P&L

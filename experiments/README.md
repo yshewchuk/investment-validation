@@ -143,7 +143,7 @@ Saved identity and later outcome/worker APIs' separate read policies do not chan
 
 `size_pnl_board_match` (Amendment 6, board-match check) is consumed only by `size_pnl_assemble` (`--stage report`; the optional `board_ledger` directory comes from `--sources-config` through `Sources.board_ledger`); it calls `engine.ledger.canonical_predictions` on rows read from `*.jsonl` files under size and row caps, and never writes. Its tests use synthetic jsonl; the real ledger is never read in tests.
 
-`size_pnl_breakeven` (Amendment 6b, breakeven alpha) is consumed only by `size_pnl_driver` (`_rows` adds the `pnl_dollars_a0/_a1` endpoint columns) and `size_pnl_assemble` (`--stage report`, the breakeven section); it calls `engine.fills.breakeven_alpha` and never reads or writes files. It is experiment-only: it has no production entrypoint and nothing on the board reaches it.
+`size_pnl_breakeven` (Amendment 7, breakeven alpha) is consumed only by `size_pnl_driver` (`_rows` adds the `pnl_dollars_a0/_a1` endpoint columns) and `size_pnl_assemble` (`--stage report`, the breakeven section); it calls `engine.fills.breakeven_alpha` and never reads or writes files. It is experiment-only: it has no production entrypoint and nothing on the board reaches it.
 
 `size_pnl_gprod` (Amendment 3, G_PROD) is consumed only by `size_pnl_driver` (`Sources.gate`, the outer stage) and `size_pnl_sources.build_sources` (`load_gate`); it calls `size_pnl_gate_fold` (constants), `size_pnl_pool.pool_history`, `size_pnl_straddle.decide`, `label_availability` and production's `tier4.interval_for`, and has no other caller.
 

@@ -1,4 +1,4 @@
-"""EXP-188 Amendment 6b: the breakeven alpha of the report (guides/size_decision_pnl_design.md section 18, "Headline marks").
+"""EXP-188 Amendment 7: the breakeven alpha of the report (guides/size_decision_pnl_design.md section 18, "Headline marks").
 
 For the SAME taken trades, the P&L is taken at alpha 0 (worst fills) and at alpha 1 (best fills), every leg entry and exit
 at that alpha (mid_marks=True). Whole lots are held at the mid-mark lots, so the P&L is linear in alpha, and the breakeven

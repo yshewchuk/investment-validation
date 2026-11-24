@@ -22,14 +22,13 @@ from experiments import size_pnl_breakeven as breakeven
 from experiments import size_pnl_board_match as board_match
 from experiments.size_pnl_inputs import PAIRS
 from experiments.size_pnl_shortvol import Refusal
-from experiments.size_pnl_straddle import RULES, GATE_RULE
+from experiments.size_pnl_straddle import GATE_RULE
 
 _CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
 COLUMNS = ["model_id", "book", "arm_or_rule", "structure", "event_id", "event_date", "status", "rung", "pnl_dollars"]
 # Amendment 2 account columns: optional, read only when the run stored them.
 ACCOUNT_COLS = ["entry_date", "exit_date", "entry_cost", "exit_value", "exit_value_mid", "secured_per_contract"]
 ARMS = ("as_is",)
-LONG_RULE = "R_L"
 AMENDMENT_5_NOTE = ("Amendment 5 (2026-11-23): the straddle universe was changed to production's (market cap at or above engine.score "
                     "GATE_MCAP_FLOOR, no spread term) after the 2025 outputs of the pre-registered run were inspected; the H2 verdict, "
                     "T6 and the straddle T7 rows are computed on E_str and are labelled as run under Amendment 5.")
@@ -38,12 +37,16 @@ MARKS_NOTE = ("the headline marks for every per-trade table, contrast and the T1
               "(rung-2 zero-bid legs at alpha 0) is reported as harsh fills, reported only, not a verdict basis; Amendment 1 named marks_mid a sensitivity.")
 MARKS_NOTE_PRIMARY = ("The decisions carry no marks_mid columns, so the headline fell back to the stored primary marks (rung-2 zero-bid legs at alpha 0) "
                       "and the report is not on the mid basis.")
+AMENDMENT_6_STRADDLE_NOTE = ("Amendment 6 (2026-11-24, post-hoc revision by the user): the straddle rule is production's STR-THRU gate "
+                             "G_PROD only (R_L and R_L2 removed); H2 is evaluated on G_PROD over E_str. H2 is production-faithful only if "
+                             "the M0 gate agreement section reaches its bar or the user accepts the gap; the 2025 gate rows alone cannot "
+                             "supply the 2024 full-year sign, so an H2 verdict that requires 2024 reads not_testable.")
 # name -> (predicted sign, arm -> legs, arms). A leg is (book, arm_or_rule value, sign); d = sum(sign * (median - mean)).
-# Judgement call: H3 crosses each short-vol arm with the long rule R_L only; R_L2 is not in H3.
+# Judgement call: H3 pairs each short-vol arm with the straddle leg G_PROD over E_str (Amendment 6); H2 is G_PROD alone.
 HYPOTHESES = {
     "H1": (1, lambda arm: [("short_vol", arm, 1)], ARMS),
-    "H2": (-1, lambda rule: [("straddle", rule, 1)], RULES),
-    "H3": (1, lambda arm: [("short_vol", arm, 1), ("straddle", LONG_RULE, -1)], ARMS),
+    "H2": (-1, lambda rule: [("straddle", rule, 1)], (GATE_RULE,)),
+    "H3": (1, lambda arm: [("short_vol", arm, 1), ("straddle", GATE_RULE, -1)], ARMS),
 }
 
 
@@ -218,7 +221,7 @@ def _load_decisions(out, receipt, name="decisions.parquet"):
             raise _refuse("report_decisions_invalid", f"{name} decodes to more than MAX_DECODED_BYTES")
         # Optional columns, read only when the schema has them. "reason": population() exempts short-vol non-trades (published
         # decisions always carry it). "pnl_dollars_mid": the Amendment 1 sensitivity marks.
-        optional = [c for c in ("reason", "pnl_dollars_mid", "pnl_dollars_a0", "pnl_dollars_a1", "gate_score") if c in parquet.schema_arrow.names]  # a0/a1: Amendment 6b breakeven endpoints; gate_score: the G_PROD M0 agreement
+        optional = [c for c in ("reason", "pnl_dollars_mid", "pnl_dollars_a0", "pnl_dollars_a1", "gate_score") if c in parquet.schema_arrow.names]  # a0/a1: Amendment 7 breakeven endpoints; gate_score: the G_PROD M0 agreement
         account = [c for c in ACCOUNT_COLS if c in parquet.schema_arrow.names]  # Amendment 2 account columns, when the run stored them
         frame = parquet.read(columns=COLUMNS + optional + account).to_pandas()
     if frame.empty:
@@ -290,6 +293,7 @@ def _verdicts(classify_in, missing_years, inner_present=False, basis="mid"):
         verdicts += "\n\n" + "T10 reads the stored primary marks (no marks_mid columns in the decisions)."
     else:
         verdicts += "\n\n" + "T10 here reads the harsh fills (rung-2 zero-bid legs at alpha 0): reported only, not a verdict basis."
+    verdicts += "\n\n" + AMENDMENT_6_STRADDLE_NOTE
     return verdicts
 
 
@@ -328,8 +332,7 @@ def _sections(out, outer, inputs, inner, tickers, stored_gate=None, accepted_gap
     """The report's sections in order. Reads receipt fields throughout; the caller maps a missing or mistyped field to a refusal.
     Returns (sections, inner row count)."""
     raw = _load_decisions(out, outer)
-    gate_rows = raw["arm_or_rule"] == GATE_RULE  # Amendment 3: G_PROD rows never enter E, E_str, T1-T10 or the verdicts; only the Amendment 2 accounts read them
-    raw, gate_raw = raw[~gate_rows], raw[gate_rows]
+    gate_raw = raw[raw["arm_or_rule"] == GATE_RULE]  # Amendment 3/6: the G_PROD rows, the input of the G_PROD sections (they are also in raw)
     inner_raw = _load_inner(out, outer, inner)
     _check_valuation_columns(raw, inner_raw, gate_raw if not gate_raw.empty else None)  # an absent inner window or an empty gate frame is not compared
     tick ={str(e): str(t) for e, t in tickers.items()}
@@ -360,8 +363,6 @@ def _sections(out, outer, inputs, inner, tickers, stored_gate=None, accepted_gap
         if set(raw["model_id"]) - set(label_of):
             raise _refuse("report_receipt_chain_mismatch", "a model in the decisions has no roster entry")
 
-    _check(gate_raw)
-
     def _window(raw):
         """One window's evaluated frame and its two undetermined counts: short-vol E and straddle E_str (Amendment 5).
         Each population is computed from its own book's rows, so a straddle row never removes an event from E and a short-vol row never
@@ -369,13 +370,13 @@ def _sections(out, outer, inputs, inner, tickers, stored_gate=None, accepted_gap
         # Checked on the raw rows, before population drops the events with an undetermined row that leaves its population: a bad row refuses, it is never skipped.
         _check(raw)
         short = synthetic_eval.population(raw[raw["book"] == "short_vol"])  # E: no undetermined short-vol row that leaves E; short-vol non-trades stay in E at P&L 0
-        long = synthetic_eval.population(raw[raw["book"] == "straddle"])  # E_str: no undetermined straddle row that leaves E_str under R_L or R_L2 (G_PROD rows are already stripped)
+        long = synthetic_eval.population(raw[raw["book"] == "straddle"])  # E_str: no undetermined straddle row (the G_PROD rows) that leaves E_str
         frame = pd.concat([short, long])
         if frame.empty:
             raise _refuse("report_decisions_empty", "no event in decisions.parquet is in the evaluated population")
         undet_e = raw.loc[raw["book"] == "short_vol", "event_id"].nunique() - short["event_id"].nunique()
         undet_str = raw.loc[raw["book"] == "straddle", "event_id"].nunique() - long["event_id"].nunique()
-        if "pnl_dollars_mid" in frame.columns:  # Amendment 6b: the headline marks are the mid marks; the stored primary is kept as harsh fills
+        if "pnl_dollars_mid" in frame.columns:  # Amendment 7: the headline marks are the mid marks; the stored primary is kept as harsh fills
             frame = frame.assign(pnl_dollars_harsh=frame["pnl_dollars"], pnl_dollars=frame["pnl_dollars_mid"])
         frame = frame.assign(taken=frame["status"] == "taken", quarter=frame["event_date"].dt.to_period("Q").astype(str))
         return frame.assign(model_id=frame["model_id"].map(label_of)), undet_e, undet_str  # tables show labels such as M0 or H-sq+H-abs
@@ -415,7 +416,7 @@ def _sections(out, outer, inputs, inner, tickers, stored_gate=None, accepted_gap
     _shown_c, classify_c = (_contrasts(combined, ctx_c["events"], roster, role_model, label_of, outer_models, ctx_c["quarter_of"], tick)
                             if inner_present else (shown_o, classify_o))
     note = (f"short-vol undetermined rows exclude events from E: {undet_e}; "
-            f"straddle undetermined rows exclude events from E_str (H2, T6, straddle T7, G_PROD, the H2 verdict): {undet_str}; "
+            f"straddle undetermined rows (G_PROD over E_str: H2, H3, T6, straddle T7) exclude events from E_str: {undet_str}; "
             f"H3 uses E intersect E_str. "
             f"short-vol non-trades (e.g. width_declined) stay in E at P&L 0. "
             f"per-quarter candidates and dropped counts are not recorded in decisions.parquet (not_testable); run totals from the receipt: "
@@ -436,7 +437,7 @@ def _sections(out, outer, inputs, inner, tickers, stored_gate=None, accepted_gap
     if inner_present:  # the inner window, after the outer tables: never the headline
         ctx_i = _context(inner_frame)
         inner_note = (f"short-vol undetermined rows exclude events from E: {inner_undet_e}; "
-                      f"straddle undetermined rows exclude events from E_str (H2, T6, straddle T7, G_PROD, the H2 verdict): {inner_undet_str}; "
+                      f"straddle undetermined rows (G_PROD over E_str: H2, H3, T6, straddle T7) exclude events from E_str: {inner_undet_str}; "
                       f"H3 uses E intersect E_str. Inner window only; run totals are the outer receipt's.")
         (t4_as_is, t6, t7), _shown_i, _classify_i = tables(inner_frame, ctx_i)
         t2_inner = report.t2_in_e(inner_frame[inner_frame["book"] == "short_vol"][["event_id", "quarter"]].drop_duplicates(), inner_note)
@@ -452,18 +453,17 @@ def _sections(out, outer, inputs, inner, tickers, stored_gate=None, accepted_gap
             _shown_h, classify_ho = _contrasts(combined_harsh, ctx_c["events"], roster, role_model, label_of, outer_models, ctx_c["quarter_of"], tick)
         # no inner window: the pooled harsh frame is the outer one, so its contrasts are reused
         sections += [_harsh(text) for text in (*harsh, _verdicts(classify_ho, missing_years, inner_present, basis="harsh"))]
-    breakeven_frame = combined  # Amendment 6b: breakeven alpha per model, book and year, on the pooled evaluated frame
-    if not gate_raw.empty:  # Amendment 3: the G_PROD taken rows join the breakeven table too
-        # same E_str restriction as gprod_report.sections: only events in the straddle evaluated population
-        taken_gate = gate_raw[(gate_raw["status"] == "taken") & gate_raw["event_id"].isin(set(frame.loc[frame["book"] == "straddle", "event_id"]))]
-        breakeven_frame = pd.concat([combined, taken_gate.assign(model_id=taken_gate["model_id"].map(label_of), taken=True)])
+    # Amendment 7: breakeven alpha per model, book and year, on the pooled evaluated frame. The G_PROD taken rows are already in it:
+    # the straddle population is E_str (same restriction as gprod_report.sections), and raw's G_PROD rows are its straddle rows.
+    # Re-adding them from gate_raw counted every taken G_PROD trade twice.
+    breakeven_frame = combined
     sections += [breakeven.section(breakeven_frame)]
     if not gate_raw.empty:  # Amendment 3: the G_PROD sections, after the Amendment 1 ones and before the accounts
-        sections += gprod_report.sections(gate_raw, frame[frame["book"] == "straddle"], label_of=label_of, role_model=role_model, roster=roster, outer_models=outer_models,
+        sections += gprod_report.sections(gate_raw, gate_raw, label_of=label_of, role_model=role_model, roster=roster, outer_models=outer_models,
                                           quarter_of=ctx_o["quarter_of"], tick=tick, stored_gate=stored_gate, accepted_gap=accepted_gap, ladder=ladder)
     m0 = raw[(raw["model_id"] == role_model.get("M0")) & (raw["book"] == "short_vol") & (raw["arm_or_rule"] == "as_is")][["event_id", "structure", "event_date"]]
     sections.append(board_match.section(board_ledger, m0, None))  # Amendment 6: the board-match check, research-only
-    every = pd.concat([raw, gate_raw])  # Amendment 2 accounts read every row, G_PROD included
+    every = raw  # raw holds the G_PROD rows too: the Amendment 2 accounts read every row once
     taken_all = every[every["status"] == "taken"].assign(model_id=every["model_id"].map(label_of), taken=True)  # Amendment 2: every taken row, not only E
     universe = every.assign(model_id=every["model_id"].map(label_of))  # Amendment 2: every decision row, of any status, discovers the account keys
     sections += _account_sections(taken_all, role_model, label_of, universe)  # Amendment 2, on both paths

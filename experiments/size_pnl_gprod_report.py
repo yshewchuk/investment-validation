@@ -9,11 +9,12 @@ from experiments.size_pnl_inputs import PAIRS
 
 _INVALID = "INVALID_EXPERIMENT_SPEC"
 stored_gate_valid = size_pnl_gate_agreement.valid
-LABEL =("Sensitivity (Amendment 3): production gate refit once through 2024, not refit per model "
-         "(favours M0 forecast scale); not the pre-registered verdict")
+LABEL = ("G_PROD (Amendment 6, post-hoc revision by the user, 2026-11-24): production gate refit once through 2024, not refit per model "
+         "(favours M0 forecast scale); registered threshold chosen on all-year walk-forward predictions (look-ahead); "
+         "production-faithful only once the M0 agreement section passes")
 MARKS = (("mid", "pnl_dollars"), ("harsh", "pnl_dollars_harsh"))  # the headline arm (mid) first, then the stored primary as harsh fills
 MARKS_PRIMARY = (("primary", "pnl_dollars"),)  # no mid column in the decisions: the stored primary marks are the only arm
-COVERAGE_NOTE = ("covered = events with a determined G_PROD decision (taken or not_taken) in E; undetermined (a missing or NaN gate input, "
+COVERAGE_NOTE = ("covered = events with a determined G_PROD decision (taken or not_taken) among the events with a G_PROD row; undetermined (a missing or NaN gate input, "
                  "a thin residual pool) is never counted as no. P&L per covered event counts untaken rows as 0. Contrasts below use the "
                  "covered subset of each pair: the events both members have a determined decision on.")
 CONTRAST_NOTE = ("d = median-type minus mean-type for the H2 pairs; M0 minus the named model for the M0 rows. arm mid = marks_mid (the headline basis); "
@@ -70,8 +71,8 @@ def _agreement(det, role_model, label_of, outer_models, in_e, stored_gate, accep
 
 
 def sections(gate_raw, frame, *, label_of, role_model, roster, outer_models, quarter_of, tick, stored_gate=None, accepted_gap=None, ladder=None):
-    """The G_PROD sections over the events of E (``frame``): per-model coverage and P&L, the covered-subset contrasts, and M0's
-    agreement with production's stored 2025 decisions. [] when there are no gate rows."""
+    """The G_PROD sections over the events that have a G_PROD row (``frame``, the G_PROD rows): per-model coverage and P&L, the
+    covered-subset contrasts, and M0's agreement with production's stored 2025 decisions. [] when there are no gate rows."""
     if accepted_gap is not None and not (isinstance(accepted_gap, str) and accepted_gap.strip()):  # direct callers are admitted here whatever the population
         raise fail(_INVALID, "accepted_gap must be a non-empty string", details={"reason": "accepted_gap_invalid"})
     if ladder is not None and not size_pnl_gate_agreement.ladder_valid(ladder):
@@ -85,6 +86,7 @@ def sections(gate_raw, frame, *, label_of, role_model, roster, outer_models, qua
         gate_raw = gate_raw.assign(pnl_dollars_harsh=gate_raw["pnl_dollars"], pnl_dollars=gate_raw["pnl_dollars_mid"])
     in_e = set(frame["event_id"])
     g = gate_raw[gate_raw["event_id"].isin(in_e)].copy()
+    quarter_of = {**g.drop_duplicates("event_id").set_index("event_id")["event_date"].pipe(pd.to_datetime).dt.to_period("Q").astype(str).to_dict(), **quarter_of}
     g["model_id"] = g["model_id"].map(label_of)
     det = g[g["status"] != "undetermined"]
     labels = sorted(label_of[m] for m in outer_models)
@@ -92,7 +94,7 @@ def sections(gate_raw, frame, *, label_of, role_model, roster, outer_models, qua
     pnl = {arm: _per_event(det, col) for arm, col in marks}
     headline, has_harsh = marks[0][0], "harsh" in pnl
 
-    headers = ["model_id", "E_events", "covered", "coverage", "undetermined", "trades", "total_pnl", "pnl_per_covered_event",
+    headers = ["model_id", "gate_events", "covered", "coverage", "undetermined", "trades", "total_pnl", "pnl_per_covered_event",
                "hit_rate", "total_pnl_harsh", "pnl_per_covered_event_harsh"]
     rows = []
     for label in labels:
