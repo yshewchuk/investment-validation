@@ -57,8 +57,13 @@ def _agreement(det, role_model, label_of, outer_models, in_e, stored_gate, accep
         raise fail(_INVALID, "the run has G_PROD rows: pass --stored-gate (EXP-187's transactions CSV) to run.py --stage report", details={"reason": "stored_gate_required"})
     if "gate_score" not in det.columns:
         raise fail(_INVALID, "the decisions predate the gate_score column: rerun the outer stage", details={"reason": "gate_score_missing"})
+    if "reason" not in det.columns:
+        raise fail(_INVALID, "the decisions lack the reason column", details={"reason": "gate_score_missing"})
     rows = det[(det["model_id"] == m0) & (det["event_date"].dt.year == 2025) & det["event_id"].isin(in_e) & det["status"].isin(("taken", "not_taken"))]
     m0_frame = rows.drop_duplicates("event_id")
+    # month_decider fills gate_score for every event with finite inputs; blank the rows the gate never decided
+    # (universe_filter, bad_quote) so the ladder step and score distribution cover only scored events. Covered still includes them.
+    m0_frame = m0_frame.assign(gate_score=m0_frame["gate_score"].where((m0_frame["status"] == "taken") | (m0_frame["reason"] == "below_gate_threshold")))
     return size_pnl_gate_agreement.section(m0_frame, stored_gate["selected"], accepted_gap=accepted_gap, ladder=ladder)
 
 

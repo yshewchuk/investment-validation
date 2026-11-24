@@ -42,9 +42,13 @@ def _cells(over=None):
     return [(m, e, *over.get((m, e), ("taken", 1.0, 1.0)), GATE_SCORE, ENTRY_COST, EXIT_VALUE_MID) for m in RAW for e in EVENTS]
 
 
+REASON_OF = {"taken": None, "not_taken": "below_gate_threshold", "undetermined": "thin_pool"}
+
+
 def _gate(cells, *, with_mid=True):
     gate = pd.DataFrame(cells, columns=["model_id", "event_id", "status", "pnl_dollars", "pnl_dollars_mid",
                                         "gate_score", "entry_cost", "exit_value_mid"])
+    gate["reason"] = [REASON_OF[s] for s in gate["status"]]
     gate["event_date"] = pd.to_datetime(gate["event_id"].map(DATES))
     return gate if with_mid else gate.drop(columns="pnl_dollars_mid")
 
@@ -205,6 +209,20 @@ def test_agreement_below_the_bar_passes_with_an_accepted_gap_and_says_so():
     assert "not production-faithful" in text
     assert "named gap for the test" in text
     assert _counts(text)["jaccard"] == "0"
+
+
+def test_universe_filtered_row_is_covered_but_not_scored():
+    """M0's not_taken universe_filter row on E4 carries gate_score 0.9 (above the registered threshold) but the gate never decided it:
+    it stays covered, and neither the as-run ladder step nor the score distribution counts it."""
+    gate = _agreement_gate()
+    gate.loc[(gate["model_id"] == "m0") & (gate["event_id"] == "E4"), ["reason", "gate_score"]] = ["universe_filter", 0.9]
+    text = _agreement(_det(gate), ROLE_MODEL, LABEL_OF, set(LABEL_OF), IN_E, STORED_HAND)
+    assert _counts(text)["covered"] == "6"  # E4 is still in M0's covered set
+    (step,) = [r for r in _table(text, "#### Decomposition ladder (diagnostic, never a rule)") if r["step"].startswith("decisions")]
+    assert step["scored"] == "5"  # E1, E2, E3, E5, E6: E4 is not scored
+    assert step["selected"] == "5"  # with E4 counted this would be 6
+    (finite,) = [r for r in _table(text, "#### Score distribution") if r["statistic"] == "finite_scores"]
+    assert finite["value"] == "5"
 
 
 def test_missing_gate_score_column_raises_gate_score_missing():

@@ -442,6 +442,8 @@ def assemble(out_dir, plan, *, admitted, expected=None, spec_hash=None, snapshot
         raise _refuse("report_stored_gate_invalid", 'stored_gate must be {"selected": {event_id: finite ret}}')
     if ladder is not None and not size_pnl_gate_agreement.ladder_valid(ladder):
         raise _refuse("report_ladder_invalid", "ladder must be a dict of label -> {event_id: finite score}")
+    if accepted_gap is not None and not (isinstance(accepted_gap, str) and accepted_gap.strip()):
+        raise _refuse("report_accepted_gap_invalid", "accepted_gap must be a non-empty string")
     if not isinstance(plan, pd.DataFrame) or plan.columns.empty:
         raise _refuse("report_tickers_invalid", "plan must be a DataFrame with columns")
     try:
