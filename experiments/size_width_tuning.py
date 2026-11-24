@@ -76,14 +76,16 @@ def factors(arm, body):
 
 
 def e_summary(sweep, window=INNER):
-    """Arm E needs no tuning. Per structure: the share of candidate events at each chosen k, the modal share, ``same_k`` (modal share >= SAME_K_SHARE: E then equals a global factor and fails), and the mean exp_pnl_sim by k and for E (T3)."""
+    """Arm E needs no tuning. Per structure: the share of ALL candidate events of the window (scored or not, so events with no feasible k count in the denominator) at each chosen k, the modal share, ``same_k`` (modal share >= SAME_K_SHARE: E then equals a global factor and fails), the candidate and no-feasible-k counts, and the mean exp_pnl_sim by k and for E (T3)."""
     out = {}
     for name in NAMES:
+        everything = sweep.scored_rows(name, E_ARM, window, scored_only=False)
         rows = sweep.scored_rows(name, E_ARM, window)
-        share = rows["k"].value_counts(normalize=True) if not rows.empty else pd.Series(dtype=float)
+        share = rows["k"].value_counts() / len(everything) if len(everything) else pd.Series(dtype=float)
         modal = float(share.max()) if len(share) else 0.0
         out[name] = {"k_share": {str(k): float(v) for k, v in share.items()}, "modal_share": modal,
-                     "same_k": modal >= SAME_K_SHARE, "candidates": int(len(rows)), "curve": sweep.curves(name, window)}
+                     "same_k": modal >= SAME_K_SHARE, "candidates": int(len(everything)),
+                     "no_feasible_k": int(len(everything) - len(rows)), "curve": sweep.curves(name, window)}
     return out
 
 

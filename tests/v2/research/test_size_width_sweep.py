@@ -238,3 +238,17 @@ def test_taken_row_and_scored_row_match_a_hand_derived_condor(monkeypatch):
     assert hit["entry_cost"] == pytest.approx(cost2)
 
 
+def test_rows_keep_only_trades_that_exit_inside_the_window():
+    def taken(eid, event, exit_):
+        row = dict.fromkeys(_TAKEN)
+        row.update({"event_id": eid, "event_date": pd.Timestamp(event), "structure": NAME, "k": 1.0,
+                    "entry_date": pd.Timestamp(event), "exit_date": pd.Timestamp(exit_)})
+        return row
+
+    sweep = Sweep()
+    sweep.taken[(NAME, 1.0)] = [pd.DataFrame([taken("late", "2024-12-20", "2025-01-10"),
+                                              taken("in", "2024-12-02", "2024-12-20")], columns=_TAKEN)]
+    assert list(sweep.rows([(NAME, 1.0)], WINDOWS["2024"])["event_id"]) == ["in"]
+    assert sweep.rows([(NAME, 1.0)], WINDOWS["2025"]).empty  # both event dates are in 2024
+
+

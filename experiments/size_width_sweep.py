@@ -106,13 +106,14 @@ class Sweep:
         self.taken.setdefault(key, []).append(rows[_TAKEN])
 
     def rows(self, pairs, window):
-        """Taken rows of every (structure, arm) in ``pairs`` inside ``window`` (by event date); empty frame with the columns when none."""
-        frames = [f for pair in pairs for f in (in_window(g, window) for g in self.taken.get(tuple(pair), [])) if not f.empty]
+        """Taken rows of every (structure, arm) in ``pairs`` inside ``window``: trades are selected by event date and must also EXIT inside the window; a trade exiting later belongs to no account of this window, so no later P&L enters a window's objective or evaluation. Empty frame with the columns when none."""
+        frames = [f[pd.to_datetime(f["exit_date"]) < window[1]] for pair in pairs for f in (in_window(g, window) for g in self.taken.get(tuple(pair), []))]
+        frames = [f for f in frames if not f.empty]
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=_TAKEN)
 
-    def scored_rows(self, name, arm, window):
-        """Scored rows of (name, arm) inside ``window``: the candidates E or a fixed k put to the gate."""
-        frames = [f for f in (in_window(g[g["status"] == "scored"], window) for g in self.scored.get((name, arm), [])) if not f.empty]
+    def scored_rows(self, name, arm, window, scored_only=True):
+        """Scored rows of (name, arm) inside ``window`` (every status when ``scored_only`` is False): the candidates E or a fixed k put to the gate."""
+        frames = [f for f in (in_window(g[g["status"] == "scored"] if scored_only else g, window) for g in self.scored.get((name, arm), [])) if not f.empty]
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=sv.SCORE_COLS + (["k"] if arm == E_ARM else []))
 
     def curves(self, name, window):

@@ -46,7 +46,7 @@ def simulate_account(rows, mark):
 
 
 def quarter_returns(rows, quarters):
-    """Account return per calendar quarter: ``quarters`` (PeriodIndex, freq Q) extended by every later EXIT quarter with funded pnl, so all funded P&L counts; funded pnl_usd by exit quarter over the equity at the quarter's start."""
+    """Account return per calendar quarter: funded pnl_usd by EXIT quarter over the equity at the quarter's start; 0.0 for a quarter with none."""
     pnl = {}
     if not rows.empty:
         simulate_account(rows, "mid")  # validates the inputs exactly as the account does
@@ -54,8 +54,6 @@ def quarter_returns(rows, quarters):
             ["entry_date", "exit_date", "entry_cost", "exit_value", "secured_per_contract"]], **POLICY)
         done = t[t["funded"]]
         pnl = done.assign(q=pd.PeriodIndex(pd.to_datetime(done["exit_date"]), freq="Q")).groupby("q")["pnl_usd"].sum().to_dict()
-    quarters = list(quarters)
-    if pnl and (last := max(pnl)) > (quarters[-1] if quarters else last - 1): quarters += list(pd.period_range(quarters[-1] + 1 if quarters else min(pnl), last, freq="Q"))
     equity, out = START_EQUITY, []
     for q in quarters:
         out.append(float(pnl.get(q, 0.0)) / equity)

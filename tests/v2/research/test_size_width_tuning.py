@@ -86,6 +86,12 @@ def test_choose_ties_within_one_se_go_nearest_one_then_smaller():
     assert tuning.choose({1.0: sc(0.09, se=0.05), 1.5: sc(0.10, se=0.05)}) == {"k": 1.0, "flags": []}
 
 
+def test_choose_cutoff_uses_the_best_candidates_se_not_the_high_variance_one():
+    # The cutoff is set by the best candidate (k 1.5, ret 0.10, se 0.01); the high-variance k 1.0 (ret 0.05, se 0.20)
+    # falls below it and cannot displace k 1.5.
+    assert tuning.choose({1.0: sc(0.05, se=0.20), 1.5: sc(0.10, se=0.01)}) == {"k": 1.5, "flags": []}
+
+
 def test_choose_excludes_ks_under_300_trades():
     assert tuning.choose({1.0: sc(0.05, trades=300), 2.0: sc(0.50, trades=299)}) == {"k": 1.0, "flags": []}
     assert tuning.choose({1.0: sc(0.05, trades=300), 2.0: sc(0.50, trades=300)}) == {"k": 2.0, "flags": []}
@@ -160,6 +166,37 @@ def test_e_summary_same_k_at_ninety_percent_and_not_at_fifty():
 def test_e_summary_of_no_candidates_has_zero_modal_share():
     summary = tuning.e_summary(Sweep())["CND-PS"]
     assert summary["modal_share"] == 0.0 and summary["same_k"] is False and summary["candidates"] == 0
+
+
+def _infeasible(eid):
+    return {**scored(eid, 1.0, np.nan), "status": "undetermined", "reason": "thin_history"}
+
+
+def test_e_summary_share_counts_events_with_no_feasible_k_in_the_denominator():
+    sw = Sweep()
+    sw.scored[("CND-PS", E_ARM)] = [pd.DataFrame([scored(f"s{i}", 1.0, 1.0) for i in range(6)]
+                                                 + [_infeasible(f"u{i}") for i in range(4)])]
+    summary = tuning.e_summary(sw)["CND-PS"]
+    assert summary["modal_share"] == pytest.approx(0.6)
+    assert summary["same_k"] is False
+    assert summary["no_feasible_k"] == 4 and summary["candidates"] == 10
+
+
+def test_e_summary_same_k_when_nine_of_ten_candidates_share_one_k():
+    sw = Sweep()
+    sw.scored[("CND-PS", E_ARM)] = [pd.DataFrame([scored(f"s{i}", 1.0, 1.0) for i in range(9)] + [_infeasible("u")])]
+    summary = tuning.e_summary(sw)["CND-PS"]
+    assert summary["modal_share"] == pytest.approx(0.9)
+    assert summary["same_k"] is True
+
+
+def test_e_summary_same_k_at_the_eight_of_ten_boundary():
+    sw = Sweep()
+    sw.scored[("CND-PS", E_ARM)] = [pd.DataFrame([scored(f"s{i}", 1.0, 1.0) for i in range(8)]
+                                                 + [scored("x", 0.5, 1.0), scored("y", 1.5, 1.0)])]
+    summary = tuning.e_summary(sw)["CND-PS"]
+    assert summary["modal_share"] == pytest.approx(0.8)
+    assert summary["same_k"] is True
 
 
 # ---- receipts -------------------------------------------------------------
