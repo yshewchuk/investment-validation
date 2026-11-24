@@ -1,8 +1,11 @@
 """EXP-189 W6a: success table, breakeven alpha, recommendation and T7 rendering on synthetic evaluate-shaped fixtures."""
+import re
+
 import pytest
 
 from experiments import size_width_success as sws
 from experiments.size_pnl_shortvol import NAMES
+from experiments.size_width_sizing import GRID
 
 PERIODS = sws.PERIODS
 LADDER = sws.LADDER
@@ -103,12 +106,14 @@ def test_tie_is_not_a_beat():
 
 
 def test_margin_boundary_passes_at_exactly_margin():
-    be = {"production": _be(0.5), "A": {**_be(0.5), "2025": 0.5 + sws.MARGIN}}
+    # production breakeven 0.5: x 0.55 is exactly production + 0.05
+    be = {"production": _be(0.5), "A": {**_be(0.5), "2025": 0.55}}
     assert sws.success_table(PROD, {"A": _arm()}, be)["A"]["passed"] is True
 
 
 def test_margin_just_over_fails():
-    be = {"production": _be(0.5), "A": {**_be(0.5), "2025": 0.5 + sws.MARGIN + 0.001}}
+    # production breakeven 0.5: x 0.56 is over production + 0.05
+    be = {"production": _be(0.5), "A": {**_be(0.5), "2025": 0.56}}
     row = sws.success_table(PROD, {"A": _arm()}, be)["A"]
     assert row["breakeven"]["margin_ok"] is False
     assert row["passed"] is False
@@ -150,6 +155,16 @@ def test_production_breakeven_none_fails():
     row = sws.success_table(PROD, {"A": _arm()}, be)["A"]
     assert row["passed"] is False
     assert row["fails"] == ["breakeven_not_available"]
+
+
+def test_arm_structure_equal_to_production_is_not_lost():
+    arm = _arm(ret=101.0)
+    for n in NAMES:
+        arm["2025"]["structures"][n]["total_return"] = 100.0  # production's 2025 structure return
+    row = sws.success_table(PROD, {"A": arm}, BE)["A"]
+    assert row["lost_structures"] == 0
+    assert row["guard_ok"] is True
+    assert row["passed"] is True
 
 
 def test_guard_two_lost_ok():
@@ -307,8 +322,93 @@ def test_production_missing_period_fails_missing():
 @pytest.mark.parametrize("prod, arms", [([], {"A": _arm()}), (PROD, [("A", _arm())])],
                          ids=["production_not_dict", "arms_not_dict"])
 def test_non_dict_inputs_raise_value_error(prod, arms):
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="production and arms must be dicts"):
         sws.success_table(prod, arms, BE)
+
+
+def test_breakeven_x_and_production_shown_in_their_own_columns():
+    be = {"production": _be(0.3), "A": _be(0.4)}
+    table = sws.success_table(PROD, {"A": _arm()}, be)
+    assert table["A"]["breakeven"]["x"] == 0.4
+    assert table["A"]["breakeven"]["production"] == 0.3
+    row_line = next(line for line in sws.render_t7(table).splitlines() if line.startswith("| A |"))
+    cells = [c.strip() for c in row_line.strip("|").split("|")]
+    assert cells[4] == "0.400"  # breakeven x
+    assert cells[5] == "0.300"  # breakeven production
+
+
+# --- invalid board_rule inputs ---
+
+def test_board_rule_unknown_label_raises():
+    with pytest.raises(ValueError, match=re.escape("unknown arm 'production'")):
+        sws.board_rule("production", {n: 1.0 for n in NAMES}, {}, {})
+
+
+def test_board_rule_missing_structure_factor_raises():
+    factors = {n: 1.0 for n in NAMES}
+    del factors[NAMES[0]]
+    with pytest.raises(ValueError, match=re.escape(f"missing factor for structure {NAMES[0]!r}")):
+        sws.board_rule("A", factors, {}, {})
+
+
+def test_board_rule_none_factor_raises():
+    factors = {n: 1.0 for n in NAMES}
+    factors[NAMES[0]] = None
+    with pytest.raises(ValueError, match=re.escape(f"factor for structure {NAMES[0]!r} must be a finite real number, got None")):
+        sws.board_rule("A", factors, {}, {})
+
+
+def test_board_rule_non_grid_k_raises():
+    assert 1.6 not in GRID
+    factors = {n: 1.0 for n in NAMES}
+    factors[NAMES[0]] = 1.6
+    with pytest.raises(ValueError, match=re.escape(f"factor for structure {NAMES[0]!r} is 1.6, not in size_width_sizing.GRID")):
+        sws.board_rule("A", factors, {}, {})
+
+
+def test_board_rule_bool_k_raises():
+    factors = {n: 1.0 for n in NAMES}
+    factors[NAMES[0]] = True
+    with pytest.raises(ValueError, match=re.escape(f"factor for structure {NAMES[0]!r} must be a finite real number, got True")):
+        sws.board_rule("A", factors, {}, {})
+
+
+def test_board_rule_non_dict_flatness_raises():
+    with pytest.raises(ValueError, match="flatness must be a dict"):
+        sws.board_rule("A", {n: 1.0 for n in NAMES}, [0.2], {})
+
+
+def test_board_rule_non_numeric_declined_raises():
+    with pytest.raises(ValueError, match=re.escape(f"declined for structure {NAMES[0]!r} must be a finite real number or None, got 'x'")):
+        sws.board_rule("A", {n: 1.0 for n in NAMES}, {}, {NAMES[0]: "x"})
+
+
+# --- invalid render_rule inputs ---
+
+def test_render_rule_non_dict_raises():
+    with pytest.raises(ValueError, match="rule must be a dict"):
+        sws.render_rule([("recommendation", "A")])
+
+
+def test_render_rule_unknown_recommendation_raises():
+    with pytest.raises(ValueError, match=re.escape("unknown recommendation 'production'")):
+        sws.render_rule({"recommendation": "production", "rows": []})
+
+
+def test_render_rule_a_without_rows_raises():
+    with pytest.raises(ValueError, match="needs a list 'rows' of dicts"):
+        sws.render_rule({"recommendation": "A"})
+
+
+def test_render_rule_a_rows_missing_keys_raises():
+    rule = {"recommendation": "A", "rows": [{"structure": NAMES[0], "k": 1.0}]}
+    with pytest.raises(ValueError, match="needs a list 'rows' of dicts"):
+        sws.render_rule(rule)
+
+
+def test_render_rule_a_rows_not_list_raises():
+    with pytest.raises(ValueError, match="needs a list 'rows' of dicts"):
+        sws.render_rule({"recommendation": "A", "rows": "rows"})
 
 
 # --- recommendation order ---

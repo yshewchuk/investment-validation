@@ -5,6 +5,7 @@ import numbers
 from engine.evaluate import breakeven_alpha_from_sweep
 from experiments.size_pnl_report import md_table
 from experiments.size_pnl_shortvol import NAMES
+from experiments.size_width_sizing import GRID
 
 PERIODS = ("2025", "2023H2", "2024")
 LADDER = (0.0, 0.25, 0.5, 0.75, 1.0)
@@ -137,12 +138,45 @@ def recommend(table):
     return next((a for a in PREFERENCE if a in table and table[a]["passed"]), None)
 
 
+def _check_factors(factors):
+    """ValueError unless ``factors`` is a dict holding every structure in NAMES with a finite real k in GRID (bool excluded)."""
+    if not isinstance(factors, dict):
+        raise ValueError("factors must be a dict of structure -> k")
+    for n in NAMES:
+        if n not in factors:
+            raise ValueError(f"missing factor for structure {n!r}")
+        k = factors[n]
+        kf = None if isinstance(k, bool) else _num(k)
+        if kf is None:
+            raise ValueError(f"factor for structure {n!r} must be a finite real number, got {k!r}")
+        if kf not in GRID:
+            raise ValueError(f"factor for structure {n!r} is {k!r}, not in size_width_sizing.GRID {GRID}")
+
+
+def _check_values(name, d):
+    """ValueError unless ``d`` is a dict whose values are each None or a finite real (bool excluded)."""
+    if not isinstance(d, dict):
+        raise ValueError(f"{name} must be a dict of structure -> value")
+    for n, v in d.items():
+        if v is not None and _num(v) is None:
+            raise ValueError(f"{name} for structure {n!r} must be a finite real number or None, got {v!r}")
+
+
 def board_rule(label, factors, flatness, declined):
-    """The proposed board width rule: divisors per structure for A-D, the expectation rule for E, or no change."""
+    """The proposed board width rule: divisors per structure for A-D, the expectation rule for E, or no change.
+
+    ValueError for a label outside None and PREFERENCE. For A-D, ``factors`` must hold every structure in NAMES with
+    a k in GRID, and ``flatness`` and ``declined`` must be dicts whose values are None or finite reals.
+    """
     if label is None:
         return {"recommendation": "no_change", "rows": []}
+    if label not in PREFERENCE:
+        raise ValueError(f"unknown arm {label!r}: label must be None or one of {PREFERENCE}")
     if label == "E":
         return {"recommendation": "E", "rule": "pick k maximising exp_pnl_sim per event", "rows": []}
+    _check_factors(factors)
+    _check_values("flatness", flatness)
+    _check_values("declined", declined)
     rows = [{"structure": n, "k": factors[n], "divisor": f"divisor / {factors[n]}",
              "flatness_se": flatness.get(n), "declined_share": declined.get(n)} for n in NAMES]
     return {"recommendation": label, "rows": rows}
@@ -159,11 +193,24 @@ def render_t7(table):
 
 
 def render_rule(rule):
-    """The board rule as markdown: a divisor table for A-D, a sentence for E, or the no-change line."""
-    if rule["recommendation"] == "no_change":
+    """The board rule as markdown: a divisor table for A-D, a sentence for E, or the no-change line.
+
+    ValueError unless ``rule`` is a dict with a known recommendation; an A-D rule also needs a list ``rows`` of
+    dicts holding every key in RULE_HEADERS.
+    """
+    rec = rule.get("recommendation") if isinstance(rule, dict) else None
+    if not isinstance(rule, dict):
+        raise ValueError("rule must be a dict")
+    if rec not in ("no_change", "E") + PREFERENCE:
+        raise ValueError(f"unknown recommendation {rec!r}: expected no_change, E or one of {PREFERENCE}")
+    if rec == "no_change":
         return "No change recommended."
-    if rule["recommendation"] == "E":
+    if rec == "E":
         return f"Recommendation: E, {rule['rule']}."
+    rows_in = rule.get("rows")
+    if not isinstance(rows_in, list) or not all(isinstance(r, dict) and all(k in r for k in RULE_HEADERS)
+                                                for r in rows_in):
+        raise ValueError(f"arm {rec} rule needs a list 'rows' of dicts with keys {', '.join(RULE_HEADERS)}")
     rows = [[r["structure"], _fmt(r["k"]), r["divisor"], _fmt(r["flatness_se"]), _fmt(r["declined_share"])]
-            for r in rule["rows"]]
-    return "\n\n".join([f"### Proposed board width rule (arm {rule['recommendation']})", md_table(RULE_HEADERS, rows)])
+            for r in rows_in]
+    return "\n\n".join([f"### Proposed board width rule (arm {rec})", md_table(RULE_HEADERS, rows)])
