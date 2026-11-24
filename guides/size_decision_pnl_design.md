@@ -310,3 +310,99 @@ python3 -m experiments.size_pnl_gate_fold inputs --year 2025 --admitted-events /
 **Judgement call (mine).** `margin.simulate` sizes `target_share` as `target_share x headroom / secured`, which is undefined for secured 0 (it would return infinite contracts). The straddle account (c) therefore passes the straddle's debit per contract (`entry_cost x 100`, the cash a long position needs) as its secured amount to the simulator, so it is capped by the same 66% headroom. The driver column stays 0.
 
 **Receipts.** `spec_hash` is bound by the inner inputs receipt, so declaring this amendment in `spec.yaml` necessarily changes it and an existing inner run cannot replay under the amended spec (as with Amendment 1); the inner receipt bodies are otherwise unchanged. A new PLANNED row is required (supervisor registers it after merge). The outer receipt's `decisions_sha256` covers the added columns. A `decisions.parquet` without them omits the account sections with a not_testable note.
+
+## 18. Amendment 6 (2026-11-23): width arms (`per_structure`, `m0_width`), `retuned` dropped
+
+**Status: DESIGN ONLY.** User decision 2026-11-23. The code slices (list at the end) are NOT started until this design merges. This PR touches no code, `spec.yaml` or test, so the spec hash is unchanged and the pre-registered Amendment 5 rerun (PR #2779, whose design section is 17, so this one is 18) is unaffected.
+
+**Reason.** The `retuned` arm chose one `c` per model, and 11 of 12 models chose the grid edge `c = 0.5` (2025 run). The synthetic oracle (T11) shows short-vol P&L peaking at about 1.5-2x the actual move for BFLY-P, BFLY-P5, CND-PS, RAMP7 and CTR5, while TWIN-P and TWIN-P5 are fine near 1x. EXP-137's chosen widths were 1.3-1.7x the forecast (`engine/forecast_sizing.py` comment). The roster's errors are close (inner RMSE 7.05-7.50, MAE 4.28-4.45) and all models under-predict large moves, so the open question is the width rule, per structure, more than the forecast. One `c` per model cannot express "TWIN wants 1x, the others about 1.5-2x".
+
+**Disclosure.** 2025 outputs of the pre-registered run (all arms, T10, T11) were seen before this amendment. Everything below on 2025 widths is a **sensitivity, not blind**. What stays blind: the success rule and every threshold below are fixed before any Amendment 6 run, and the sweep uses 2023-24 only.
+
+**Unchanged.** Roster, as-is arm, H1-H3, primary marks, `marks_mid` and the accounts (Amendments 1, 2), G_PROD, Amendment 5's universe. No SIZE module or `size_panel.py` closure file changes (section "Constraints").
+
+### 18.1 (A) Drop `retuned`; cite the verdict, never recompute it
+
+From the first Amendment 6 run onward the `retuned` arm is not computed: no `c` grid, no `tuning` width receipt entries, no T5, no retuned rows in T7/T10 or the accounts. The pre-registered verdict (T10, including its retuned rows) is **not recomputed**. REPORT section "Pre-registered verdict (cited)" quotes it from the Amendment 5 run by that run's outer receipt (`decisions_sha256`, `spec_hash`) and its REPORT content hash, labelled "cited from run <receipt hash>, not recomputed in this run". A missing or mismatching citation hash writes `citation_unavailable` and no verdict section; nothing is re-derived. H1-H3 on the as-is arm are still computed in the new run, as a reproduction. Hence the amended run's T10 covers as-is only, and says so.
+
+### 18.2 (B) Arm `per_structure`
+
+**Standard-tool check.** numpy (`default_rng`, `polyfit`) and the existing `ResidualPool`/`size_pnl_*` machinery (sections 4-5, fast path of section 4). Nothing hand-rolled beyond a 3-parameter fit.
+
+**B1. Error model, fitted on 2023-24 inner real forecasts vs labels.** For model `m`, events `e` in the inner paired population E, forecast `f` and label `y = abs_move` (both positive; non-positive is dropped and counted). On the log scale, the same scale as the existing `regression_direction` generator and `sd(log(y/pred))` diagnostic:
+
+`log f = L_m + b_m * (log y - mean_e(log y)) + s_m * z`, `z ~ N(0,1)`.
+
+`L_m` and `b_m` are the OLS intercept (at the mean) and slope of `log f` on `log y`; `s_m` the residual standard deviation. `b_m < 1` is the "under-predicts large moves" shrinkage. Judgement call (mine): log scale because a forecast must be positive and the existing synthetic arm is already log-scale; the additive form of the request is the same equation on `log`. The noise is Gaussian by pre-statement; the report prints each model's residual skew and excess kurtosis. If the roster median excess kurtosis exceeds 1 the Gaussian is flagged "poor fit" in REPORT, but nothing changes in this run (no look-then-switch); a heavier-tailed noise would be a later amendment.
+
+**Reference fake model.** ONE model with `(L_ref, b_ref, s_ref)` = the **roster median** of each parameter over the models with a fit (M0 and the 11 others; `not_testable` models excluded). Table T12 lists every model's `(L, b, s)`, `n`, and the reference. **Calibration check (hard):** simulating the reference on the inner E (mean over the N draws), its RMSE and MAE (in percent points, level space) must fall inside the roster's inner `[min, max]` for each of RMSE and MAE (stated above, 7.05-7.50 and 4.28-4.45, re-read from the inner receipt), with a 5% slack on each bound (my judgement call). Outside: the amendment halts with `reference_not_calibrated` before the sweep, naming the metric; no tuning, no `per_structure` rows, and the other arms still run.
+
+**B2. Sweep (2023-24 only, no real forecast, no 2025).** For each of the seven structures, a **multiplicative factor `k` on production's width**: `width = k * (forecast/100) / divisor` with the registered divisor of `forecast_sizing.py`, so `k = 1` is production exactly and `k = 1/c` in Amendment 4 terms. `WIDTH_MIN`/`WIDTH_MAX` are unchanged: a width outside them is declined (non-trade, P&L 0, counted, as today).
+
+- **Grid (recommended; open decision 2):** `k in {0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0}`. It extends past 2.0 so a peak at 1.5-2x cannot sit at the edge. The **edge rule**: a structure whose argmax is at the grid maximum (3.0) is not frozen: `k_at_edge`, that structure runs at its last interior best and the report flags it; widening needs a new amendment. The same applies at 0.5.
+- **Draws (open decision 3):** `N = 20` seeded draws. Draw `d` of event `e` uses `numpy.random.default_rng(sha256(event_id | "exp188-a6-v1" | d))`, so `z` is common across structures and `k`, and across models if a model is ever re-simulated. Each draw is one fake-forecast "model": its own per-model `ResidualPool` (strictly earlier events, `err_move = y - f`, section 4), the same trailing-cutoff entry gate, the same `FillModel` marks, next-day exit, the same burn-in (scoring from 2023H2), common 2023+ support, and the fast path of section 4 (simulate once per (draw, event) at each ladder strike; every (structure, `k`) is a dot product; the cutoff is recomputed per `k` on that structure's own prior scores, so the gate sees width).
+- **Per-(structure, `k`) outputs:** mean over draws of the objective below, its across-draw standard error, trade count, declined share, and the curve as a table (T13).
+
+**Objective (open decision 1; recommended):** per (structure, `k`, draw), the **stand-alone cash-secured $100,000 account** (Amendment 2 account (b), `margin.simulate` unchanged) final return, computed under the primary marks and under `marks_mid`; the structure's score at `k` is the **minimum of the two** mark sets' mean-over-draws return (maximin, so a `k` that only wins under optimistic marks is not picked). Ties (within one standard error of the maximum): the `k` nearest 1, then the smaller; this keeps production unless the data clearly prefer otherwise. Why not flat-dollar P&L: it was dominated by penny-debit trades (Amendment 2: VFC BFLY-P5, 6,666 lots), which would drive `k` toward widths that create sub-$0.25 debits.
+
+**B3. Freeze and apply to 2025.** The 7 factors `k_s` are written into a new immutable `width_sweep` receipt (`spec_hash`, N, grid, per-`k` table, `k_s`, `k_at_edge`/`k_defaulted` flags) before any real model is scored under the arm, and 2025 refuses without it (as `tuning`, R4). Per real model `m`: ONE **level adjustment** `r_m = median_e(f_ref,e / f_m,e)` over the 2023-24 inner E, where `f_ref,e` is the reference fake model's forecast for event `e` (mean over the N draws of the fake forecast, in level space; noise averaging is stated, not hidden). No P&L is used. The model's `per_structure` forecast is `r_m * f_m`, sized with `k_s`, through the model's own pool and gate as in the as-is arm (the gate decision itself uses `r_m * f_m`; `exp_pnl_sim` too). Run on 2025 (decisions frozen per month, R6) and on the inner window for the in-sample reading (T14).
+
+**Level adjustment: median ratio or mean ratio (open decision 4).** Recommend the **median of ratios**: a ratio of two positive forecasts is heavy-tailed, the median is robust, and the arm absorbs a level difference, not a tail. Mean ratio would be pulled by a few tiny forecasts. The report also prints the mean ratio for each model.
+
+### 18.3 (C) Arm `m0_width`
+
+Every model's seven structures are **sized from M0's forecast** (production rules, `k = 1`, `forecast_params` on M0's `pred_abs_move`); **only the gate decision** (`exp_pnl_sim` through the model's own pool, cutoff, rank) uses the model's own forecast. This isolates selection from width. Pool, cutoff, marks, accounts and `marks_mid` follow the as-is path. M0 under `m0_width` equals M0 as-is (a check that fails the arm if not: `m0_width_identity_failed`). A model's `m0_width` row for an event where M0 has no forecast is undetermined and drops from E for that arm only (counted).
+
+### 18.4 (D) Board-match check (M0 only, report only)
+
+For M0, as-is strikes (the listed-ladder strikes of the taken trades) versus the live board's **recorded** strikes on the same events, same structure: match rate = equal strike lists over events present in both; mismatches listed by cause when attributable (ladder snap, a forecast revision, an unlisted strike). **Where the ledger lives:** board decisions are in the ledger `decisions` table (`engine/v2/ledger/decisions.py`, `payload_json`, legacy rows imported by `legacy_adapter.py`). `Sources` (section 13) reads the pinned snapshot and the v14 store only; it has no ledger handle, so the check reports **`not_available` with `details.reason = board_ledger_not_in_sources`** unless the supervisor supplies one new, explicitly stated input at the report stage: `--board-strikes <json>`, a list of `{event_id, structure, strikes}` the supervisor extracts read-only from the ledger (modelled on `--stored-gate`, Amendment 3). It is a hostile-input file like the others (size cap, hash recorded in the outer receipt). The slice checks the ledger payload's strike field; if the schema differs it reports `board_strikes_unparsable` with the field it found, never guesses. A low match rate is a finding, not a reason to tune.
+
+### 18.5 (E) Report and labels
+
+New REPORT sections, each titled **"sensitivity, 2025 not blind for widths (2025 results were seen before this amendment)"** except the sweep (inner only): T12 error-model parameters; T13 sweep curves per structure (score per `k`, standard error, trade count, declined share, **flatness**: the spread between the best score and the score at `k = 1` and at the neighbouring grid points, in standard errors, plus the width of the set of `k` within one standard error of the best); T14 `as_is`, `m0_width` and `per_structure` side by side, per model and per structure, **per trade** (return per taken trade, trade count), **`marks_mid`**, and **cash-secured accounts** (account (a), seven structures, both mark sets; final equity, return, drawdown, wanted/funded) for 2025 and for the inner window; T15 board match (D); the cited verdict (A). The pair differences (H, E, N) and each model minus M0 repeat on the new arms in the account tables only. No bootstrap interval is added; a flat curve is the report's main caution.
+
+### 18.6 (F) Success rule, written before any run
+
+`per_structure` **succeeds** iff, over the testable roster models (at least 8 of 12), in the cash-secured seven-structure account (a), **each of the six cells** passes: {2025, 2023H2, 2024} x {primary marks, `marks_mid`}, where a cell passes when `per_structure` final return exceeds `as_is` final return for at least 9 of the testable models (the share is my judgement call, as the 75% of section 7) and the median difference across models is positive. 2023H2 and 2024 start separate fresh $100,000 accounts and are **in-sample for the level fit and the error model** (not for `k`, which is fitted on fake forecasts); 2025 is the out-of-sample cell for the level and the error model but is not blind for widths. `m0_width` has no success threshold; it is read beside it: if `m0_width` already captures most of `per_structure`'s gain, the gain is width; if `per_structure` gains while `m0_width` does not, the model's forecast, not its width, is the limiting factor (reported as prose; no category).
+
+**Feeding the board (a separate decision).** A pass is evidence for a board width change, not a change. Per structure, a candidate new divisor is `divisor / k_s` applied to the **production** forecast only (the board's forecast is M0's; no level adjustment applies). The decision is the user's, needs M0's `per_structure` row (`r_M0` near 1 shows the level is not the driver), the `marks_mid` cells, the flatness of T13 (a flat curve argues to leave the board alone) and, per Decision 3, a DYN-SV chooser review because it reads `width_over_forecast` features. A failure leaves the board unchanged.
+
+### 18.7 (G) Failure semantics (R1-R6)
+
+| Case | Result |
+| --- | --- |
+| R1 model with no fit (fewer than 300 inner events, non-positive forecasts, no inner decisions) | no `per_structure` row, `not_testable`; counted; no imputation |
+| R1 missing label for an event | the existing exclusion (`move_label_missing`, section 13); nothing imputed; the fit and sweep use E only |
+| R1 M0 forecast missing for an event under `m0_width` | undetermined for that arm only, counted |
+| Whole-run refusals | the existing identity ones; `EXPERIMENT_IDENTITY_CONFLICT` with `details.reason` in `width_sweep_receipt_missing`, `width_sweep_receipt_mismatch`, `citation_hash_mismatch`; `INVALID_EXPERIMENT_SPEC` for `board_strikes_invalid` |
+| Reference outside the roster range | `reference_not_calibrated`, section 18.2; `per_structure` rows omitted, other arms run |
+| A (structure, `k`) with no feasible width (every candidate declined) or fewer than 300 trades summed over draws | score `not_scored`; excluded from the argmax; the declined share is printed |
+| All `k` of a structure excluded | `k_defaulted` = 1.0, flagged |
+| Argmax at an edge | `k_at_edge`, section 18.2 |
+| A candidate declined by width at `k` in 2025 | non-trade, P&L 0, stays in E (as section 4) |
+| R2 cost | one process, `bounded_run`, quarter chunks; the sweep is N fast-path simulations of one model, estimated at N times one model's inner cost (not measured; the slice smoke measures and logs RSS, ETA and per-structure progress at a bounded cadence); over-limit refuses `RESOURCE_LIMIT_EXCEEDED`, no partial report |
+| R3 | seeds are `sha256(event_id | "exp188-a6-v1" | d)`; the bootstrap seed is unused |
+| R4 | `width_sweep` receipt is atomic, immutable and bound to the inputs receipt; a changed input refuses at replay |
+| R5 | `model_id` unchanged; the fake models carry ids `synthetic-a6-<draw>` and are never in the roster or in T10 |
+| R6 | sweep reads 2023-24 only; the 2025 stage refuses without the receipt; each month's decisions are frozen before its labels are read; the board-strikes file is read at the report stage only |
+
+**Receipts, spec hash, rerun.** The code slices change `spec.yaml` (arms, `amendments` entry, drop `retuned`), so the **spec hash changes**: a **new PLANNED row** (supervisor registers it after the slices merge) and a **full rerun** (inner and outer), because inner receipts bind `spec_hash`. The Amendment 5 run's receipts stay as the cited record; this PR changes none of them.
+
+### 18.8 Open decisions (recommendation first)
+
+1. **Sweep objective.** Recommended: stand-alone cash-secured account return, minimum over primary and `marks_mid`, mean over draws (section 18.2). Alternatives: flat-dollar primary P&L (outlier-prone), `marks_mid` alone, or a combination of ranks. Cost of the recommendation: about 2 x 7 x 10 x N account simulations; cheaper if the objective is flat-dollar.
+2. **`k` grid.** Recommended: ten points up to 3.0 (above). Alternative: add 4.0 (most declines at `WIDTH_MAX` for large forecasts) or drop 0.5/0.67 (nothing suggests narrower than production).
+3. **N draws.** Recommended 20 (standard error of the account return across draws is reported; raise if curves are too noisy to rank). Fewer than 10 is not recommended.
+4. **Level adjustment.** Recommended median ratio (above); mean ratio as alternative.
+
+### 18.9 Split list (code slices, NOT started until this design merges)
+
+| Slice | Scope | Code / test lines / doc words | After |
+| --- | --- | --- | --- |
+| W1 | Error-model fit, reference model, calibration check, T12 | ~120 / ~120 / 50 | this PR |
+| W2 | Seeded fake-forecast draws, `k` factor in `forecast_sizing`-based sizing for the experiment only (no engine edit), sweep through the fast path and objective, `width_sweep` receipt, T13 | ~170 / ~170 / 60 | W1 |
+| W3 | `per_structure` arm (level ratio, frozen `k_s`, 2025 and inner) and `m0_width` arm, identity check | ~150 / ~160 / 50 | W2 |
+| W4 | Drop `retuned`, cited verdict, T14 side-by-side, success rule table, spec amendment and PLANNED-row note | ~120 / ~130 / 80 | W3 |
+| W5 | Board-match check (`--board-strikes`), T15, runbook line | ~90 / ~100 / 50 | W4 |
+
+Each slice stays near 150 lines; W2 may reuse `size_pnl_shortvol` and `size_pnl_account` unchanged and adds only new `size_pnl_width_*` modules. The spec hash changes with W4 (the first slice that edits `spec.yaml`); no earlier slice may touch it.
