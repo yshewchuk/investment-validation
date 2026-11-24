@@ -79,6 +79,43 @@ def pricing(monkeypatch):
     monkeypatch.setattr(fake, "build_pool", lambda table, labels: None)
 
 
+@pytest.fixture
+def taking(monkeypatch):
+    """Width 5.0 CND-PS events are taken at alpha 0.5 (entry 2.0, exit 3.0, +1.0 per share, $1,000 secured per contract); every other
+    decision is thin_history. The width is the k-scaled forecast, so only k = 1.0 takes a trade. No pool, simulation or market is walked."""
+    def simulate(chunk_, events, pool, **kw):
+        return {str(e): "sim" for e in events["event_id"]}
+
+    def score_events(chunk_, events, sims, name, *, alpha=0.5):
+        n = len(events)
+        return pd.DataFrame({"event_id": events["event_id"].astype(str).to_numpy(), "event_date": events["event_date"].to_numpy(),
+                             "structure": [name] * n, "width": events["pred_move"].to_numpy(dtype=float), "status": ["scored"] * n,
+                             "reason": [None] * n, "exp_pnl_sim": [0.01] * n, "entry_cost": [2.0] * n})
+
+    def decide(scored):
+        hit = [s == NAME and w == 5.0 for s, w in zip(scored["structure"], scored["width"])]
+        return scored.assign(status=["taken" if h else "undetermined" for h in hit],
+                             reason=[None if h else "thin_history" for h in hit], alpha=[0.5 if h else None for h in hit])
+
+    def score(chunk_, events, decisions, name, alpha, *, drop_unquoted=False, mid_marks=False, repriced=False):
+        ids = [str(e) for e in decisions["event_id"]]
+        n = len(ids)
+        return pd.DataFrame({"event_id": pd.Series(ids, dtype=object), "structure": [name] * n, "entry_cost": [2.0] * n,
+                             "exit_value": [3.0] * n, "pnl_dollars": [100.0] * n, "pnl_per_share": [1.0] * n})
+
+    def secured(chunk_, events, decisions, name):
+        ids = [str(e) for e in decisions["event_id"]]
+        return pd.DataFrame({"event_id": pd.Series(ids, dtype=object), "secured_per_contract": [1000.0] * len(ids)})
+
+    monkeypatch.setattr(sv, "simulate", simulate)
+    monkeypatch.setattr(sv, "score_events", score_events)
+    monkeypatch.setattr(sv, "decide", decide)
+    monkeypatch.setattr(sv, "score", score)
+    monkeypatch.setattr(sv, "secured", secured)
+    monkeypatch.setattr(driver, "build_pool", lambda table, labels: None)
+    monkeypatch.setattr(fake, "build_pool", lambda table, labels: None)
+
+
 def _loaded(src, ids=None):
     """The loaded run of the outer stage, built by hand (the inputs are the EXP-188 fixtures)."""
     return {"ids": ids, "plan": base._plan_window(PLAN_FRAME, base._window("outer"), ids), "table": _m0_table(),
@@ -175,6 +212,24 @@ def test_smoke_inner_runs_end_to_end_without_a_fake_and_writes_no_tuning_c(tmp_p
     assert set(inner["declined"]) == set(NAMES) and all("E" in inner["declined"][n] for n in NAMES)
 
 
+def test_smoke_inner_takes_the_width_one_trade_and_scores_it_end_to_end(tmp_path, m0, taking, monkeypatch):
+    use_chunks(monkeypatch, [("2023Q3", chunk("E1")), ("2024Q3", chunk("E2"))])
+    out = tmp_path / "out"
+    driver.run(sources(), "inner", out, event_ids=["E1", "E2"], prereg=OK)
+    inner = receipts.load_receipt(out / "receipts" / "inner_summary.json")
+    prod = inner["results"]["production"]["2024"]
+    assert prod["account"]["trades"] == 1
+    assert prod["structures"][NAME]["trades"] == 1
+    assert all(prod["structures"][n]["trades"] == 0 for n in NAMES if n != NAME)
+    # E1 (June 2023) is burn-in history, before the 2023-07-01 emit date: never taken; E2 is the only trade, at entry 2.0, exit 3.0
+    assert inner["stats"]["production"]["2024"] == {"trades": 1, "x": 0.0, "mid": 0.5, "alpha0": 0.5}  # every ladder mean is 1.0 / 2.0
+    # one trade: 33 contracts (0.25 of the 66% headroom of $200,000, over $1,000 secured), $200 in and $300 out each: equity 203,300
+    assert prod["account"]["total_return"] == pytest.approx(0.0165) and prod["account"]["total_return"] > 0
+    assert prod["account"]["total_return"] == inner["results"]["A"]["2024"]["account"]["total_return"]  # A's k is 1.0 (k_defaulted)
+    assert inner["results"]["B"]["2024"]["account"]["trades"] == 1
+    # E is not asserted: its best exp_pnl_sim ties at 0.01 across k, so it resolves to k = 1.0 and also takes this trade (trades == 1)
+
+
 def test_the_full_inner_run_with_too_few_events_refuses_m0_inputs_insufficient(tmp_path, m0, pricing, monkeypatch):
     use_chunks(monkeypatch, [("2023Q3", chunk("E1")), ("2024Q3", chunk("E2"))])
     with pytest.raises(OpsError) as caught:
@@ -245,6 +300,25 @@ def test_outer_freezes_each_2025_month_before_its_labels_are_read(tmp_path, m0, 
     assert (frozen["reason"] == "thin_history").all() and (frozen["book"] == "short_vol").all() and (frozen["model_id"] == "M0").all()
     assert len(frozen) == len(NAMES) * (len(GRID) + 1)
     assert set(frozen["arm_or_rule"]) == {str(k) for k in GRID} | {"E"}
+
+
+def test_outer_freezes_the_width_one_taken_rows_and_counts_the_2025_trades(tmp_path, m0, taking, monkeypatch):
+    src, out = sources(), tmp_path / "out"
+    _inner_summary(out)
+    _tuning_receipts(out)
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+    driver._outer(src, out, _loaded(src))
+    frozen = pd.read_parquet(out / "months" / "2025-01.parquet")
+    assert len(frozen) == len(NAMES) * (len(GRID) + 1)
+    taken = frozen[frozen["status"] == "taken"]
+    # one taken row per event of the month for arm 1.0 and for arm E (E's chosen k is 1.0 under the tie, so E takes it too)
+    assert sorted(zip(taken["arm_or_rule"], taken["event_id"])) == [("1.0", "E3"), ("E", "E3")]
+    assert (taken["structure"] == NAME).all()
+    rest = frozen[frozen["status"] != "taken"]
+    assert len(rest) == len(frozen) - 2
+    assert (rest["status"] == "undetermined").all() and (rest["reason"] == "thin_history").all()
+    outer = receipts.load_receipt(out / "receipts" / "outer_summary.json")
+    assert outer["results"]["production"]["2025"]["account"]["trades"] == 2  # E3 and E4 both have sessions inside 2025
 
 
 # ---- stats and declined share -----------------------------------------------------
