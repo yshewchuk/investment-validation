@@ -59,8 +59,8 @@ def events_for(*eids, pred=PRED, mcap=20e9, date="2024-06-10"):
                          for e in eids])
 
 
-def taken(chunk, *eids, name="CND-PS", alpha=0.5, c=1.0):
-    """Taken decisions for ``eids``, each carrying the entry cost the module prices at ``alpha`` and ``c``.
+def taken(chunk, *eids, name="CND-PS", alpha=0.5):
+    """Taken decisions for ``eids``, each carrying the entry cost the module prices at ``alpha``.
 
     An event absent from the chunk, or with no entry cost, gets NaN, so ``score`` refuses it on its own checks.
     """
@@ -69,14 +69,14 @@ def taken(chunk, *eids, name="CND-PS", alpha=0.5, c=1.0):
     for eid in eids:
         cost = NAN
         if eid in pos:
-            legs, _ = sv.resolve(chunk, pos[eid], name, PRED, c)
+            legs, _ = sv.resolve(chunk, pos[eid], name, PRED)
             entered = None if legs is None else sv.entry_legs(chunk, legs, FillModel(alpha))
             if entered is not None:
                 cost = entered[0]
         costs.append(cost)
     return pd.DataFrame({"event_id": list(eids), "status": ["taken"] * len(eids),
                          "structure": [name] * len(eids), "entry_cost": costs,
-                         "alpha": [alpha] * len(eids), "c": [c] * len(eids)})
+                         "alpha": [alpha] * len(eids)})
 
 
 def _tables(seed=7, n=600):
@@ -103,7 +103,7 @@ def run(chunk, events, pool, name="CND-PS"):
 def scored_row(eid, *, pnl=0.5, mcap=20e9, rel=0.1, date="2024-06-10", name="TWIN-P"):
     return {"event_id": eid, "event_date": pd.Timestamp(date), "structure": name, "width": 0.04,
             "entry_cost": 3.0, "rel_spread": rel, "mcap_usd": mcap, "exp_pnl_sim": pnl,
-            "status": "scored", "reason": None, "alpha": 0.5, "c": 1.0}
+            "status": "scored", "reason": None, "alpha": 0.5}
 
 
 def scored_frame(*rows):
@@ -187,24 +187,23 @@ def test_no_call_leg_in_any_of_the_seven(name):
 
 # ---- resolve: width, refusals --------------------------------------------
 
-def test_twin_p_width_is_forecast_over_divisor():
+def test_twin_p_width_is_production_rule_at_k_1():
     assert forecast_params("TWIN-P", PRED)["width_moneyness"] == pytest.approx(0.04)
     legs, reason = sv.resolve(chunk_of(("A", {})), 0, "TWIN-P", PRED)
     assert reason is None
     assert sorted({leg["strike"] for leg in legs}) == [84.0, 92.0, 96.0, 100.0, 104.0, 108.0, 116.0]
 
 
-def test_c_divides_the_forecast_before_sizing():
-    chunk = chunk_of(("A", {}))
-    legs, reason = sv.resolve(chunk, 0, "TWIN-P", PRED, c=1.5)
-    assert reason is None
-    assert forecast_params("TWIN-P", PRED / 1.5) == pytest.approx({"width_moneyness": 0.04 / 1.5})
-    base, _ = sv.resolve(chunk, 0, "TWIN-P", PRED)
-    strikes = sorted(leg["strike"] for leg in legs)
-    assert strikes != sorted(leg["strike"] for leg in base)
-    # resolve builds its factory from forecast_params(name, pred / c) at c=1, so this is that factory's ladder.
-    factory, _ = sv.resolve(chunk, 0, "TWIN-P", PRED / 1.5)
-    assert strikes == sorted(leg["strike"] for leg in factory)
+def test_width_params_is_production_forecast_params():
+    # Amendment 6: short vol is as-is only, so the width is production's rule at k=1 with no divisor.
+    assert sv._width_params("BFLY-P", 0.05) == forecast_params("BFLY-P", 0.05)
+
+
+def test_score_events_rejects_the_removed_c_keyword():
+    chunk, events = chunk_of(("A", {})), events_for("A")
+    sims = {}
+    with pytest.raises(TypeError):
+        sv.score_events(chunk, events, sims, "CND-PS", alpha=0.5, c=1.0)
 
 
 def test_out_of_range_forecast_declines():
@@ -226,12 +225,6 @@ def test_resolve_refuses_a_call_leg_factory(monkeypatch):
         sv.resolve(chunk_of(("A", {})), 0, "BFLY-P", PRED)
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.details["reason"] == "call_leg_refused"
-
-
-@pytest.mark.parametrize("c", [0.0, -1.0, NAN, math.inf])
-def test_bad_c_refuses(c):
-    with pytest.raises(ValueError, match="c must be finite and > 0"):
-        sv.resolve(chunk_of(("A", {})), 0, "TWIN-P", PRED, c=c)
 
 
 def test_coarse_ladder_is_too_coarse():
@@ -325,13 +318,11 @@ def test_score_refuses_a_nanodollar_debit():
         sv.score(thin, events_for("A"), taken(thin, "A"), "CND-PS", 0.5)
 
 
-def test_score_events_refuses_bad_alpha_and_c(pool):
+def test_score_events_refuses_bad_alpha(pool):
     chunk, events = chunk_of(("A", {})), events_for("A")
     sims = sv.simulate(chunk, events, pool, draws=DRAW)
     with pytest.raises(ValueError, match=r"alpha must lie in \[0, 1\]"):
         sv.score_events(chunk, events, sims, "CND-PS", alpha=2.0)
-    with pytest.raises(ValueError, match="c must be finite"):
-        sv.score_events(chunk, events, sims, "CND-PS", c=0.0)
 
 
 # ---- decide ---------------------------------------------------------------
@@ -462,8 +453,8 @@ def test_score_needs_a_structure_column():
 
 def test_score_binds_to_the_pricing_alpha(pool):
     chunk, events = chunk_of(("A", {})), events_for("A")
-    priced = run(chunk, events, pool).assign(status="taken")  # priced at alpha 0.5, c 1.0
-    with pytest.raises(ValueError, match="decision was not priced at this alpha and c"):
+    priced = run(chunk, events, pool).assign(status="taken")  # priced at alpha 0.5
+    with pytest.raises(ValueError, match="decision was not priced at this alpha"):
         sv.score(chunk, events, priced, "CND-PS", 0.25)
     same = sv.score(chunk, events, priced, "CND-PS", 0.5)
     assert len(same) == 1 and same.iloc[0]["entry_cost"] == pytest.approx(priced.iloc[0]["entry_cost"])
@@ -479,25 +470,14 @@ def test_score_needs_an_entry_cost_column():
 def test_score_refuses_a_nan_entry_cost():
     chunk, events = chunk_of(("A", {})), events_for("A")
     decisions = taken(chunk, "A").assign(entry_cost=NAN)
-    with pytest.raises(ValueError, match="decision was not priced at this alpha and c"):
+    with pytest.raises(ValueError, match="decision was not priced at this alpha"):
         sv.score(chunk, events, decisions, "CND-PS", 0.5)
 
 
-def test_score_refuses_a_decision_priced_at_another_c_with_the_same_cost(monkeypatch):
-    # Force resolve to ignore c, so c=1.25 yields the same strikes and entry cost as the c=1.0 decision.
-    real = sv.resolve
-    monkeypatch.setattr(sv, "resolve", lambda chunk, i, name, pred, c=1.0: real(chunk, i, name, pred, 1.0))
+def test_score_needs_an_alpha_column():
     chunk, events = chunk_of(("A", {})), events_for("A")
-    decisions = taken(chunk, "A", c=1.0)
-    assert sv.score(chunk, events, decisions, "CND-PS", 0.5, c=1.0).shape[0] == 1
-    with pytest.raises(ValueError, match="decision was not priced at this alpha and c"):
-        sv.score(chunk, events, decisions, "CND-PS", 0.5, c=1.25)
-
-
-def test_score_needs_alpha_and_c_columns():
-    chunk, events = chunk_of(("A", {})), events_for("A")
-    decisions = taken(chunk, "A").drop(columns="c")
-    with pytest.raises(ValueError, match="alpha and c columns"):
+    decisions = taken(chunk, "A").drop(columns="alpha")
+    with pytest.raises(ValueError, match="alpha column"):
         sv.score(chunk, events, decisions, "CND-PS", 0.5)
 
 
@@ -550,7 +530,7 @@ def test_secured_matches_the_sold_put_legs_and_ignores_score_lots():
 
     chunk = chunk_of(("A", {94: (2.0, 2.0, 1), 106: (2.0, 2.0, 1)}))
     out = sv.secured(chunk, events_for("A"), taken(chunk, "A"), "CND-PS")
-    legs, _ = sv.resolve(chunk, 0, "CND-PS", PRED, 1.0)
+    legs, _ = sv.resolve(chunk, 0, "CND-PS", PRED)
     expected = sum(leg["qty"] * leg["strike"] * 100 for leg in legs if leg["side"] == "sell" and leg["qty"] > 0)
     assert len(out) == 1 and out.iloc[0]["event_id"] == "A"
     assert out.iloc[0]["secured_per_contract"] == pytest.approx(expected) and expected > 0
@@ -563,15 +543,3 @@ def test_secured_returns_only_taken_rows():
     assert len(sv.secured(chunk, events_for("A"), decisions, "CND-PS")) == 0
 
 
-def test_secured_refuses_a_decision_priced_at_another_c():
-    chunk = chunk_of(("A", {}))
-    decisions = taken(chunk, "A", c=2.0)  # priced at c = 2.0; the call asks for c = 1.0
-    with pytest.raises(ValueError, match="decision was not priced at this c"):
-        sv.secured(chunk, events_for("A"), decisions, "CND-PS", c=1.0)
-
-
-def test_secured_needs_a_c_column():
-    chunk, events = chunk_of(("A", {})), events_for("A")
-    decisions = taken(chunk, "A").drop(columns="c")
-    with pytest.raises(ValueError, match="alpha and c columns"):
-        sv.secured(chunk, events, decisions, "CND-PS")

@@ -10,7 +10,7 @@ import pytest
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import OpsError
 from experiments import size_pnl_decisions as decisions, size_pnl_driver as driver, size_pnl_readers as readers
-from experiments import size_pnl_synthetic as synthetic, size_pnl_tuning as tuning
+from experiments import size_pnl_synthetic as synthetic, size_pnl_receipts as tuning
 from experiments.size_pnl_shortvol import Refusal
 
 CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
@@ -88,17 +88,13 @@ def equivalence_passes(monkeypatch):
 @pytest.fixture(autouse=True)
 def secured_stubbed(monkeypatch):
     """The Amendment 2 secured-cash lookup needs a real ladder chunk; these tests stub the chunk."""
-    monkeypatch.setattr(driver.shortvol, "secured", lambda chunk_, events, decisions, name, c=1.0: pd.DataFrame({"event_id": pd.Series([], dtype=object), "secured_per_contract": pd.Series([], dtype=float)}))
+    monkeypatch.setattr(driver.shortvol, "secured", lambda chunk_, events, decisions, name: pd.DataFrame({"event_id": pd.Series([], dtype=object), "secured_per_contract": pd.Series([], dtype=float)}))
 
 
 @pytest.fixture
 def stubs(monkeypatch):
-    """Pool, simulation and tuning stubbed, as in the inner-stage driver tests."""
-    def fake_tune(items, mid, **kwargs):
-        return {"stage": "tuning", "model_id": mid, "c": 1.0, "skipped": False, "events": sum(len(ev) for _c, ev, _s in items)}
-
+    """Pool and simulation stubbed, as in the inner-stage driver tests."""
     monkeypatch.setattr(driver, "build_pool", lambda table, labels: None)
-    monkeypatch.setattr(tuning, "tune", fake_tune)
     monkeypatch.setattr(driver.shortvol, "simulate", lambda chunk_, events, pool, **kw: {e: "sim" for e in events["event_id"]})
 
 
@@ -178,11 +174,7 @@ def test_a_plan_event_that_is_not_admitted_refuses_before_any_read(tmp_path, mon
     assert not (tmp_path / "receipts").exists()
 
 
-def test_writes_the_synthetic_artifacts_and_no_tuning_or_outer_files(tmp_path, monkeypatch, fakes):
-    def no_tune(*args, **kwargs):
-        raise AssertionError("the synthetic stage must never tune")
-
-    monkeypatch.setattr(tuning, "tune", no_tune)
+def test_writes_the_synthetic_artifacts_and_no_outer_files(tmp_path, monkeypatch, fakes):
     summary = driver.run_synthetic(sources(), tmp_path, prereg=OK)
     assert sorted(p.name for p in (tmp_path / "receipts").iterdir()) == ["inputs_synthetic.json", "synthetic.json"]
     assert (tmp_path / "decisions_synthetic.parquet").is_file() and not (tmp_path / "decisions.parquet").exists()
@@ -346,8 +338,8 @@ def test_deleting_the_synthetic_files_leaves_the_inner_receipts_byte_identical(t
     assert {p.name: p.read_bytes() for p in (out / "receipts").iterdir()} == inner
 
 
-def test_month_scores_and_month_take_arms_and_emit_from(monkeypatch):
-    """The arms= and emit_from= keywords of _month_scores and _month: only the as-is arm is scored, and no rows emit before emit_from."""
+def test_month_scores_and_month_take_emit_from(monkeypatch):
+    """_month_scores and _month: only the as-is arm is scored, and no rows emit before emit_from."""
     monkeypatch.setattr(driver, "build_pool", lambda table, labels: None)
     monkeypatch.setattr(driver, "_printed", lambda labels, cutoff: labels)
     monkeypatch.setattr(driver.shortvol, "simulate", lambda chunk_, events, pool, **kw: {e: "sim" for e in events["event_id"]})
@@ -357,12 +349,11 @@ def test_month_scores_and_month_take_arms_and_emit_from(monkeypatch):
         {"event_date": events["event_date"].to_numpy(), "edge": np.ones(len(events)), "reason": None}))
     events = pd.DataFrame({"event_id": ["E1", "E2"], "event_date": pd.to_datetime(["2023-06-10", "2023-06-20"]), "mcap_usd": 20e9})  # in the straddle universe
     table = pd.DataFrame({"event_date": pd.to_datetime(["2023-01-05"])}, index=pd.Index(["H0"]))
-    start, st = pd.Timestamp("2023-06-01"), driver._model_state(1.0)
-    scored, missing = driver._month_scores("m", table, events, chunk("E1", "E2"), None, start, st, arms=(("as_is", 1.0),))
+    start, st = pd.Timestamp("2023-06-01"), driver._model_state()
+    scored, missing = driver._month_scores("m", table, events, chunk("E1", "E2"), None, start, st)
     assert set(scored) == {("as_is", name) for name in driver.shortvol.NAMES} and missing == set()
-    frames = driver._month("m", events, scored, set(), chunk("E1", "E2"), start, st, arms=(("as_is", 1.0),),
-                           emit_from=pd.Timestamp("2099-01-01"))
-    assert frames == [] and st["scored"]["retuned"] == []
+    frames = driver._month("m", events, scored, set(), chunk("E1", "E2"), start, st, emit_from=pd.Timestamp("2099-01-01"))
+    assert frames == [] and set(st["scored"]) == {"as_is"}
     assert len(st["scored"]["as_is"]) == len(driver.shortvol.NAMES) and len(st["edges"]) == 2
 
 
@@ -395,9 +386,9 @@ def test_month_gate_adds_g_prod_rows_on_output_months_only(monkeypatch):
                              "cutoff": np.nan, "rel_spread": 0.1, "status": "not_taken", "reason": "below_gate_threshold"})
 
     def run(emit_from, gate):
-        st = driver._model_state(1.0)
-        scored, _missing = driver._month_scores("m", table, events, chunk("E1", "E2"), None, start, st, arms=(("as_is", 1.0),))
-        frames = driver._month("m", events, scored, set(), chunk("E1", "E2"), start, st, arms=(("as_is", 1.0),),
+        st = driver._model_state()
+        scored, _missing = driver._month_scores("m", table, events, chunk("E1", "E2"), None, start, st)
+        frames = driver._month("m", events, scored, set(), chunk("E1", "E2"), start, st,
                                emit_from=emit_from, gate=gate)
         return frames, st
 

@@ -16,7 +16,7 @@ from experiments.size_pnl_report import (
     t2_in_e,
     t2_population,
     t3_forecast,
-    t4_t5_shortvol,
+    t4_shortvol,
     t6_straddle,
     t7_contrasts,
     t8_rungs,
@@ -150,27 +150,25 @@ def _scored(arm):
 
 
 def test_t4_per_event_counts_non_trade_as_zero():
-    out = t4_t5_shortvol(_scored("as_is"), {"m1": 4}, {}, arm="as_is")
-    assert out.startswith("### T4")
-    assert "| m1 | 1 | 2 | 6.00 | 1.5 | 0.5 |" in out
+    out = t4_shortvol(_scored("as_is"), {"m1": 4})
+    assert out.startswith("### T4 Short-vol, as is")
+    assert "| m1 | 2 | 6.00 | 1.5 | 0.5 |" in out
     assert "skip_note" not in out
+    assert "T5" not in out  # Amendment 6: no re-tuned arm and no T5
 
 
-def test_t4_t5_empty_object_scored_gives_zero_rows():
+def test_t4_empty_object_scored_gives_zero_rows():
     empty = pd.DataFrame([], columns=["model_id", "arm", "taken", "pnl_dollars"])
-    out = t4_t5_shortvol(empty, {"m1": 4}, {}, arm="as_is")
-    assert "| m1 | 1 | 0 | 0.00 | 0 | - |" in out
-    tuning = {"m1": {"c": 1.0, "skipped": False, "skip_reason": None}}
-    out = t4_t5_shortvol(empty, {"m1": 4}, tuning, arm="retuned")
-    assert "| m1 | 1 | 0 | 0.00 | 0 | - | - |" in out
+    out = t4_shortvol(empty, {"m1": 4})
+    assert "| m1 | 0 | 0.00 | 0 | - |" in out
 
 
 def test_t4_zero_pnl_is_not_a_hit():
     scored = pd.DataFrame({"model_id": ["m1"] * 4, "structure": ["s"] * 4, "arm": ["as_is"] * 4,
                            "taken": [True] * 4, "pnl_dollars": [0.0, 2.0, 0.0, -1.0]})
-    out = t4_t5_shortvol(scored, {"m1": 2}, {}, arm="as_is")
+    out = t4_shortvol(scored, {"m1": 2})
     # total 1.0 over 2 candidate events; hits = 1 of 4 taken (the 0.0 rows are not hits)
-    assert "| m1 | 1 | 4 | 1.00 | 0.5 | 0.25 |" in out
+    assert "| m1 | 4 | 1.00 | 0.5 | 0.25 |" in out
 
 
 @pytest.mark.parametrize("bad", [-4, np.nan, 2.5])
@@ -184,36 +182,16 @@ def test_per_event_zero_count_is_none():
     assert _per_event(6.0, "m1", {"m1": 4}) == 1.5
 
 
-def test_t5_retuned_shows_c_and_skip_note():
-    tuning = {"m1": {"c": 1.25, "skipped": True, "skip_reason": "fewer_than_300_inner_trades"}}
-    out = t4_t5_shortvol(_scored("retuned"), {"m1": 4}, tuning, arm="retuned")
-    assert out.startswith("### T5")
-    assert "| m1 | 1.25 | 2 | 6.00 | 1.5 | 0.5 | fewer_than_300_inner_trades |" in out
-
-
 def test_t4_refusals():
-    with pytest.raises(ValueError, match="arm"):
-        t4_t5_shortvol(_scored("as_is"), {"m1": 4}, {}, arm="other")
     with pytest.raises(ValueError, match="candidate-event"):
-        t4_t5_shortvol(_scored("as_is"), {}, {}, arm="as_is")
-    with pytest.raises(ValueError, match="tuning receipt"):
-        t4_t5_shortvol(_scored("retuned"), {"m1": 4}, {}, arm="retuned")
+        t4_shortvol(_scored("as_is"), {})
 
 
-def test_t4_t5_model_with_no_scored_rows_gets_row():
-    scored = pd.concat([_scored("retuned"), _scored("as_is")], ignore_index=True)
-    scored = scored[scored["model_id"] == "A"]
-    n_events = {"A": 2, "B": 4}
-    tuning = {
-        "A": {"c": 1.0, "skipped": False, "skip_reason": None},
-        "B": {"c": 1.0, "skipped": True, "skip_reason": "fewer_than_300_inner_trades"},
-    }
-    out = t4_t5_shortvol(scored, n_events, tuning, arm="retuned")
-    assert "| B | 1 | 0 | 0.00 | 0 | - | fewer_than_300_inner_trades |" in out
-    out_as_is = t4_t5_shortvol(scored, n_events, tuning, arm="as_is")
-    assert "| B | 1 | 0 | 0.00 | 0 | - |" in out_as_is
-    with pytest.raises(ValueError, match="tuning receipt"):
-        t4_t5_shortvol(scored, n_events, {"A": tuning["A"]}, arm="retuned")
+def test_t4_model_with_no_scored_rows_gets_row():
+    scored = _scored("as_is")
+    scored = scored[scored["model_id"] == "m1"]
+    out = t4_shortvol(scored, {"m1": 4, "B": 4})
+    assert "| B | 0 | 0.00 | 0 | - |" in out
 
 
 def test_t6_undetermined_kept_separate():
@@ -322,27 +300,27 @@ def test_t10_known_categories_and_note():
 
 def test_input_refusals():
     with pytest.raises(ValueError, match="missing.*pnl_dollars"):
-        t4_t5_shortvol(_scored("as_is").drop(columns=["pnl_dollars"]), {"m1": 4}, {}, arm="as_is")
+        t4_shortvol(_scored("as_is").drop(columns=["pnl_dollars"]), {"m1": 4})
     bad = _scored("as_is")
     bad["taken"] = ["True", "False", "True"]
     with pytest.raises(ValueError, match="taken"):
-        t4_t5_shortvol(bad, {"m1": 4}, {}, arm="as_is")
+        t4_shortvol(bad, {"m1": 4})
     with pytest.raises(ValueError, match="in_e"):
         t2_population(pd.DataFrame({"quarter": ["2024Q1"], "in_e": [np.nan]}))
     nan_taken = _scored("as_is")
     nan_taken.loc[2, "pnl_dollars"] = np.nan  # row 2 is taken
     with pytest.raises(ValueError, match="pnl_dollars"):
-        t4_t5_shortvol(nan_taken, {"m1": 4}, {}, arm="as_is")
+        t4_shortvol(nan_taken, {"m1": 4})
     # Row 1 is untaken with NaN pnl (in _scored) and must be ignored.
-    assert "| m1 | 1 | 2 | 6.00 |" in t4_t5_shortvol(_scored("as_is"), {"m1": 4}, {}, arm="as_is")
+    assert "| m1 | 2 | 6.00 |" in t4_shortvol(_scored("as_is"), {"m1": 4})
     with pytest.raises(ValueError, match="_per_event"):
-        t4_t5_shortvol(_scored("as_is"), {"m1": -4}, {}, arm="as_is")
+        t4_shortvol(_scored("as_is"), {"m1": -4})
 
 
 def test_cents_and_t3_t6_t9_refusals():
     cents = pd.DataFrame({"model_id": ["m1"] * 2, "structure": ["s"] * 2, "arm": ["as_is"] * 2,
                           "taken": [True, True], "pnl_dollars": [12000.5, 345.17]})
-    assert "| m1 | 1 | 2 | 12345.67 |" in t4_t5_shortvol(cents, {"m1": 2}, {}, arm="as_is")
+    assert "| m1 | 2 | 12345.67 |" in t4_shortvol(cents, {"m1": 2})
     row = {"model_id": "m1", "pool": "common_2023", "pnl_per_event": 2.0}
     with pytest.raises(ValueError, match="duplicate"):
         t9_pool_sensitivity([row, dict(row)])
@@ -357,4 +335,6 @@ def test_cents_and_t3_t6_t9_refusals():
 
 
 def test_build_report_joins_sections():
-    assert build_report(["A", "B"]) == "# EXP-188 REPORT\n\nA\n\nB\n"
+    amendment = ("Amendment 6 (post-hoc revision by the user, 2026-11-24): short vol is as-is only; the re-tuned arm, T5 "
+                 "and the divisor c were removed.")
+    assert build_report(["A", "B"]) == f"# EXP-188 REPORT\n\n{amendment}\n\nA\n\nB\n"

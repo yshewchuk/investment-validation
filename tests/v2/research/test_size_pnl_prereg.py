@@ -13,7 +13,6 @@ import yaml
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.fingerprints import source_closure
 from experiments import lib, size_pnl_prereg
-from experiments import size_pnl_tuning as tuning_module
 
 ROOT = Path(__file__).resolve().parents[3]
 PREREG_PATH = ROOT / "experiments" / "size_pnl_prereg.py"
@@ -472,10 +471,12 @@ def test_real_spec_is_well_formed():
     assert spec.get("preregistered_at")
     assert len(spec["roster"]) == 12
     assert len(spec["pairs"]) == 3
-    retuned = spec["short_vol"]["arms"]["retuned"]
-    assert retuned["c_grid"] == [0.5, 0.6, 0.67, 0.75, 0.9, 1.0]
-    assert retuned["c_grid"] == list(tuning_module.C_GRID)
-    assert "ONE multiplier" in retuned["breadth"]
+    assert "retuned" not in spec["short_vol"]["arms"]  # Amendment 6: short vol is as-is only
+    assert list(spec["short_vol"]["arms"]) == ["as_is"]
+    assert any(item.startswith("Amendment 6 (2026-11-24)") for item in spec["amendments"])
+    original = spec["preregistered_original"]["short_vol"]["arms"]["retuned"]  # the pre-amendment arm, kept verbatim
+    assert original["c_grid"] == [0.5, 0.6, 0.67, 0.75, 0.9, 1.0]
+    assert "ONE multiplier" in original["breadth"]
     assert spec["judgement"]["bootstrap"]["resamples"] == 10000
     assert set(spec["decisions"]) == {"d1", "d2", "d3", "d4", "d5"}
     assert spec["conditional_followup"]["in_scope_here"] is False
