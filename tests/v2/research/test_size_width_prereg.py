@@ -260,3 +260,11 @@ def test_check_id_free_skips_malformed_sibling_that_never_mentions_exp_189(tmp_p
     sibling.mkdir()
     (sibling / "spec.yaml").write_text("a: [unclosed")
     assert size_width_prereg.check_id_free(tmp_path) == own
+
+
+def test_check_id_free_refuses_oversized_malformed_sibling_unread(tmp_path):
+    _make_experiment(tmp_path, "EXP-189_x", "EXP-189")
+    sibling = tmp_path / "EXP-190_z"
+    sibling.mkdir()
+    (sibling / "spec.yaml").write_text("a: [unclosed\n" + "x" * (4 << 20))
+    assert refusal(lambda: size_width_prereg.check_id_free(tmp_path)) == "experiment_id_conflict"
