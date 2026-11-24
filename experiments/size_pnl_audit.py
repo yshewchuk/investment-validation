@@ -19,7 +19,7 @@ ROWS = (
     ("7", "exp_pnl_sim", "engine/pnl_sim.py expected_pnl, ResidualPool, DRAWS",
      "kept; imports the constants, held to expected_pnl within 1e-9; seed key=event_id"),
     ("8", "Residual pool", "Scorer._residual_pool: all Tier-4 history from 2018",
-     "kept; per-model pool from 2023, production-length pool shown as T9 sensitivity"),
+     "kept; per-model pool from 2023; the production-length pool sensitivity (T9) is not produced in this run (not_testable: native_pool_arm_not_produced)"),
     ("9", "Trailing cutoff", "pnl_sim.trailing_cutoff (WINDOW_MONTHS, QUANTILE, min_window=100)",
      "imports; MIN_WINDOW copy deleted, per-model history kept"),
     ("10", "MCAP_FLOOR, MAX_REL_SPREAD, mean relative spread", "engine/entry_rules.py; engine.score._mean_relative_spread",
@@ -37,7 +37,7 @@ ROWS = (
     ("16", "Straddle legs and entry quotes", "STR-THRU ATM via price_structure",
      "fixed; resolve through price_structure; zero-bid and locked quotes priced, crossed or non-finite undetermined"),
     ("17", "Marks and exits", "engine/replay.py price_structure(closing=True), structure_return",
-     "kept by user decision; marks_mid (production's rule) is the headline since Amendment 7, the pre-registered conservative marks are the harsh sensitivity"),
+     "kept by user decision; marks_mid (production's rule) is the headline since Amendment 7 when the decisions carry pnl_dollars_mid, otherwise the stored primary marks are used and the report says so; the pre-registered conservative marks are the harsh sensitivity"),
     ("18", "DYN-SV chooser", "engine/score.py chooser",
      "out of scope; seven independent books, stated in the report"),
 )
