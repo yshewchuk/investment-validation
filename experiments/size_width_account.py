@@ -1,9 +1,4 @@
-"""EXP-189 account (design section 2): EXP-188 Amendment 2 policy with start_equity 200,000.
-
-Reuses ``experiments.size_pnl_account``: its ``margin`` (EXP-134 ``margin.simulate``, unchanged) and its
-``secured_per_contract``. Only the starting equity differs: every short put is secured at strike x 100,
-cap 66% of marked equity, target share 25% of headroom, expensive-first on entry-date ties.
-"""
+"""EXP-189 account (design section 2): EXP-188 Amendment 2 policy with start_equity 200,000, reusing size_pnl_account."""
 import numpy as np
 import pandas as pd
 
@@ -43,3 +38,19 @@ def simulate_account(rows, mark):
         max_dd = float(np.min(curve / np.maximum.accumulate(curve) - 1.0))
     return {"wanted": len(t), "funded": int(t["funded"].sum()), "final_equity": final, "total_return": final / start - 1.0,
             "max_drawdown": max_dd, "peak_open": int(t["concurrency"].max()) if len(t) else 0}
+
+
+def quarter_returns(rows, quarters):
+    """Account return per calendar quarter: funded pnl_usd by EXIT quarter over the equity at the quarter's start; 0.0 for a quarter with none."""
+    pnl = {}
+    if not rows.empty:
+        simulate_account(rows, "mid")  # validates the inputs exactly as the account does
+        t = base.margin.simulate(rows.drop(columns=["exit_value"]).rename(columns={"exit_value_mid": "exit_value"})[
+            ["entry_date", "exit_date", "entry_cost", "exit_value", "secured_per_contract"]], **POLICY)
+        done = t[t["funded"]]
+        pnl = done.assign(q=pd.PeriodIndex(pd.to_datetime(done["exit_date"]), freq="Q")).groupby("q")["pnl_usd"].sum().to_dict()
+    equity, out = START_EQUITY, []
+    for q in quarters:
+        out.append(float(pnl.get(q, 0.0)) / equity)
+        equity += float(pnl.get(q, 0.0))
+    return out
