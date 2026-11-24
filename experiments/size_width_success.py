@@ -210,7 +210,10 @@ def render_rule(rule):
     if rec == "no_change":
         return "No change recommended."
     if rec == "E":
-        return f"Recommendation: E, {rule['rule']}."
+        text = rule.get("rule")
+        if not isinstance(text, str) or not text:
+            raise ValueError("E rule needs a text 'rule'")
+        return f"Recommendation: E, {text}."
     rows_in = rule.get("rows")
     if not isinstance(rows_in, list) or not all(isinstance(r, dict) and all(k in r for k in RULE_HEADERS)
                                                 for r in rows_in):

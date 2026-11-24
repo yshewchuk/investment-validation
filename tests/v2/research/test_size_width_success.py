@@ -457,6 +457,13 @@ def test_render_rule_a_rows_not_list_raises():
         sws.render_rule({"recommendation": "A", "rows": "rows"})
 
 
+@pytest.mark.parametrize("rule", [{"recommendation": "E"}, {"recommendation": "E", "rule": ""},
+                                  {"recommendation": "E", "rule": None}, {"recommendation": "E", "rule": 3}])
+def test_render_rule_e_without_text_rule_raises(rule):
+    with pytest.raises(ValueError, match="E rule needs a text 'rule'"):
+        sws.render_rule(rule)
+
+
 # --- recommendation order ---
 
 def test_recommend_prefers_a_over_c():
