@@ -114,6 +114,8 @@ def t9(fb, base, phi, window):
     """One row per (structure, tier) with a trial in ``window``; taken stats come from ``base`` at fb.factors on the same events (design 12.3)."""
     if base is None:
         raise ValueError("t9 needs the no-fallback base sweep")
+    if phi != fb.phi:
+        raise ValueError(f"t9 phi {phi} does not match the sweep phi {fb.phi}")
     mcap = _mcap(fb, lambda name: E_ARM)
     trials = in_window(pd.DataFrame(fb.trials, columns=["structure", "event_id", "event_date", "rho"]), window).assign(tier=lambda d: [tier(mcap.get(str(e))) for e in d["event_id"]])
     trades, taken, rows = split_trades(fb, window), _trades(base, lambda name: fb.factors[name], window), []

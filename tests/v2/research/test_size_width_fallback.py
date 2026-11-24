@@ -401,7 +401,7 @@ def test_t9_groups_the_trials_by_market_cap_tier(tmp_path, monkeypatch):
 def test_t9_counts_the_fallback_infeasible_events(tmp_path):
     fb = _run(_fb(tmp_path, (0.9, 1.1)), _scene())  # the narrow band holds no feasible rho on this ladder
     base = _run(Sweep(), _scene())
-    row = t9(fb, base, 0.8, WINDOW)[0]
+    row = t9(fb, base, 0.9, WINDOW)[0]
     assert row["declined"] == 6 and row["recovered"] == 0 and row["fallback_infeasible"] == 6
     assert row["share"] == 0.0 and row["rho"] == {} and row["recovered_trades"] == 0
 
@@ -432,6 +432,13 @@ def test_t9_taken_comes_from_the_base_sweep_and_not_from_the_band(tmp_path, monk
 def test_t9_refuses_a_missing_base(tmp_path):
     with pytest.raises(ValueError, match="t9 needs the no-fallback base sweep"):
         t9(_fb(tmp_path), None, 0.9, WINDOW)
+
+
+def test_t9_refuses_a_phi_that_does_not_match_the_sweep(tmp_path):
+    fb = _fb(tmp_path)  # built at phi 0.9
+    base = _run(Sweep(), _scene())
+    with pytest.raises(ValueError, match="does not match"):
+        t9(fb, base, 0.8, WINDOW)
 
 
 def test_accounts_base_takes_six_and_fallback_adds_the_recovered_trades(tmp_path, monkeypatch):
