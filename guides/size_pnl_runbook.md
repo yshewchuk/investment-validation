@@ -81,12 +81,12 @@ Exit 0 prints a JSON summary on stdout. Exit 2 prints `{"refused": code, "messag
 `reason` is the machine-readable cause (for example `sources_invalid`, `expected_mismatch`, `not_bounded`,
 `no_ready_models`, `key_not_admitted`). Progress goes to stderr: stage start and end with elapsed time and RSS,
 quarters done with rate and ETA, and per-model progress lines. The synthetic calibration arm
-(`guides/size_pnl_synthetic_calibration_design.md`) is a separate slice that will get its own gated helper and reuses `model_events`.
+(`guides/size_pnl_synthetic_calibration_design.md`) runs as `--stage synthetic` (gated, reusing `model_events`) and publishes `decisions_synthetic.parquet` and `t11_synthetic.md`.
 
 ## Report stage (Amendment 6)
 
 `--stage report --no-ledger` assembles `REPORT.md` from the completed outer receipts; it is read-only and never rescores.
-Inputs beyond the outer run: `--stored-gate` (EXP-187 `transactions_*.csv`, mandatory when G_PROD rows exist),
+Inputs beyond the outer run: `--stored-gate` (EXP-187 `transactions_*.csv`, mandatory when G_PROD rows exist and M0 is in the run),
 optional `--accept-gate-gap TEXT` and `--gate-ladder PATH`, and an optional `board_ledger` directory in `--sources-config`.
 The report is a post-hoc revision by the user (2026-11-24); read it in this order:
 
