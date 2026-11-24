@@ -1,19 +1,12 @@
 """Chain-index twin of :func:`engine.structures.price_structure` (expiry rule only).
 
-:func:`price_structure_indexed` runs the legacy leg loop unchanged except for
-one step: expiry selection is answered from a numpy index of the snapshot's
-distinct expiries (their dte and memoised rule results) instead of re-filtering
-the pandas chain. Strike selection, the contract lookup, pricing, the
-``LadderTooCoarse`` collision check and the exception messages are the legacy
-code. Results are bit-identical to :func:`engine.structures.price_structure`.
-
-The index is built lazily, once per :class:`ChainSnapshot`, and lives in a
-module registry keyed by ``id(snapshot)``; a :func:`weakref.finalize` drops it
-when the snapshot dies, and the index never holds a strong reference to its
-snapshot. A snapshot or call outside the proven shape is sent whole to the
-legacy code, never mixed with it. ``ENGINE_CHAIN_INDEX_VERIFY=1`` re-checksums
-the expiry and dte columns on every indexed call and raises
-:class:`ChainSnapshotMutated` if they were changed in place.
+:func:`price_structure_indexed` repeats the ``price_structure`` leg loop; only expiry selection
+differs: it is answered from a per-snapshot numpy index of the distinct expiries (dte plus
+memoised rule results). Strike selection, contract lookup, pricing, the ``LadderTooCoarse``
+check and the messages are the same code, so results are bit-identical. The index is built
+lazily, lives with its snapshot, and calls or snapshots outside the proven shape go whole to
+``price_structure``. ``ENGINE_CHAIN_INDEX_VERIFY=1`` raises :class:`ChainSnapshotMutated`
+if the expiry or dte columns change after the index was built.
 """
 from __future__ import annotations
 
@@ -134,8 +127,7 @@ class _ChainIndex:
                 if not mask.any():
                     raise StructureError(
                         f"no expiry after the AMC event date {event_date.date()} "
-                        "(an expiry on the event date dies at the close, before "
-                        "the announcement)"
+                        "(an expiry on the event date dies at the close, before the announcement)"
                     )
             else:
                 mask &= self.uex >= ev
@@ -154,10 +146,6 @@ class _ChainIndex:
             return self.ts[int(idx[np.lexsort((-dte, gap))[0]])]
         return self.ts[int(np.flatnonzero(mask)[0])]
 
-
-# --------------------------------------------------------------------------
-# registry and eligibility
-# --------------------------------------------------------------------------
 
 _INDEXES: dict[int, tuple[weakref.ref, _ChainIndex | None]] = {}
 _LOCK = threading.Lock()
@@ -218,11 +206,6 @@ def _select_index(structure: Structure, snapshot: ChainSnapshot) -> _ChainIndex 
     return index
 
 
-# --------------------------------------------------------------------------
-# public API
-# --------------------------------------------------------------------------
-
-
 def price_structure_indexed(structure: Structure, snapshot: ChainSnapshot, fill: FillModel, *,
                             pin: Any = None, closing: bool = False) -> StructurePrice:
     """Equal to :func:`price_structure`; expiry selection uses the chain index when eligible."""
@@ -249,9 +232,7 @@ def price_structure_indexed(structure: Structure, snapshot: ChainSnapshot, fill:
         else:
             expiry = index.select_expiry(spec.expiry, snapshot.event_date, snapshot.session)
             at_expiry = rows[rows["expiry"] == expiry]
-            strike = spec.strike.select(
-                at_expiry, spot, resolved_strikes, right=spec.right
-            )
+            strike = spec.strike.select(at_expiry, spot, resolved_strikes, right=spec.right)
 
         resolved_strikes[spec.name] = strike
         hit = at_expiry[
@@ -286,9 +267,7 @@ def price_structure_indexed(structure: Structure, snapshot: ChainSnapshot, fill:
     contracts: dict[tuple[str, float, pd.Timestamp], list[str]] = {}
     for leg in out:
         contracts.setdefault((leg.right, leg.strike, leg.expiry), []).append(leg.name)
-    collided = sorted(
-        (names, key) for key, names in contracts.items() if len(names) > 1
-    )
+    collided = sorted((names, key) for key, names in contracts.items() if len(names) > 1)
     if collided:
         detail = "; ".join(
             f"{' and '.join(names)} both resolve to {right} {strike:g} "
@@ -296,8 +275,7 @@ def price_structure_indexed(structure: Structure, snapshot: ChainSnapshot, fill:
             for names, (right, strike, expiry) in collided
         )
         raise LadderTooCoarse(
-            f"{structure.name}: the listed strikes are too coarse for this "
-            f"shape — {detail}"
+            f"{structure.name}: the listed strikes are too coarse for this shape — {detail}"
         )
 
     return StructurePrice(
