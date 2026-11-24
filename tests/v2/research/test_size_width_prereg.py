@@ -239,3 +239,24 @@ def test_successful_check_leaves_the_ledger_bytes_unchanged(tmp_path):
         experiments_dir=_own_experiments(tmp_path))
     assert receipt["spec_hash_checked"] is True
     assert ledger.read_bytes() == before
+
+
+# --------------------------------------------------------------------------
+# check_id_free: a malformed sibling spec must not fail open
+# --------------------------------------------------------------------------
+
+
+def test_check_id_free_refuses_malformed_sibling_that_mentions_exp_189(tmp_path):
+    _make_experiment(tmp_path, "EXP-189_x", "EXP-189")
+    sibling = tmp_path / "EXP-190_z"
+    sibling.mkdir()
+    (sibling / "spec.yaml").write_text("id: EXP-189\n: [unclosed")
+    assert refusal(lambda: size_width_prereg.check_id_free(tmp_path)) == "experiment_id_conflict"
+
+
+def test_check_id_free_skips_malformed_sibling_that_never_mentions_exp_189(tmp_path):
+    own = _make_experiment(tmp_path, "EXP-189_x", "EXP-189")
+    sibling = tmp_path / "EXP-190_z"
+    sibling.mkdir()
+    (sibling / "spec.yaml").write_text("a: [unclosed")
+    assert size_width_prereg.check_id_free(tmp_path) == own

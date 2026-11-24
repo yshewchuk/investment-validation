@@ -58,7 +58,18 @@ def check_id_free(experiments_dir=None):
         try:
             other = yaml.safe_load(_read_bounded(spec_file, 1 << 20))
         except (OSError, ValueError, yaml.YAMLError):
-            continue  # a spec that does not parse cannot carry the id
+            # Fail closed. A spec we cannot parse may still claim the id, so refuse if it is unreadable
+            # or its raw bytes (first 4 MiB) mention the id. A malformed spec that never mentions the id
+            # cannot claim it, and is skipped.
+            try:
+                with open(spec_file, "rb") as handle:
+                    raw = handle.read(4 << 20)
+            except OSError:
+                raw = None  # unreadable counts as a possible claim
+            if raw is None or b"EXP-189" in raw:
+                raise _refuse("experiment_id_conflict",
+                              f"{spec_file} is unreadable or malformed and may claim {EXPERIMENT_ID}") from None
+            continue
         if isinstance(other, dict) and other.get("id") == EXPERIMENT_ID:
             raise _refuse("experiment_id_conflict", f"{spec_file} also carries id {EXPERIMENT_ID}")
     return own
