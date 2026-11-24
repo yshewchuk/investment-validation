@@ -17,7 +17,6 @@ from engine.pnl_sim import (DRAWS, MIN_POOL, MIN_SPOT_FRACTION, ResidualPool, bl
 from engine.v2.ops.errors import fail
 
 COMMON_START = pd.Timestamp("2023-01-01")
-MIN_WINDOW = 100
 TOLERANCE = 1e-9
 _CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
 _TABLE_COLS = ("event_date", "pred_move", "pred_crush")
@@ -131,7 +130,7 @@ def undetermined_reason(pool, history, event_date):
     """Why an event cannot be scored under a model: ``thin_pool``, ``thin_window``, or ``None``."""
     if pool.before(event_date) < MIN_POOL:
         return "thin_pool"
-    if trailing_cutoff(history, event_date, min_window=MIN_WINDOW) is None:
+    if trailing_cutoff(history, event_date) is None:
         return "thin_window"
     return None
 
@@ -158,7 +157,11 @@ def paired_events(undetermined, event_dates):
 
 
 def check_equivalence(pool, sample, *, tolerance=TOLERANCE, draws=DRAWS):
-    """Hold the fast path to ``expected_pnl`` on sampled structures; a mismatch refuses the run."""
+    """Hold the fast path to ``expected_pnl`` on sampled structures; a mismatch refuses the run.
+
+    max_abs_diff is the return difference scaled by min(1, entry cost), i.e. the per-share price error for a cost below
+    one; the pass bound on it is `tolerance`.
+    """
     if not (np.isfinite(tolerance) and tolerance > 0):
         raise ValueError("tolerance must be a positive finite number")
     if not sample:
@@ -181,11 +184,15 @@ def check_equivalence(pool, sample, *, tolerance=TOLERANCE, draws=DRAWS):
         ref = None if direct is None else direct["exp_pnl_sim"]
         if fast is None and ref is None:
             continue
-        if fast is None or ref is None or not abs(fast - ref) <= tolerance:
+        # fast and ref are returns on cost, so |diff| * cost is the price error. For a cost below one, a price error
+        # of at most `tolerance` a share means |diff| <= tolerance / cost, so the bound is scaled by 1 / cost there.
+        # A cost of one or more keeps the original absolute bound.
+        if fast is None or ref is None or not abs(fast - ref) <= tolerance * max(1.0, 1.0 / item["entry_cost"]):
             raise fail(_CONFLICT, "the fast path disagrees with expected_pnl",
                        details={"reason": "fast_path_mismatch"})
         compared += 1
-        worst = max(worst, abs(fast - ref))
+        # Scaled by min(1, cost) so the reported figure is on the bound's scale: the price error per share for a cost below one.
+        worst = max(worst, abs(fast - ref) * min(1.0, item["entry_cost"]))
     if compared == 0:
         raise fail(_CONFLICT, "no sample item was simulable, so nothing was compared",
                    details={"reason": "equivalence_empty"})

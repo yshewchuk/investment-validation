@@ -1,0 +1,67 @@
+id: "EXP-189"
+title: "Production short-vol width tuning (M0 only)"
+hypothesis: "A multiple k of production's forecast_sizing width rule (k = 1 is production) earns more on the seven put-side short-vol structures than k = 1."
+type: "decision_rescore"
+strategy: "*"
+design: "guides/size_width_tuning_design.md"
+preregistered_at: "2026-11-23T12:00:00+00:00"
+constraints:
+  - "No edit to engine/forecast_sizing.py, STRUCTURES, any SIZE search module, or any file in source_closure of experiments/size_panel.py."
+  - "No EXP-188 edit; size_pnl_* modules are imported unchanged."
+  - "No call-side short leg."
+  - "Marks only from engine.fills."
+  - "Holdouts only through the shared admission."
+  - "--no-ledger for non-recorded runs."
+  - "One heavy job at a time."
+model:
+  id: "M0"
+  model: "production size_v1_4"
+structures: ["TWIN-P", "TWIN-P5", "CND-PS", "BFLY-P", "BFLY-P5", "RAMP7", "CTR5"]
+grid:
+  k: [0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0]
+  edge_rule: "argmax at 3.0 or 0.5 is k_at_edge, not frozen"
+arms:
+  - id: "A"
+    name: "global"
+    description: "one k for all seven structures, tuned on M0's real 2023-24 P&L"
+  - id: "B"
+    name: "per_structure_real"
+    description: "seven k_s, tuned on M0's real 2023-24 P&L (one path)"
+  - id: "C"
+    name: "per_structure_fake"
+    description: "seven k_s, tuned on a fake forecast matching M0's error profile, N = 20 seeded draws"
+  - id: "D"
+    name: "two_factor"
+    description: "k_T for the TWIN pair (TWIN-P, TWIN-P5) and k_C for the five centre-peaked structures, tuned on M0's real 2023-24 P&L"
+  - id: "E"
+    name: "expected_pnl"
+    description: "no tuning; per event, k from the grid maximising exp_pnl_sim for that structure"
+  - id: "anchor"
+    name: "oracle_sweep"
+    description: "descriptive only; forecast equals actual move"
+fake:
+  N: 20
+  seed_tag: "exp189-v1"
+  calibration_tolerance: 0.05
+account:
+  start_equity: 200000
+  cap: 0.66
+  target_share: 0.25
+  expensive_first: true
+  secured: "strike x 100"
+  policy: "EXP-188 Amendment 2 margin.simulate unchanged except start_equity"
+objective: "stand-alone cash-secured $200,000 account return at marks_mid (alpha 0.5), averaged over draws for C"
+tie_rule: "within one standard error of the best: k nearest 1, then the smaller"
+min_trades: 300
+windows:
+  inner_years: [2023, 2024]
+  outer_year: 2025
+  burn_in: "scoring from 2023H2"
+success_rule: "(a) the seven-structure $200,000 account return at marks_mid beats production's (k = 1) in each of 2025, 2023H2 and 2024; (b) breakeven alpha is at most production's + 0.05 in 2025; guard: not losing to production in more than 2 of 7 structures in 2025."
+tolerance_bands:
+  phi: [0.80, 0.90, 0.95]
+fallback:
+  rho_step: 0.05
+  min_recovered_trades: 100
+amendments: []
+label_2025: "2025 NOT blind for widths"

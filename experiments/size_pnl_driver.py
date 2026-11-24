@@ -328,8 +328,9 @@ def _inner(src, out, ready, plan, facts_all, labels):
     return sorted(ready), max(by_model.values(), default=0), skipped, by_model, common, nontrades, missing_facts, "sha256:" + digest.hexdigest(), checked
 
 
-def _equivalence_ok(entry):
-    """A model's fast-path evidence: a dict with an int ``checked`` >= 1 and a numeric ``max_abs_diff`` within TOLERANCE."""
+def equivalence_ok(entry):
+    """A model's fast-path evidence: a dict with an int ``checked`` >= 1 and a numeric ``max_abs_diff`` within TOLERANCE.
+    ``max_abs_diff`` is the scaled difference from check_equivalence: the return difference times min(1, entry cost)."""
     return (isinstance(entry, dict) and isinstance(entry.get("checked"), int) and not isinstance(entry.get("checked"), bool) and entry["checked"] >= 1
             and isinstance(entry.get("max_abs_diff"), (int, float)) and not isinstance(entry.get("max_abs_diff"), bool) and entry["max_abs_diff"] <= TOLERANCE)
 
@@ -357,7 +358,7 @@ def _outer_gate(out, ready, scope, body, inner_tables, inner_production, inner_p
         raise Refusal(_CONFLICT, "inner decisions are missing or not bound to inner.json", {"reason": "inner_decisions_mismatch"})
     if "scope" not in inner or inner["scope"] != scope: raise Refusal(_CONFLICT, "inner.json was scored on a different event scope", {"reason": "scope_mismatch"})
     evidence = inner.get("equivalence")
-    if not isinstance(evidence, dict) or not all(_equivalence_ok(evidence.get(mid)) for mid in ready):
+    if not isinstance(evidence, dict) or not all(equivalence_ok(evidence.get(mid)) for mid in ready):
         raise Refusal(_CONFLICT, "inner.json lacks the fast-path equivalence evidence for a ready model", {"reason": "inner_equivalence_missing"})
     inputs_inner, now = receipts.load_receipt(out / "receipts" / "inputs_inner.json"), json.loads(json.dumps({**body, "models": inner_models}))
     if any(inputs_inner.get(k) != now[k] for k in _BOUND): raise Refusal(_CONFLICT, "inputs_inner.json was bound to different inputs", {"reason": "inner_inputs_mismatch"})

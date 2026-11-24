@@ -127,11 +127,11 @@ def entry_cost(chunk, c, p, alpha):
 
 
 def lots(cost_per_share):
-    """Whole lots as in ``engine/portfolio.py``: round down, floor of one; bad cost -> 1."""
+    """Whole lots as in ``engine/portfolio.py``: round down, floor of one; bad cost -> 1. Returns a float (as build_book's contracts are float64); exact only below 2**53 lots."""
     cost = float(cost_per_share)
     if not math.isfinite(cost) or cost <= 0:
-        return 1
-    return max(1, int(math.floor(CAPITAL_PER_TRADE / (cost * CONTRACT_MULTIPLIER))))
+        return 1.0
+    return float(max(1, math.floor(CAPITAL_PER_TRADE / (cost * CONTRACT_MULTIPLIER))))
 
 
 def _verdict(clears, why):

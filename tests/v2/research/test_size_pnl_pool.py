@@ -8,6 +8,7 @@ import pytest
 from engine.pnl_sim import MIN_POOL, expected_pnl
 from engine.structures import ResolvedLeg
 from engine.v2.ops.errors import OpsError
+from experiments import size_pnl_driver as driver
 from experiments import size_pnl_pool as pool_mod
 from experiments.size_pnl_pool import (build_pool, check_equivalence, event_seed, paired_events,
                                        pool_history, put_means, structure_pnl, structure_value,
@@ -334,6 +335,55 @@ def test_equivalence_refuses_perturbed_fast_path(pool, monkeypatch):
     monkeypatch.setattr(pool_mod, "put_means", shifted)
     with pytest.raises(OpsError) as caught:
         check_equivalence(pool, [_item([SINGLE], 2.0)], draws=DRAW)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.details["reason"] == "fast_path_mismatch"
+
+
+def test_tiny_entry_cost_passes_the_price_scaled_bound(pool):
+    # At a 1e-9 debit, the returns are about 1e9, so float rounding in the value (~1e-16) is ~1e-7 in return units:
+    # over the absolute 1e-9 bound, but a price error far under 1e-9 a share. The bound scales by 1/cost, so it passes.
+    out = check_equivalence(pool, [_item(SPREAD, 1e-9)], draws=DRAW)
+    assert out["checked"] == 1 and out["skipped"] == 0
+
+
+def test_tiny_entry_cost_still_refuses_a_wrong_fast_path(pool, monkeypatch):
+    # A 1e-6 shift on the means is a 1e-6 / 1e-9 = 1000 return error, far over the scaled bound of 1.0.
+    real = pool_mod.put_means
+
+    def shifted(*args, **kwargs):
+        means = real(*args, **kwargs)
+        return None if means is None else means + 1e-6
+
+    monkeypatch.setattr(pool_mod, "put_means", shifted)
+    with pytest.raises(OpsError) as caught:
+        check_equivalence(pool, [_item([SINGLE], 1e-9)], draws=DRAW)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.details["reason"] == "fast_path_mismatch"
+
+
+def test_tiny_cost_reported_diff_passes_the_driver_check(pool):
+    # The reported max_abs_diff is on the bound's scale (return diff times min(1, cost)), so a 1e-9 debit reports a tiny price error.
+    got = check_equivalence(pool, [_item(SPREAD, 1e-9)], draws=DRAW)
+    assert got["max_abs_diff"] <= pool_mod.TOLERANCE
+    assert driver.equivalence_ok({"checked": 1, "max_abs_diff": got["max_abs_diff"]})
+
+
+def test_cost_at_least_one_keeps_the_absolute_bound(pool, monkeypatch):
+    # At cost 2.0 the bound is the absolute 1e-9 on the return: a 1.5e-9 return error refuses, a 0.5e-9 one passes.
+    real = pool_mod.structure_pnl
+
+    def offset(shift):
+        def patched(*args, **kwargs):
+            value = real(*args, **kwargs)
+            return None if value is None else value + shift
+        return patched
+
+    item = [_item([SINGLE], 2.0)]
+    monkeypatch.setattr(pool_mod, "structure_pnl", offset(0.5e-9))
+    assert check_equivalence(pool, item, draws=DRAW)["checked"] == 1
+    monkeypatch.setattr(pool_mod, "structure_pnl", offset(1.5e-9))
+    with pytest.raises(OpsError) as caught:
+        check_equivalence(pool, item, draws=DRAW)
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.problem.details["reason"] == "fast_path_mismatch"
 
