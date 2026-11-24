@@ -311,6 +311,7 @@ def test_a_non_unit_factor_recovers_at_the_first_feasible_rho():
 def test_recovery_counts_the_recovered_trades_and_no_others(tmp_path, monkeypatch):
     _small_window(monkeypatch)
     fb = _run(_fb(tmp_path), _scene())
+    base = _run(Sweep(), _scene())
     rows = fb.rows([(NAME, E_ARM)], WINDOW)
     assert not rows.empty
     trades = split_trades(fb, WINDOW)
@@ -323,25 +324,26 @@ def test_recovery_counts_the_recovered_trades_and_no_others(tmp_path, monkeypatc
     assert mine["entry_cost"].tolist() == pytest.approx([ENTRY_PER_SHARE] * len(mine))
     assert mine["ret"].tolist() == pytest.approx([RET_RECOVERED] * len(mine))
     assert mine["pnl_dollars_mid"].tolist() == pytest.approx([PNL_MID] * len(mine))
-    others = trades[trades["structure"] != NAME]  # the six other structures are taken at base, never recovered
+    others = trades[trades["structure"] != NAME]
     assert not others.empty and not others["recovered"].astype(bool).any()
-    # the other structures' taken mean, from the raw rows with no split_trades and no recovery
-    other_rows = fb.rows([(n, E_ARM) for n in sv.NAMES if n != NAME], WINDOW)
-    assert not other_rows.empty
-    raw_taken_ret = float((other_rows["exit_value_mid"] / other_rows["entry_cost"] - 1.0).mean())
+    # taken_ret is the mean ret of ALL no-fallback trades of the window, pooled over structures, from the raw base rows
+    base_rows = base.rows([(n, 1.0) for n in sv.NAMES], WINDOW)
+    assert not base_rows.empty
+    raw_taken_ret = float((base_rows["exit_value_mid"] / base_rows["entry_cost"] - 1.0).mean())
     assert pd.notna(raw_taken_ret)
-    got = recovery(fb, WINDOW)
+    got = recovery(fb, base, WINDOW)
     assert got["recovered"] == 3 == len(rows)  # no other structure contributes a recovered trade
     assert got["recovered_ret"] == pytest.approx(RET_RECOVERED)
     assert got["taken_ret"] == pytest.approx(raw_taken_ret)
-    assert got["taken_ret"] == pytest.approx(others["ret"].mean())
 
 
 def test_an_empty_fallback_sweep_gives_unique_columns_and_no_recovery(tmp_path):
-    fb = _fb(tmp_path)
+    fb, base = _fb(tmp_path), Sweep()
     frame = split_trades(fb, WINDOW)
     assert frame.empty and frame.columns.is_unique
-    assert recovery(fb, WINDOW) == {"recovered": 0, "recovered_ret": None, "taken_ret": None}
+    assert recovery(fb, base, WINDOW) == {"recovered": 0, "recovered_ret": None, "taken_ret": None}
+    with pytest.raises(ValueError, match="base"):
+        recovery(fb, None, WINDOW)
 
 
 def test_t9_counts_by_hand(tmp_path, monkeypatch):
@@ -361,13 +363,16 @@ def test_t9_counts_by_hand(tmp_path, monkeypatch):
     assert row["recovered_trades"] == 3 == len(fb.rows([(NAME, E_ARM)], WINDOW))
     assert row["recovered_ret"] == pytest.approx(RET_RECOVERED)
     assert row["recovered_pnl"] == pytest.approx(PNL_MID)
+    # the taken stats come from the no-fallback base, which takes no NAME trade in WINDOW (see the accounts test)
     assert row["taken_trades"] == 0 and row["taken_ret"] is None
+    assert row["taken_trades"] == len(base.rows([(NAME, 1.0)], WINDOW))
 
 
 def test_t9_groups_the_trials_by_market_cap_tier(tmp_path, monkeypatch):
     _small_window(monkeypatch)
     fb = _run(_fb(tmp_path), _tiered_scene())
-    rows = t9(fb, None, 0.9, WINDOW)
+    base = _run(Sweep(), _tiered_scene())
+    rows = t9(fb, base, 0.9, WINDOW)
     # one row per (structure, tier): exactly the three expected tier labels, one row each, all for NAME
     assert len(rows) == 3
     assert sorted(r["tier"] for r in rows) == sorted(MCAP_BY_TIER)
@@ -375,6 +380,7 @@ def test_t9_groups_the_trials_by_market_cap_tier(tmp_path, monkeypatch):
     by_tier = {r["tier"]: r for r in rows}
     taken = fb.rows([(NAME, E_ARM)], WINDOW)
     taken_ids = set(taken["event_id"].astype(str)) if not taken.empty else set()
+    base_rows = base.rows([(NAME, 1.0)], WINDOW)  # the no-fallback taken trades, split by the hand-built tier ids
     total = 0
     for t, ids in CUR_BY_TIER.items():
         row = by_tier[t]
@@ -386,15 +392,46 @@ def test_t9_groups_the_trials_by_market_cap_tier(tmp_path, monkeypatch):
         taken_here = taken_ids & set(ids)
         if taken_here:  # the universe and spread gate may leave a tier untaken; only check tiers with taken trades
             assert row["recovered_trades"] == len(taken_here)
+        base_here = base_rows[base_rows["event_id"].astype(str).isin(ids)]
+        assert row["taken_trades"] == len(base_here)
     # a tier-less grouping would give one row with declined == total; the per-tier rows must sum to every trial
     assert sum(r["declined"] for r in rows) == total == len(CUR)
 
 
 def test_t9_counts_the_fallback_infeasible_events(tmp_path):
     fb = _run(_fb(tmp_path, (0.9, 1.1)), _scene())  # the narrow band holds no feasible rho on this ladder
-    row = t9(fb, None, 0.8, WINDOW)[0]
+    base = _run(Sweep(), _scene())
+    row = t9(fb, base, 0.8, WINDOW)[0]
     assert row["declined"] == 6 and row["recovered"] == 0 and row["fallback_infeasible"] == 6
     assert row["share"] == 0.0 and row["rho"] == {} and row["recovered_trades"] == 0
+
+
+def test_t9_taken_comes_from_the_base_sweep_and_not_from_the_band(tmp_path, monkeypatch):
+    _small_window(monkeypatch)
+    base = _run(Sweep(), _tiered_scene())
+    wide = _run(_fb(tmp_path / "wide", WIDE), _tiered_scene())
+    narrow = _run(_fb(tmp_path / "narrow", NARROW), _tiered_scene())  # same base, different band: different fb, same taken baseline
+    # hand-built expectation: the no-fallback trades of NAME in WINDOW, counted per tier through the CUR ids of each tier
+    base_rows = base.rows([(NAME, 1.0)], WINDOW)
+    taken_of = lambda rows: {(r["tier"], r["taken_trades"], r["taken_ret"], r["taken_pnl"]) for r in rows}
+    for fb in (wide, narrow):
+        rows = {r["tier"]: r for r in t9(fb, base, 0.9, WINDOW)}
+        assert set(rows) == set(MCAP_BY_TIER)
+        for t, ids in CUR_BY_TIER.items():
+            exp = base_rows[base_rows["event_id"].astype(str).isin(ids)]
+            assert rows[t]["taken_trades"] == len(exp)
+            if exp.empty:
+                assert rows[t]["taken_ret"] is None and rows[t]["taken_pnl"] is None
+            else:
+                assert rows[t]["taken_ret"] == pytest.approx(float((exp["exit_value_mid"] / exp["entry_cost"] - 1.0).mean()))
+                assert rows[t]["taken_pnl"] == pytest.approx(float(exp["pnl_dollars_mid"].mean()))
+    # the band changes the recovered side only: the taken side is identical for both fallback sweeps
+    assert taken_of(t9(wide, base, 0.9, WINDOW)) == taken_of(t9(narrow, base, 0.9, WINDOW))
+
+
+def test_t9_refuses_a_missing_base(tmp_path):
+    with pytest.raises(ValueError, match="t9 needs the no-fallback base sweep"):
+        t9(_fb(tmp_path), None, 0.9, WINDOW)
 
 
 def test_accounts_base_takes_six_and_fallback_adds_the_recovered_trades(tmp_path, monkeypatch):
