@@ -1,11 +1,14 @@
-"""Tests for experiments/size_pnl_gprod_report.py (EXP-188 Amendment 3, slice 2b).
+"""Tests for experiments/size_pnl_gprod_report.py (EXP-188 Amendment 3, slice 2b; Amendment 6 agreement section).
 
 Synthetic frames only; sections and _agreement are called directly.
 """
 
+import math
+
 import pandas as pd
 import pytest
 
+from engine.v2.ops.errors import OpsError
 from experiments import size_pnl_gprod_report as gprod_report
 from experiments.size_pnl_gprod_report import _agreement
 
@@ -21,19 +24,27 @@ LABEL_OF = {"m0": "M0", "hsq": "H-sq", "habs": "H-abs", "eraw": "E-raw", "elog":
 ROSTER = {"pairs": {"H": "testable", "E": "testable", "N": "testable"}}
 FRAME = pd.DataFrame({"event_id": EVENTS})
 RAW = list(LABEL_OF)
-STORED = {"scored": ["E1", "E2", "E3", "E4", "E5", "E6", "E9"], "selected": ["E1", "E2", "E4", "E9"]}
+GATE_SCORE, ENTRY_COST, EXIT_VALUE_MID = 0.06, 1.0, 1.1  # every row's gate inputs
+# Production selected every covered event: M0's agreement is then 1.0 on the default fixture (the bar passes).
+STORED = {"selected": {e: 0.1 for e in EVENTS}}
+# Production selected E1, E2, E4 of the covered events and E9, which is outside M0's covered set (counts by hand below).
+STORED_HAND = {"selected": {"E1": 0.1, "E2": 0.2, "E4": 0.3, "E9": 0.4}}
+# Production selected only E4: no overlap with M0's taken events, so the bar fails.
+STORED_BELOW = {"selected": {"E4": 0.3}}
 IN_E = set(EVENTS)  # the fixture frame's events E1..E8
 IN_E_WITH_E9 = IN_E | {"E9"}  # E9 counted as an event of E
 
 
 def _cells(over=None):
-    """One (model, event, status, pnl, mid) per raw model and event: taken at 1.0 / 1.0 unless ``over`` maps the pair to a state."""
+    """One (model, event, status, pnl, mid, gate_score, entry_cost, exit_value_mid) per raw model and event: taken at 1.0 / 1.0
+    unless ``over`` maps the pair to a (status, pnl, mid) state."""
     over = over or {}
-    return [(m, e, *over.get((m, e), ("taken", 1.0, 1.0))) for m in RAW for e in EVENTS]
+    return [(m, e, *over.get((m, e), ("taken", 1.0, 1.0)), GATE_SCORE, ENTRY_COST, EXIT_VALUE_MID) for m in RAW for e in EVENTS]
 
 
 def _gate(cells, *, with_mid=True):
-    gate = pd.DataFrame(cells, columns=["model_id", "event_id", "status", "pnl_dollars", "pnl_dollars_mid"])
+    gate = pd.DataFrame(cells, columns=["model_id", "event_id", "status", "pnl_dollars", "pnl_dollars_mid",
+                                        "gate_score", "entry_cost", "exit_value_mid"])
     gate["event_date"] = pd.to_datetime(gate["event_id"].map(DATES))
     return gate if with_mid else gate.drop(columns="pnl_dollars_mid")
 
@@ -44,10 +55,10 @@ def _det(gate):
     return det.assign(model_id=det["model_id"].map(LABEL_OF))
 
 
-def _run(gate, *, outer=None, stored=None, quarter=QUARTER):
+def _run(gate, *, outer=None, stored=STORED, quarter=QUARTER, accepted_gap=None, ladder=None):
     return gprod_report.sections(gate, FRAME, label_of=LABEL_OF, role_model=ROLE_MODEL, roster=ROSTER,
                                  outer_models=set(LABEL_OF) if outer is None else outer,
-                                 quarter_of=quarter, tick=TICK, stored_gate=stored)
+                                 quarter_of=quarter, tick=TICK, stored_gate=stored, accepted_gap=accepted_gap, ladder=ladder)
 
 
 def _rows(section):
@@ -55,6 +66,12 @@ def _rows(section):
     lines = [line for line in section.split("\n") if line.startswith("|")]
     header = [c.strip() for c in lines[0].strip("|").split("|")]
     return [dict(zip(header, (c.strip() for c in line.strip("|").split("|")))) for line in lines[2:]]
+
+
+def _table(text, title):
+    """The rows of the pipe table under ``title``, up to the next subsection."""
+    body = text.split(title, 1)[1].split("\n#### ", 1)[0]
+    return _rows(body)
 
 
 def _find(rows, hypothesis, pair_id, arm):
@@ -67,6 +84,11 @@ def _agreement_gate():
     over = {("m0", "E4"): ("not_taken", 0.0, 0.0), ("m0", "E5"): ("not_taken", 0.0, 0.0), ("m0", "E6"): ("not_taken", 0.0, 0.0),
             ("m0", "E7"): ("undetermined", 0.0, 0.0), ("m0", "E8"): ("undetermined", 0.0, 0.0)}
     return _gate(_cells(over))
+
+
+def _counts(text):
+    (row,) = _table(text, "#### Counts")
+    return row
 
 
 def test_every_section_is_titled_with_the_amendment_label():
@@ -82,7 +104,7 @@ def test_coverage_table_counts_and_pnl_by_hand():
     over = {("m0", "E1"): ("taken", 10.0, 10.0), ("m0", "E2"): ("taken", 20.0, 20.0), ("m0", "E3"): ("taken", 30.0, 30.0),
             ("m0", "E4"): ("not_taken", 0.0, 0.0), ("m0", "E5"): ("not_taken", 0.0, 0.0), ("m0", "E6"): ("not_taken", 0.0, 0.0),
             ("m0", "E7"): ("undetermined", 0.0, 0.0), ("m0", "E8"): ("undetermined", 0.0, 0.0)}
-    rows = {r["model_id"]: r for r in _rows(_run(_gate(_cells(over)))[0])}
+    rows = {r["model_id"]: r for r in _rows(_run(_gate(_cells(over)), accepted_gap="test")[0])}
     m0 = rows["M0"]
     assert (m0["E_events"], m0["covered"], m0["undetermined"], m0["coverage"]) == ("8", "6", "2", "0.75")
     assert m0["trades"] == "3"
@@ -135,67 +157,80 @@ def test_no_gate_rows_gives_no_sections():
 
 
 def test_events_outside_e_never_count():
-    secs = _run(_gate(_cells() + [("m0", "E9", "taken", 100.0, 100.0)]))
+    secs = _run(_gate(_cells() + [("m0", "E9", "taken", 100.0, 100.0, GATE_SCORE, ENTRY_COST, EXIT_VALUE_MID)]))
     m0 = {r["model_id"]: r for r in _rows(secs[0])}["M0"]
     assert (m0["E_events"], m0["covered"], m0["total_pnl"]) == ("8", "8", "8")
 
 
-def test_agreement_not_available_without_stored_decisions():
-    secs = _run(_gate(_cells()))
-    assert "not_available: production's stored walk-forward gate decisions" in secs[2]
+def test_missing_stored_gate_raises_stored_gate_required():
+    with pytest.raises(OpsError) as caught:
+        _run(_gate(_cells()), stored=None)
+    assert caught.value.problem.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.details["reason"] == "stored_gate_required"
+
+
+def test_m0_absent_from_the_run_is_not_available_without_a_stored_gate():
+    outer = set(LABEL_OF) - {"m0"}
+    secs = _run(_gate(_cells()), outer=outer, stored=None)  # no M0 row: the agreement is not available, not an error
+    assert "not_available: M0_not_in_run" in secs[2]
+    assert not any(r["pair_id"].startswith("M0-") for r in _rows(secs[1]))
 
 
 def test_agreement_counts_by_hand():
-    text = _agreement(_det(_agreement_gate()), ROLE_MODEL, LABEL_OF, set(LABEL_OF), IN_E_WITH_E9, STORED)
-    (row,) = _rows(text)
-    assert row == {"events": "6", "both_taken": "2", "m0_only": "1", "production_only": "1", "neither": "2",
-                   "agreement_rate": "0.6667", "production_scored_outside_m0": "1"}
-
-
-def test_agreement_outside_m0_counts_only_events_in_e():
-    text = _agreement(_det(_agreement_gate()), ROLE_MODEL, LABEL_OF, set(LABEL_OF), IN_E, STORED)
-    (row,) = _rows(text)
-    assert row == {"events": "6", "both_taken": "2", "m0_only": "1", "production_only": "1", "neither": "2",
-                   "agreement_rate": "0.6667", "production_scored_outside_m0": "0"}
+    text = _agreement(_det(_agreement_gate()), ROLE_MODEL, LABEL_OF, set(LABEL_OF), IN_E_WITH_E9, STORED_HAND)
+    assert _counts(text) == {"covered": "6", "gprod_selected": "3", "production_selected": "3", "both": "2", "only_production": "1",
+                             "only_gprod": "1", "stored_outside_covered": "1", "rate_gprod": "0.5", "rate_production": "0.5",
+                             "jaccard": "0.5", "agreement_rate": "0.6667", "bar": "0.5"}
 
 
 def test_agreement_excludes_m0_rows_dated_outside_2025():
     gate = _agreement_gate()
     gate.loc[(gate["model_id"] == "m0") & (gate["event_id"] == "E6"), "event_date"] = pd.Timestamp("2024-06-15")
-    text = _agreement(_det(gate), ROLE_MODEL, LABEL_OF, set(LABEL_OF), IN_E_WITH_E9, STORED)
-    (row,) = _rows(text)
-    assert row == {"events": "5", "both_taken": "2", "m0_only": "1", "production_only": "1", "neither": "1",
-                   "agreement_rate": "0.6", "production_scored_outside_m0": "2"}
+    text = _agreement(_det(gate), ROLE_MODEL, LABEL_OF, set(LABEL_OF), IN_E_WITH_E9, STORED_HAND)
+    assert _counts(text) == {"covered": "5", "gprod_selected": "3", "production_selected": "3", "both": "2", "only_production": "1",
+                             "only_gprod": "1", "stored_outside_covered": "1", "rate_gprod": "0.6", "rate_production": "0.6",
+                             "jaccard": "0.5", "agreement_rate": "0.6", "bar": "0.5"}
 
 
-def test_agreement_rate_excludes_events_production_never_scored():
-    stored = {"scored": ["E1", "E2", "E3", "E4"], "selected": ["E1", "E2", "E4"]}
-    text = _agreement(_det(_agreement_gate()), ROLE_MODEL, LABEL_OF, set(LABEL_OF), IN_E, stored)
-    (row,) = _rows(text)
-    assert row == {"events": "4", "both_taken": "2", "m0_only": "1", "production_only": "1", "neither": "0",
-                   "agreement_rate": "0.5", "production_scored_outside_m0": "0"}
+def test_agreement_below_the_bar_raises_without_an_accepted_gap():
+    with pytest.raises(OpsError) as caught:
+        _run(_agreement_gate(), stored=STORED_BELOW)
+    assert caught.value.problem.details["reason"] == "gate_agreement_below_bar"
+    assert "jaccard 0.0" in str(caught.value)
 
 
-def test_m0_absent_from_the_run_is_not_available():
-    outer = set(LABEL_OF) - {"m0"}
-    secs = _run(_gate(_cells()), outer=outer)
-    assert "not_available: M0_not_in_run" in secs[2]
-    assert not any(r["pair_id"].startswith("M0-") for r in _rows(secs[1]))
+def test_agreement_below_the_bar_passes_with_an_accepted_gap_and_says_so():
+    secs = _run(_agreement_gate(), stored=STORED_BELOW, accepted_gap="named gap for the test")
+    text = secs[2]
+    assert "not production-faithful" in text
+    assert "named gap for the test" in text
+    assert _counts(text)["jaccard"] == "0"
 
 
-def test_stored_gate_valid_accepts_a_well_formed_gate():
-    assert gprod_report.stored_gate_valid({"scored": ["E1"], "selected": ["E1"]}) is True
-    assert gprod_report.stored_gate_valid(STORED) is True
+def test_missing_gate_score_column_raises_gate_score_missing():
+    gate = _agreement_gate().drop(columns="gate_score")
+    with pytest.raises(OpsError) as caught:
+        _agreement(_det(gate), ROLE_MODEL, LABEL_OF, set(LABEL_OF), IN_E, STORED_HAND)
+    assert caught.value.problem.details["reason"] == "gate_score_missing"
+
+
+@pytest.mark.parametrize("value", [
+    {"selected": {"E1": 0.1}},
+    {"selected": {}},
+], ids=["one_event", "empty_selected"])
+def test_stored_gate_valid_accepts_a_well_formed_gate(value):
+    assert gprod_report.stored_gate_valid(value) is True
 
 
 @pytest.mark.parametrize("value", [
     None,
     {},
-    {"scored": ["E1"]},
-    {"scored": ["E1"], "selected": ["E2"]},
-    {"scored": [1], "selected": []},
-    {"scored": ["E1"], "selected": [], "extra": []},
-    {"scored": "E1", "selected": []},
-], ids=["none", "empty", "missing_selected", "selected_outside_scored", "non_string_id", "extra_key", "string_not_list"])
+    {"scored": ["E1"], "selected": {"E1": 0.1}},
+    {"selected": ["E1"]},
+    {"selected": {"E1": True}},
+    {"selected": {"E1": float("nan")}},
+    {"selected": {"E1": math.inf}},
+    {"selected": {"": 0.1}},
+], ids=["none", "empty", "extra_key", "non_dict_selected", "bool_ret", "nan_ret", "inf_ret", "empty_id"])
 def test_stored_gate_valid_rejects_malformed_values(value):
     assert gprod_report.stored_gate_valid(value) is False

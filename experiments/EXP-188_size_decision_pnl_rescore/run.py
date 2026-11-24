@@ -29,7 +29,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--stage", required=True, choices=("inner", "outer", "synthetic", "report"))
     parser.add_argument("--replay", action="store_true", help="synthetic stage only: re-score and compare (X7); other stages ignore it")
     parser.add_argument("--event-ids", default=None, help="optional smoke set: a JSON array of event id strings (validated by the driver)")
-    parser.add_argument("--stored-gate", default=None, help="report stage only: JSON object {\"scored\": [event ids], \"selected\": [event ids]} from production's stored walk-forward 2025 gate decisions (EXP-187 arm B); omitted: the M0 agreement is not_available")
+    parser.add_argument("--stored-gate", default=None, help="report stage only: EXP-187's transactions CSV (champion/results/transactions_*.csv, arm B) with event_id and ret columns (ret is the mid return); its selected rows are production's stored 2025 gate decisions. Mandatory when the run has G_PROD rows")
+    parser.add_argument("--accept-gate-gap", default=None, metavar="TEXT", help="report stage only: a non-empty note that accepts an M0 gate agreement below the bar (labelled as a named gap in the report)")
+    parser.add_argument("--gate-ladder", default=None, metavar="PATH", help="report stage only: JSON {label: {event_id: score}} of decomposition steps from the supervisor's diagnostic run")
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--expected", required=True, help="JSON with plan_id, registration_id, seal_id, panel_id of the v14 RERUN")
     parser.add_argument("--sources", required=True, help="MODULE:FUNC, called with the parsed args, returns a size_pnl_driver.Sources")
@@ -73,7 +75,9 @@ def main(argv: list[str] | None = None) -> int:
             if args.event_ids is not None and not (isinstance(event_ids, list) and all(isinstance(e, str) for e in event_ids)): raise fail(_INVALID, "--event-ids must be a JSON array of strings", details={"reason": "event_ids_invalid"})
             if args.stage == "report" and args.event_ids is not None: raise fail(_INVALID, "--event-ids is not supported by the report stage", details={"reason": "event_ids_not_supported"})
             if args.stage != "report" and args.stored_gate is not None: raise fail(_INVALID, "--stored-gate is for the report stage only", details={"reason": "stored_gate_not_supported"})
-            from experiments import size_pnl_assemble, size_pnl_driver, size_pnl_gprod_report  # after the gates, so a missing PLANNED row refuses first
+            if args.stage != "report" and args.accept_gate_gap is not None: raise fail(_INVALID, "--accept-gate-gap is for the report stage only", details={"reason": "accept_gate_gap_not_supported"})
+            if args.stage != "report" and args.gate_ladder is not None: raise fail(_INVALID, "--gate-ladder is for the report stage only", details={"reason": "gate_ladder_not_supported"})
+            from experiments import size_pnl_assemble, size_pnl_driver, size_pnl_gate_agreement  # after the gates, so a missing PLANNED row refuses first
             module_name, _, func = args.sources.partition(":")
             try:  # no colon gives func "", not an attribute; a bad module raises ImportError
                 factory = getattr(importlib.import_module(module_name), func)
@@ -86,12 +90,9 @@ def main(argv: list[str] | None = None) -> int:
             if sources.expected != args.expected_identities:
                 raise fail(_CONFLICT, "--expected differs from the sources' expected identities", details={"reason": "expected_mismatch"})
             if args.stage == "report":
-                stored = None
-                if args.stored_gate is not None:
-                    stored = _read_json(args.stored_gate)
-                    if not size_pnl_gprod_report.stored_gate_valid(stored):
-                        raise fail(_INVALID, "--stored-gate must be {scored, selected} lists of event id strings, selected within scored", details={"reason": "stored_gate_invalid"})
-                summary = size_pnl_assemble.assemble(args.out_dir, sources.plan_frame, admitted=sources.admitted, expected=sources.expected, spec_hash=receipt["spec_hash"], snapshot=sources.snapshot_id, stored_gate=stored)
+                stored = size_pnl_gate_agreement.read_stored(args.stored_gate) if args.stored_gate is not None else None
+                ladder = _read_json(args.gate_ladder) if args.gate_ladder is not None else None
+                summary = size_pnl_assemble.assemble(args.out_dir, sources.plan_frame, admitted=sources.admitted, expected=sources.expected, spec_hash=receipt["spec_hash"], snapshot=sources.snapshot_id, stored_gate=stored, accepted_gap=args.accept_gate_gap, ladder=ladder)
             elif args.stage == "synthetic": summary = size_pnl_driver.run_synthetic(sources, args.out_dir, event_ids=event_ids, replay=args.replay, prereg=lambda: receipt)
             else: summary = size_pnl_driver.run(sources, args.stage, args.out_dir, event_ids=event_ids, prereg=lambda: receipt)
     except (OpsError, Refusal, DataError) as exc:
