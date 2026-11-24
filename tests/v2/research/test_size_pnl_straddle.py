@@ -6,8 +6,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from engine.entry_rules import MCAP_FLOOR
 from engine.portfolio import CAPITAL_PER_TRADE, CONTRACT_MULTIPLIER
+from engine.score import GATE_MCAP_FLOOR
 from experiments import size_pnl_ladder as lad
 from experiments import size_pnl_readers as rd
 from experiments import size_pnl_straddle as sd
@@ -295,18 +295,135 @@ def test_spread_exactly_max_is_not_filtered():
 
 
 def test_mcap_exactly_floor_is_not_filtered():
-    out = sd.decide(pd.DataFrame([ev("m", 1.0, mcap=MCAP_FLOOR)]), EMPTY, "R_L2", good("m"))
+    out = sd.decide(pd.DataFrame([ev("m", 1.0, mcap=GATE_MCAP_FLOOR)]), EMPTY, "R_L2", good("m"))
     assert out.loc[0, "status"] == "taken"
 
 
 def test_universe_filters_are_not_taken():
-    chunk = lad._pack([rec("small", 100.0, pair(100)),
-                       rec("wide", 100.0, pair(100, put_e=(1.0, 2.0), call_e=(1.0, 2.0)))], {})
-    events = pd.DataFrame([ev("small", 1.0, mcap=5e9), ev("wide", 1.0)])
+    chunk = lad._pack([rec("small", 100.0, pair(100))], {})
+    events = pd.DataFrame([ev("small", 1.0, mcap=0.5e9)])
     out = sd.decide(events, prior(), "R_L", chunk).set_index("event_id")
-    assert set(out.index) == {"small", "wide"}
-    assert (out["status"] == "not_taken").all()
-    assert (out["reason"] == "universe_filter").all()
+    assert set(out.index) == {"small"}
+    assert out.loc["small", "status"] == "not_taken" and out.loc["small", "reason"] == "universe_filter"
+
+
+def test_in_universe_is_production_gate_floor_only():
+    assert sd.in_universe(GATE_MCAP_FLOOR) and sd.in_universe(GATE_MCAP_FLOOR * 1.5)
+    assert not sd.in_universe(0.5e9) and not sd.in_universe(0.0)
+    for null in (NAN, None, pd.NA):
+        assert not sd.in_universe(null)
+
+
+def test_five_billion_name_is_now_in_the_universe():
+    # Under the old $10B short-vol floor this name was filtered; production's STR-THRU universe takes it.
+    out = sd.decide(pd.DataFrame([ev("five", 1.0, mcap=5e9)]), EMPTY, "R_L2", good("five"))
+    assert out.loc[0, "status"] == "taken" and pd.isna(out.loc[0, "reason"])
+
+
+def test_wide_spread_name_in_universe_is_now_taken():
+    # Rel spread 0.67 (> the old 25% term): production applies no spread term, so the straddle takes it; rel_spread is still recorded.
+    chunk = lad._pack([rec("wide", 100.0, pair(100, put_e=(1.0, 2.0), call_e=(1.0, 2.0)))], {})
+    out = sd.decide(pd.DataFrame([ev("wide", 1.0, mcap=5e9)]), EMPTY, "R_L2", chunk)
+    assert out.loc[0, "rel_spread"] > 0.25
+    assert out.loc[0, "status"] == "taken" and pd.isna(out.loc[0, "reason"])
+
+
+def _bad_quote_chunk(eid):
+    """Spot 10, ATM call mid 2.0 and put mid 1.5: entry cost 3.5 is 35% of spot, above production's 30% ceiling."""
+    return lad._pack([rec(eid, 10.0, pair(10, call_e=(1.5, 2.5), put_e=(1.0, 2.0)))], {})
+
+
+@pytest.mark.parametrize("rule", ["R_L", "R_L2"])
+def test_bad_quote_straddle_is_not_taken(rule):
+    out = sd.decide(pd.DataFrame([ev("bq", 1.0)]), prior(), rule, _bad_quote_chunk("bq"))
+    assert out.loc[0, "status"] == "not_taken" and out.loc[0, "reason"] == "bad_quote"
+
+
+def test_bad_quote_exactly_30_percent_is_not_refused():
+    # Mids 1.5 + 1.5 = 3.0 at spot 10 is exactly 30.0%, which production allows (strictly greater is refused).
+    chunk = lad._pack([rec("eq", 10.0, pair(10, call_e=(1.0, 2.0), put_e=(1.0, 2.0)))], {})
+    out = sd.decide(pd.DataFrame([ev("eq", 1.0)]), EMPTY, "R_L2", chunk)
+    assert out.loc[0, "status"] == "taken" and pd.isna(out.loc[0, "reason"])
+
+
+def test_bad_quote_skips_the_gate_callable():
+    calls = []
+
+    def gate(event):
+        calls.append(event["event_id"])
+        return "taken", None
+
+    out = sd.decide(pd.DataFrame([ev("bq", 1.0)]), EMPTY, sd.GATE_RULE, _bad_quote_chunk("bq"), gate=gate)
+    assert calls == []
+    assert out.loc[0, "status"] == "not_taken" and out.loc[0, "reason"] == "bad_quote"
+
+
+def test_normal_chunk_still_reaches_the_gate_callable():
+    calls = []
+
+    def gate(event):
+        calls.append(event["event_id"])
+        return "taken", None
+
+    out = sd.decide(pd.DataFrame([ev("g", 1.0)]), EMPTY, sd.GATE_RULE, good("g"), gate=gate)
+    assert calls == ["g"]
+    assert out.loc[0, "status"] == "taken" and pd.isna(out.loc[0, "reason"])
+
+
+def test_history_rows_keeps_only_the_straddle_universe():
+    events = pd.DataFrame([ev("lo", 2.0, mcap=0.5e9), ev("hi", 0.5, mcap=20e9), ev("nan", 3.0, mcap=NAN)])
+    decisions = sd.decide(events, EMPTY, "R_L2", good("lo", "hi", "nan"))
+    rows = sd.history_rows(decisions, events)
+    assert list(rows.columns) == ["event_date", "edge"]
+    assert list(rows["edge"]) == [0.5]
+
+
+def test_subfloor_history_does_not_move_the_rl_cutoff():
+    # 120 in-universe edges 0.00..1.19 and 120 sub-floor edges of 100.0, all dated in the same prior month.
+    hist = pd.DataFrame([ev(f"in{i}", i / 100.0, date="2024-01-15", mcap=20e9) for i in range(120)]
+                        + [ev(f"lo{i}", 100.0, date="2024-01-15", mcap=0.5e9) for i in range(120)])
+    decisions = sd.decide(hist, EMPTY, "R_L2", good(*hist["event_id"]))
+    target = pd.DataFrame([ev("hi", 1.0)])
+    with_floor = sd.decide(target, sd.history_rows(decisions, hist), "R_L", good("hi")).loc[0, "cutoff"]
+    absent = sd.decide(target, decisions.iloc[:120][["event_date", "edge"]], "R_L", good("hi")).loc[0, "cutoff"]
+    unfiltered = sd.decide(target, decisions[["event_date", "edge"]], "R_L", good("hi")).loc[0, "cutoff"]
+    assert with_floor == pytest.approx(0.952) and with_floor == absent
+    assert unfiltered > 1.0  # the sub-floor edges would have moved the cutoff
+
+
+def _mixed_chunk(bad_id, good_ids):
+    """One BAD_QUOTE event (spot 10, entry cost 35% of spot) and healthy ATM straddles at spot 100."""
+    recs = [rec(bad_id, 10.0, pair(10, call_e=(1.5, 2.5), put_e=(1.0, 2.0)))]
+    recs += [rec(e, 100.0, pair(100)) for e in good_ids]
+    return lad._pack(recs, {})
+
+
+def test_history_rows_drops_bad_quote_events():
+    events = pd.DataFrame([ev("n1", 0.5, date="2024-01-15"), ev("bq", 100.0, date="2024-01-16"),
+                           ev("n2", 1.0, date="2024-01-17")])
+    decisions = sd.decide(events, EMPTY, "R_L2", _mixed_chunk("bq", ["n1", "n2"]))
+    assert decisions.set_index("event_id").loc["bq", "reason"] == "bad_quote"
+    rows = sd.history_rows(decisions, events)
+    assert list(rows.columns) == ["event_date", "edge"]
+    assert list(rows["event_date"]) == ["2024-01-15", "2024-01-17"]
+    assert list(rows["edge"]) == pytest.approx([0.5, 1.0])
+
+
+def test_bad_quote_event_does_not_move_the_rl_cutoff():
+    # 120 healthy edges 0.00..1.19 in one prior month, plus one BAD_QUOTE event with a huge edge in the same month.
+    normal = [ev(f"in{i}", i / 100.0, date="2024-01-15") for i in range(120)]
+    bad = ev("bq", 100.0, date="2024-01-16")
+    hist = pd.DataFrame(normal + [bad])
+    chunk = _mixed_chunk("bq", [f"in{i}" for i in range(120)])
+    decisions = sd.decide(hist, EMPTY, "R_L2", chunk)
+    assert decisions.loc[len(hist) - 1, "reason"] == "bad_quote"
+    target = pd.DataFrame([ev("hi", 1.0)])
+    filtered = sd.decide(target, sd.history_rows(decisions, hist), "R_L", good("hi")).loc[0, "cutoff"]
+    without = sd.decide(pd.DataFrame(normal), EMPTY, "R_L2", good(*[f"in{i}" for i in range(120)]))
+    without_cut = sd.decide(target, sd.history_rows(without, pd.DataFrame(normal)), "R_L", good("hi")).loc[0, "cutoff"]
+    unfiltered = sd.decide(target, decisions[["event_date", "edge"]], "R_L", good("hi")).loc[0, "cutoff"]
+    assert filtered == pytest.approx(0.952) and filtered == without_cut
+    assert unfiltered > filtered  # the BAD_QUOTE edge would have moved the cutoff (0.96 against 0.952)
 
 
 def test_rl2_takes_zero_and_ignores_history():

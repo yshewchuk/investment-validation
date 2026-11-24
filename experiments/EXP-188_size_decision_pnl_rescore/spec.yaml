@@ -64,7 +64,7 @@ short_vol:
       rationale: "live DYN-SV uses one fixed width per structure (forecast divided by a divisor, engine/forecast_sizing.py); EXP-133's per-event width search was falsified (overfit, widened the universe about 2.6x and did worse); EXP-137's chosen widths clustered at 1.3-1.7x forecast and the live divisors are the conservative end, so the re-tune originally asked where in that band each model's forecast should sit; Amendment 4 widens the grid to c = 0.5 (2x the forecast) through 1.0, beyond that band"
 long_vol:
   structure: "straddle_through (STR-THRU factory, called only; not registered)"
-  R_L: "primary: buy when edge = pred_abs_move_m - implied_move is at or above the top-20% trailing cutoff of the model's own edge over the prior six months (at least 100 scores, strictly before the month), within the short-vol universe filters"
+  R_L: "primary: buy when edge = pred_abs_move_m - implied_move is at or above the top-20% trailing cutoff of the model's own edge over the prior six months (at least 100 scores, strictly before the month), within production's STR-THRU universe (market cap at or above engine.score GATE_MCAP_FLOOR, no spread term, but production's BAD_QUOTE ceiling of 30% of spot at the mid entry cost; Amendment 5), the cutoff computed over the model's edges in that universe"
   R_L2: "secondary: fixed edge >= 0, no cutoff"
   undetermined: "missing implied move or legs, or a crossed, locked or zero-bid entry quote, is undetermined, not no"
 marks:
@@ -89,6 +89,7 @@ amendments:
   - "Amendment 4 (2026-11-23): wider retuned c grid, guides/size_decision_pnl_design.md section 15"
   - "Amendment 2 (2026-11-22): cash-secured $100,000 account sensitivity, guides/size_decision_pnl_design.md section 16"
   - "Amendment 3 (2026-11-23): G_PROD production-gate STR-THRU sensitivity arm, guides/size_decision_pnl_design.md section 'Amendment 3'"
+  - "Amendment 5 (2026-11-23): straddle book uses production's STR-THRU universe (GATE_MCAP_FLOOR, no spread term) and its own paired population E_str, guides/size_decision_pnl_design.md section 17"
 rung3_sensitivity: "a sensitivity row drops rung 3"
 hypotheses:
   H1: "H1 (short vol): for each matched pair, d = P&L(median-type) - P&L(mean-type) > 0 on the seven put-side short-vol structures."

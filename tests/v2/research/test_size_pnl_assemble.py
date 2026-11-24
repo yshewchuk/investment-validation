@@ -129,6 +129,7 @@ CASES = [
     ("report_nonfinite_pnl", lambda tmp_path: (build(tmp_path, rows_fn=lambda rows: [{**rows[0], "pnl_dollars": float("nan")}, *rows[1:]]), plan_frame())),
     ("report_decisions_columns", lambda tmp_path: (build(tmp_path, rows_fn=lambda rows: [{k: v for k, v in r.items() if k != "rung"} for r in rows]), plan_frame())),
     ("report_decisions_empty", lambda tmp_path: (build(tmp_path, rows_fn=lambda rows: pd.DataFrame(rows).iloc[0:0]), plan_frame())),
+    ("report_decisions_invalid", lambda tmp_path: (build(tmp_path, rows_fn=lambda rows: [{**rows[0], "book": "bogus"}, *rows[1:]]), plan_frame())),
 ]
 
 
@@ -289,6 +290,13 @@ def test_t10_verdicts_are_the_pinned_literals(tmp_path):
     verdicts = [_cells(line) for line in _section_lines(text, "### T10") if line.startswith("| H")]
     assert verdicts == [["H1", "+1", "clear"], ["H2", "-1", "reversed"], ["H3", "+1", "no_difference"]]
     assert "not_testable because the required full year" not in text
+
+
+def test_t10_section_discloses_amendment_5(tmp_path):
+    out = build(tmp_path)
+    assemble_mod.assemble(out, plan_frame(), admitted=None)
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    assert "Amendment 5 (2026-11-23): the straddle universe" in "\n".join(_section_lines(text, "### T10"))
 
 
 def test_same_plan_frame_as_the_receipt_succeeds(tmp_path):
@@ -481,9 +489,14 @@ def test_event_undetermined_under_one_model_is_excluded_from_e(tmp_path):
     text = (out / "REPORT.md").read_text(encoding="utf-8")
     assert "| H1 | H | as_is | ok | 3 | 1 |" in text  # n is one smaller than the four-event fixture's 4
     assert "| H1 | H | as_is | ok | 4 | 1 |" not in text
-    assert _section_lines(text, "### T7") == _section_lines(clean_text, "### T7")  # same mean and statistics as without E01
+    t7, clean_t7 = _section_lines(text, "### T7"), _section_lines(clean_text, "### T7")
+    # Short-vol E and H3 (E intersect E_str, where E_str still holds E01) match the clean run: the same events and P&L.
+    assert [line for line in t7 if line.startswith(("| H1 |", "| H3 |"))] == [line for line in clean_t7 if line.startswith(("| H1 |", "| H3 |"))]
+    # H2 reads E_str, which keeps E01: its short-vol row removed E01 from E only (Amendment 5).
+    assert _cells(next(line for line in t7 if line.startswith("| H2 | H | R_L |")))[4] == "4"
     assert "undetermined_events_excluded: 1" in text
-    assert "events with an undetermined burn-in or missing-data row (any book) or an undetermined straddle row are excluded from E: 1" in text
+    assert "undetermined_straddle_events_excluded: 0" in text
+    assert "short-vol undetermined rows exclude events from E: 1; straddle undetermined rows exclude events from E_str" in text
     assert "short-vol non-trades (e.g. width_declined) stay in E at P&L 0" in text
 
 
@@ -781,7 +794,7 @@ def _with_account(rows):
 
 
 def test_account_wanted_counts_a_taken_row_of_an_event_removed_from_e(tmp_path):
-    # E01 is undetermined for m-hsq, so it leaves E for every model; m-eraw still takes E01 as_is, and that row must be counted.
+    # E01 is undetermined for m-hsq, so it leaves short-vol E for every model; m-eraw still takes E01 as_is, and that row must be counted.
     out = build(tmp_path, rows_fn=lambda rows: _with_account(_e01_undetermined_for_m_hsq(rows)))
     assemble_mod.assemble(out, plan_frame(), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
@@ -894,3 +907,54 @@ def test_g_prod_rows_never_enter_e_or_the_primary_tables_but_reach_the_accounts(
     # nets (0.6 - 0.5) x 100 = 10, so final = 100000 + 3300 + 3400 + 3520 = 110220.
     assert "| straddle | E-log | G_PROD | 3 | 3 | 110220.00 | 0.1022 | 0 | 1 |" in gated_account
     assert not any(line.startswith("| straddle | E-log | G_PROD |") for line in _section_lines(plain_text, account))
+
+
+# ---- Amendment 5: short-vol E and straddle E_str are separate populations ----
+
+TWO = {"E01": "2024-02-15", "E02": "2024-05-15"}  # two quarters (2024Q1, 2024Q2) and two tickers (AAA, BBB) in the plan
+
+
+def _e01_straddle_undetermined(rows):
+    """E01's straddle rows are undetermined under every model (a missing forecast); its short-vol rows stay taken."""
+    return [{**row, "status": "undetermined", "reason": "missing_forecast", "pnl_dollars": 0.0}
+            if row["event_id"] == "E01" and row["book"] == "straddle" else row for row in rows]
+
+
+def test_straddle_undetermined_row_keeps_its_event_in_e_and_drops_it_from_e_str(tmp_path):
+    out = build(tmp_path, rows_fn=_e01_straddle_undetermined, dates=TWO)
+    assemble_mod.assemble(out, plan_frame(), admitted=None)
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    assert "undetermined_events_excluded: 0" in text
+    assert "undetermined_straddle_events_excluded: 1" in text
+    assert _cells(next(line for line in _section_lines(text, "### T2") if line.startswith("| total |")))[1] == "2"  # E01 stays in short-vol E
+    t7 = _section_lines(text, "### T7")
+    assert _cells(next(line for line in t7 if line.startswith("| H1 | H | as_is |")))[3:5] == ["ok", "2"]
+    # E_str is {E02} alone, so the straddle contrast and the H3 intersection (E intersect E_str = {E02}) are not testable.
+    assert _cells(next(line for line in t7 if line.startswith("| H2 | H | R_L |")))[3] == "not_testable: too_few_quarters_or_tickers"
+    assert _cells(next(line for line in t7 if line.startswith("| H3 | H | as_is |")))[3] == "not_testable: too_few_quarters_or_tickers"
+
+
+def test_short_vol_undetermined_row_drops_its_event_from_e_but_not_from_e_str(tmp_path):
+    out = build(tmp_path, rows_fn=_e01_undetermined_for_m_hsq, dates=TWO)
+    assemble_mod.assemble(out, plan_frame(), admitted=None)
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    assert "undetermined_events_excluded: 1" in text
+    assert "undetermined_straddle_events_excluded: 0" in text
+    assert _cells(next(line for line in _section_lines(text, "### T2") if line.startswith("| total |")))[1] == "1"  # E is {E02}
+    t7 = _section_lines(text, "### T7")
+    assert _cells(next(line for line in t7 if line.startswith("| H2 | H | R_L |")))[3:5] == ["ok", "2"]  # E_str keeps E01
+    assert _cells(next(line for line in t7 if line.startswith("| H1 | H | as_is |")))[3] == "not_testable: too_few_quarters_or_tickers"
+    assert _cells(next(line for line in t7 if line.startswith("| H3 | H | as_is |")))[3] == "not_testable: too_few_quarters_or_tickers"
+
+
+def test_h3_contrast_pairs_the_intersection_of_the_two_books():
+    frame = pd.DataFrame([{"model_id": m, "book": b, "arm_or_rule": v, "event_id": e, "taken": True, "pnl_dollars": p}
+                          for m, p in (("m-habs", 11.0), ("m-hsq", 10.0)) for e in ("E01", "E02")
+                          for b, v in (("short_vol", "as_is"), ("straddle", "R_L"))])
+    events = {("m-habs", "short_vol"): ["E01", "E02"], ("m-hsq", "short_vol"): ["E01", "E02"],
+              ("m-habs", "straddle"): ["E02"], ("m-hsq", "straddle"): ["E02"]}  # E_str holds E02 only
+    quarter_of, tick = {"E01": "2024Q1", "E02": "2024Q2"}, {"E01": "AAA", "E02": "BBB"}
+    pair = ("m-habs", "m-hsq")  # (median, mean)
+    assert isinstance(assemble_mod._contrast_cell(frame, events, pair, [("short_vol", "as_is", 1)], quarter_of, tick), dict)  # E alone: testable
+    h3 = assemble_mod._contrast_cell(frame, events, pair, [("short_vol", "as_is", 1), ("straddle", "R_L", -1)], quarter_of, tick)
+    assert h3 == "too_few_quarters_or_tickers"  # E intersect E_str = {E02}: one quarter
