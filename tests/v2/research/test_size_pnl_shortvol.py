@@ -12,7 +12,7 @@ from engine.forecast_sizing import FORECAST_SIZED, forecast_params
 from engine.pnl_sim import expected_pnl
 from engine.portfolio import CONTRACT_MULTIPLIER
 from engine.score import _mean_relative_spread
-from engine.structures import CALL, PUT, STRUCTURES, ChainSnapshot, ExpirySelector, price_structure
+from engine.structures import BUY, CALL, PUT, STRUCTURES, ChainSnapshot, ExpirySelector, price_structure
 from experiments import size_pnl_ladder as lad
 from experiments import size_pnl_shortvol as sv
 from experiments.size_pnl_pool import build_pool
@@ -177,6 +177,7 @@ def test_pinned_refuses_a_leg_expiry_off_the_ladder_selector(monkeypatch):
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.details["reason"] == "factory_default_mismatch"
     assert caught.value.details["structure"] == "TWIN-P"
+    assert caught.value.details["field"] == real().legs[0].name
 
 
 @pytest.mark.parametrize("index", [0, 1])
@@ -258,6 +259,10 @@ def test_flipped_condor_now_resolves(monkeypatch):
     monkeypatch.setitem(STRUCTURES, "CND-PS", lambda **kw: flipped(real(**kw)))
     legs, reason = sv.resolve(chunk_of(("A", {})), 0, "CND-PS", PRED)
     assert reason is None and len(legs) > 0
+    # Pin the flipped orientation: resolved (side, qty) equals the flipped spec's, for the legs with qty > 0.
+    want = [(leg.side, leg.qty) for leg in flipped(real()).legs if leg.qty > 0]
+    got = [(leg["side"], leg["qty"]) for leg in legs if leg["qty"] > 0]
+    assert got == want and len(got) > 0
 
 
 def test_unflipped_condor_has_a_floor():
@@ -336,6 +341,13 @@ def test_debit_of_a_nanodollar_is_simulated(pool):
     out = run(thin, events_for("A"), pool).iloc[0]
     assert out["entry_cost"] == pytest.approx(1e-9, abs=1e-12)
     assert out["status"] == "scored" and math.isfinite(out["exp_pnl_sim"]) and pd.isna(out["reason"])
+    # Independent oracle, by hand (no structure_pnl / structure_value): BUY legs close at +mean, SELL legs at -mean,
+    # each at the simulated mean of its listed strike. The cost is ~1e-9, so the return is huge: this checks the formula.
+    grid, means = sv.simulate(thin, events_for("A"), pool, draws=DRAW)["A"]
+    legs, _ = sv.resolve(thin, 0, "CND-PS", PRED)
+    value = sum((1.0 if leg["side"] == BUY else -1.0) * leg["qty"] * means[np.flatnonzero(grid == leg["strike"])[0]]
+                for leg in legs if leg["qty"] > 0)
+    assert out["exp_pnl_sim"] == pytest.approx((value - out["entry_cost"]) / out["entry_cost"], rel=1e-9)
 
 
 def test_score_accepts_a_nanodollar_debit():

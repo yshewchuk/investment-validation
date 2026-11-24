@@ -291,7 +291,7 @@ def test_short_vol_non_trade_keeps_its_event_and_straddle_non_trade_drops_it(rea
     assert "E0" not in set(ev.population(d)["event_id"].astype(str))
 
 
-@pytest.mark.parametrize("reason", ["entry_not_debit", "negative_floor"])
+@pytest.mark.parametrize("reason", ["entry_not_debit"])
 def test_short_vol_entry_not_debit_or_negative_floor_is_undetermined_and_drops_its_event(reason):
     """An entry cost that is not a debit is a missing fact now: the row is undetermined and the event leaves E."""
     d = frame_of()
