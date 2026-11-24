@@ -1,6 +1,6 @@
 # Short-vol structure width tuning for the board (design, EXP-189)
 
-**Status: DESIGN ONLY (user decisions 2026-11-24).** The code slices (section 11) are NOT started until this design merges. This PR adds this file only: no code, `spec.yaml` or test, and no edit to EXP-188's design or spec. Experiment id **EXP-189** (slice W1 re-checks that it is free).
+**Status: design merged (user decisions 2026-11-24); code slices (section 11) in progress.** The design PR added this file only, with no code, `spec.yaml` or test, and no edit to EXP-188's design or spec. Experiment id **EXP-189** (slice W1 re-checks that it is free).
 
 **Purpose.** Choose **production's** short-vol structure widths for the board, using production's forecast model only (**M0**, `size_v1_4`); no roster or per-model factor. If the board's widths change (a separate user decision), EXP-188 (`guides/size_decision_pnl_design.md`, production-exact) is rerun on them. EXP-189 has its own spec, pre-registration and PLANNED row, never changes EXP-188's spec or hash, and uses EXP-188's machinery as a library.
 
