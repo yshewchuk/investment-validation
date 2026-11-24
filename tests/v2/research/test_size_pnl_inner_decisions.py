@@ -144,7 +144,7 @@ def test_inner_decisions_carry_the_scored_pnl_and_taken_rows(tmp_path, stubs, mo
 
     monkeypatch.setattr(driver.shortvol, "score_events", scored_rows)
     monkeypatch.setattr(driver.shortvol, "decide", lambda scored: scored.assign(cutoff=np.nan, status="taken", reason="taken"))
-    monkeypatch.setattr(driver.shortvol, "score", lambda chunk_, events, mine, name, alpha, *, drop_unquoted=False, mid_marks=False:
+    monkeypatch.setattr(driver.shortvol, "score", lambda chunk_, events, mine, name, alpha, *, drop_unquoted=False, mid_marks=False, repriced=False:
                         _marks(mine["event_id"].astype(str).to_numpy(), (7.0, 9.0), mid_marks))
     _inner(tmp_path, monkeypatch)
     frame = _frame(tmp_path)

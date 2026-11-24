@@ -278,12 +278,13 @@ def _exit_value(chunk, traded, alpha, mid=False):
     return total
 
 
-def score(chunk, events, decisions, name, alpha, *, drop_unquoted=False, mid_marks=False):
+def score(chunk, events, decisions, name, alpha, *, drop_unquoted=False, mid_marks=False, repriced=False):
     """Marked P&L of the TAKEN events of ``name`` only; ``drop_unquoted`` removes the worst-case rung-3 rows.
 
     ``mid_marks`` values rung-2 legs at ``alpha``, as rung-1 legs are (the Amendment 1 sensitivity arm); the taken set,
     rung-3 rows and rung labels are unchanged. A decision priced at a different alpha than this call is refused,
-    not silently re-marked.
+    not silently re-marked. ``repriced`` (the breakeven endpoints only) enters the trade at ``alpha`` itself, so the
+    priced-at-this-alpha and the not-a-debit check are skipped; everything else is unchanged.
     """
     FillModel(alpha)  # validate up front, even when nothing is taken
     pinned(name)
@@ -311,9 +312,9 @@ def score(chunk, events, decisions, name, alpha, *, drop_unquoted=False, mid_mar
             raise ValueError(f"taken event {eid!r} has an unusable entry quote")
         cost = entered[0]
         bound = _num(dec["entry_cost"])
-        if not (math.isfinite(bound) and abs(bound - cost) <= 1e-9 and _num(dec["alpha"]) == float(alpha)):
+        if not repriced and not (math.isfinite(bound) and abs(bound - cost) <= 1e-9 and _num(dec["alpha"]) == float(alpha)):
             raise ValueError("decision was not priced at this alpha")
-        if not cost > 0:
+        if not repriced and not cost > 0:
             raise ValueError(f"taken event {eid!r} has an entry cost that is not a debit ({cost!r})")
         traded = [leg for leg in legs if leg["qty"] > 0]
         rungs = [int(chunk["exit_rung"][leg["idx"]]) for leg in traded]

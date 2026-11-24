@@ -12,7 +12,8 @@ from experiments import size_pnl_driver
 from experiments import size_pnl_receipts as tuning
 from experiments.size_pnl_shortvol import Refusal
 from tests.v2.research.test_size_pnl_assemble import (  # noqa: F401 (imported so the autouse check_plan no-op applies here)
-    EVENT_DATES, ROLES, TICKERS, _cells, _no_plan_admission, _rewrite, _rows, _section_lines, build, plan_frame)
+    EVENT_DATES, ROLES, TICKERS, _cells, _no_plan_admission, _rewrite, _rows, _section_lines, _with_endpoints, _with_mid, build,
+    plan_frame)
 
 NEW_EVENTS = {"E05": "2025-08-15", "E06": "2025-11-15", "E11": "2023-08-15", "E12": "2024-02-15",
               "E13": "2024-05-15", "E14": "2024-08-15", "E15": "2023-11-15"}
@@ -110,23 +111,25 @@ def test_t10_is_computable_with_inner_2024_and_outer_2025(tmp_path, inner_events
     assert pooled[0]["mean"] == 1.0
 
 
-SENS_T10_TITLE = "### Sensitivity (Amendment 1), not the pre-registered verdict: T10"
-SENS_T7_TITLE = "### Sensitivity (Amendment 1), not the pre-registered verdict: T7"
+HARSH_T10_TITLE = "### Harsh fills, reported only, not a verdict basis: T10 Verdicts"
+HARSH_T7_TITLE = "### Harsh fills, reported only, not a verdict basis: T7 Contrasts"
 
 
-def test_sensitivity_t10_pools_the_inner_window_too(tmp_path, inner_events):
+def test_harsh_t10_pools_the_inner_window_too(tmp_path, inner_events):
     # Same hand derivation as test_t10_is_computable_with_inner_2024_and_outer_2025: the mid column is twice the primary P&L,
     # so every mid difference doubles and the signs and categories are the primary ones. Outer 2025 alone has no full 2024 year,
     # so only the pooled inner rows make them testable.
     out = build_inner(tmp_path, INNER_2024, outer_dates=OUTER_2025, mid=True)
     assemble_mod.assemble(out, plan_frame(TICKERS), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
-    sens = [_cells(line) for line in _section_lines(text, SENS_T10_TITLE) if line.startswith("| H")]
-    assert sens == [["H1", "+1", "clear"], ["H2", "-1", "reversed"], ["H3", "+1", "no_difference"]]
-    assert not all(row[2] == "not_testable" for row in sens)
-    # The sensitivity T7 is the outer window's mid contrast alone: mean 2 (the primary T7 shows 1), so primary values cannot pass.
-    sens7 = next(_cells(line) for line in _section_lines(text, SENS_T7_TITLE) if line.startswith("| H1 | H | as_is |"))
-    assert sens7[3:6] == ["ok", "4", "2"]
+    harsh = [_cells(line) for line in _section_lines(text, HARSH_T10_TITLE) if line.startswith("| H")]
+    assert harsh == [["H1", "+1", "clear"], ["H2", "-1", "reversed"], ["H3", "+1", "no_difference"]]
+    assert not all(row[2] == "not_testable" for row in harsh)
+    # The headline T7 is the outer window's mid contrast alone: mean 2 (the harsh T7 shows the primary 1).
+    headline7 = next(_cells(line) for line in _section_lines(text, "### T7 Contrasts") if line.startswith("| H1 | H | as_is |"))
+    assert headline7[3:6] == ["ok", "4", "2"]
+    harsh7 = next(_cells(line) for line in _section_lines(text, HARSH_T7_TITLE) if line.startswith("| H1 | H | as_is |"))
+    assert harsh7[3:6] == ["ok", "4", "1"]
 
 
 def test_t10_still_refuses_when_a_full_year_is_missing(tmp_path, inner_events):
@@ -275,5 +278,48 @@ def test_without_inner_decisions_the_report_is_unchanged_in_shape(tmp_path):
     out = build(tmp_path)
     summary = assemble_mod.assemble(out, plan_frame(), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
-    assert summary["sections"] == 16  # includes main's Amendment 2 account section, the Amendment 6 board-match section and the three G_PROD sections
+    assert summary["sections"] == 18  # same fixture as the happy path: 15 HEAD sections + the three G_PROD sections (main)
     assert "### Inner window" not in text
+
+
+MISMATCHED_VALUATION = [
+    ("endpoints_in_outer_only", {"outer_rows_fn": _with_endpoints}),  # inner without a0/a1, outer with them
+    ("mid_in_inner_only", {"inner_rows_fn": _with_mid}),  # inner with mid, outer without
+]
+
+
+@pytest.mark.parametrize("kwargs", [kw for _name, kw in MISMATCHED_VALUATION], ids=[name for name, _kw in MISMATCHED_VALUATION])
+def test_mismatched_optional_valuation_columns_across_windows_refuse(tmp_path, inner_events, kwargs):
+    out = build_inner(tmp_path, INNER_2024, outer_dates=OUTER_2025, **kwargs)
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, plan_frame(TICKERS), admitted=None)
+    assert caught.value.details["reason"] == "report_decisions_columns"
+    assert not (out / "REPORT.md").exists()
+
+
+def _only_a0(rows):
+    """The endpoint rows with pnl_dollars_a1 dropped: alpha 0 without its pair."""
+    return [{k: v for k, v in row.items() if k != "pnl_dollars_a1"} for row in _with_endpoints(rows)]
+
+
+def _only_a1(rows):
+    """The endpoint rows with pnl_dollars_a0 dropped: alpha 1 without its pair."""
+    return [{k: v for k, v in row.items() if k != "pnl_dollars_a0"} for row in _with_endpoints(rows)]
+
+
+@pytest.mark.parametrize("fixture", [_only_a0, _only_a1], ids=["a0_without_a1", "a1_without_a0"])
+def test_a_lone_breakeven_endpoint_refuses_in_every_window(tmp_path, inner_events, fixture):
+    # both windows carry the same lone endpoint, so only the single-frame pairing check (not the cross-window check) can refuse
+    out = build_inner(tmp_path, INNER_2024, outer_dates=OUTER_2025, outer_rows_fn=fixture, inner_rows_fn=fixture)
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, plan_frame(TICKERS), admitted=None)
+    assert caught.value.details["reason"] == "report_decisions_columns"
+    assert not (out / "REPORT.md").exists()
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"mid": True, "outer_rows_fn": _with_endpoints, "inner_rows_fn": _with_endpoints}],
+                         ids=["none_in_either_window", "all_three_in_both_windows"])
+def test_matching_optional_valuation_columns_across_windows_do_not_refuse(tmp_path, inner_events, kwargs):
+    out = build_inner(tmp_path, INNER_2024, outer_dates=OUTER_2025, **kwargs)
+    assemble_mod.assemble(out, plan_frame(TICKERS), admitted=None)
+    assert (out / "REPORT.md").exists()

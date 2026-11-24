@@ -12,11 +12,13 @@ stored_gate_valid = size_pnl_gate_agreement.valid
 LABEL = ("G_PROD (Amendment 6, post-hoc revision by the user, 2026-11-24): production gate refit once through 2024, not refit per model "
          "(favours M0 forecast scale); registered threshold chosen on all-year walk-forward predictions (look-ahead); "
          "production-faithful only once the M0 agreement section passes")
-MARKS = (("primary", "pnl_dollars"), ("mid", "pnl_dollars_mid"))
+MARKS = (("mid", "pnl_dollars"), ("harsh", "pnl_dollars_harsh"))  # the headline arm (mid) first, then the stored primary as harsh fills
+MARKS_PRIMARY = (("primary", "pnl_dollars"),)  # no mid column in the decisions: the stored primary marks are the only arm
 COVERAGE_NOTE = ("covered = events with a determined G_PROD decision (taken or not_taken) among the events with a G_PROD row; undetermined (a missing or NaN gate input, "
                  "a thin residual pool) is never counted as no. P&L per covered event counts untaken rows as 0. Contrasts below use the "
                  "covered subset of each pair: the events both members have a determined decision on.")
-CONTRAST_NOTE = "d = median-type minus mean-type for the H2 pairs; M0 minus the named model for the M0 rows. arm primary = primary marks; arm mid = marks_mid."
+CONTRAST_NOTE = ("d = median-type minus mean-type for the H2 pairs; M0 minus the named model for the M0 rows. arm mid = marks_mid (the headline basis); "
+                 "arm harsh = harsh fills, reported only; arm primary = stored primary marks when no mid column exists.")
 
 
 def _title(text):
@@ -79,31 +81,34 @@ def sections(gate_raw, frame, *, label_of, role_model, roster, outer_models, qua
         raise fail(_INVALID, 'stored_gate must be {"selected": {event_id: finite ret}}', details={"reason": "stored_gate_invalid"})
     if gate_raw.empty:
         return []
+    swapped = "pnl_dollars_mid" in gate_raw.columns
+    if swapped:  # the headline is the mid marks; the stored primary P&L is reported as harsh fills
+        gate_raw = gate_raw.assign(pnl_dollars_harsh=gate_raw["pnl_dollars"], pnl_dollars=gate_raw["pnl_dollars_mid"])
     in_e = set(frame["event_id"])
     g = gate_raw[gate_raw["event_id"].isin(in_e)].copy()
     quarter_of = {**g.drop_duplicates("event_id").set_index("event_id")["event_date"].pipe(pd.to_datetime).dt.to_period("Q").astype(str).to_dict(), **quarter_of}
     g["model_id"] = g["model_id"].map(label_of)
     det = g[g["status"] != "undetermined"]
     labels = sorted(label_of[m] for m in outer_models)
-    marks = [(arm, col) for arm, col in MARKS if col in gate_raw.columns]
+    marks = [(arm, col) for arm, col in (MARKS if swapped else MARKS_PRIMARY) if col in gate_raw.columns]
     pnl = {arm: _per_event(det, col) for arm, col in marks}
-    has_mid = "mid" in pnl
+    headline, has_harsh = marks[0][0], "harsh" in pnl
 
     headers = ["model_id", "gate_events", "covered", "coverage", "undetermined", "trades", "total_pnl", "pnl_per_covered_event",
-               "hit_rate", "total_pnl_mid", "pnl_per_covered_event_mid"]
+               "hit_rate", "total_pnl_harsh", "pnl_per_covered_event_harsh"]
     rows = []
     for label in labels:
         mine = det[det["model_id"] == label]
         covered = int(mine["event_id"].nunique())
         und = set(g.loc[(g["model_id"] == label) & (g["status"] == "undetermined"), "event_id"]) - set(mine["event_id"])
         taken = mine[mine["status"] == "taken"]
-        total = _total(pnl["primary"], label)
+        total = _total(pnl[headline], label)
         hit = float((taken["pnl_dollars"] > 0).mean()) if len(taken) else None
         row = [label, len(in_e), covered, covered / len(in_e) if in_e else None, len(und), len(taken),
                total, total / covered if covered else None, hit]
-        if has_mid:
-            total_mid = _total(pnl["mid"], label)
-            row += [total_mid, total_mid / covered if covered else None]
+        if has_harsh:
+            total_harsh = _total(pnl["harsh"], label)
+            row += [total_harsh, total_harsh / covered if covered else None]
         else:
             row += [None, None]
         rows.append(row)

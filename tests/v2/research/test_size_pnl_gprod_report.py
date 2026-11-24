@@ -121,7 +121,7 @@ def test_coverage_table_counts_and_pnl_by_hand():
 def test_contrast_uses_the_covered_subset_and_hand_mean():
     over = {("m0", e): ("taken", 6.0, 6.0) for e in EVENTS[:6]}
     over.update({("m0", "E7"): ("undetermined", 0.0, 0.0), ("m0", "E8"): ("undetermined", 0.0, 0.0)})
-    row = _find(_rows(_run(_gate(_cells(over)))[1]), "M0", "M0-H-sq", "primary")
+    row = _find(_rows(_run(_gate(_cells(over)))[1]), "M0", "M0-H-sq", "mid")
     assert row["status"] == "ok"
     assert row["n"] == "6"  # E7 and E8 are not in both members' determined events
     assert float(row["mean"]) == 5.0  # M0 pays 6.0 against H-sq's 1.0 on each of E1..E6
@@ -131,27 +131,39 @@ def test_mid_arm_reads_the_mid_column_and_is_dropped_without_it():
     over = {("m0", e): ("taken", 1.0, 3.0) for e in EVENTS}
     secs = _run(_gate(_cells(over)))
     rows = _rows(secs[1])
-    assert float(_find(rows, "M0", "M0-H-sq", "primary")["mean"]) == 0.0
+    assert float(_find(rows, "M0", "M0-H-sq", "harsh")["mean"]) == 0.0  # 1.0 - 1.0 on the harsh fills
     assert float(_find(rows, "M0", "M0-H-sq", "mid")["mean"]) == 2.0  # 3.0 - 1.0 on the mid marks
     m0 = {r["model_id"]: r for r in _rows(secs[0])}["M0"]
-    assert m0["total_pnl_mid"] == "24"  # 8 events x 3.0
-    assert m0["pnl_per_covered_event_mid"] == "3"
+    assert m0["total_pnl"] == "24"  # headline: 8 events x 3.0 mid
+    assert m0["pnl_per_covered_event"] == "3"
+    assert m0["total_pnl_harsh"] == "8"  # 8 events x 1.0 harsh
+    assert m0["pnl_per_covered_event_harsh"] == "1"
 
     secs = _run(_gate(_cells(over), with_mid=False))
     assert all(r["arm"] == "primary" for r in _rows(secs[1]))
     m0 = {r["model_id"]: r for r in _rows(secs[0])}["M0"]
-    assert m0["total_pnl_mid"] == "-" and m0["pnl_per_covered_event_mid"] == "-"
+    assert m0["total_pnl"] == "8"  # no mid column: the stored primary marks are the headline
+    assert m0["total_pnl_harsh"] == "-" and m0["pnl_per_covered_event_harsh"] == "-"
+
+
+def test_gprod_headline_total_and_hit_rate_use_mid_marks():
+    over = {("m0", e): ("not_taken", 0.0, 0.0) for e in EVENTS[1:]}
+    over[("m0", "E1")] = ("taken", -10.0, 20.0)  # stored primary -10, mid +20
+    m0 = {r["model_id"]: r for r in _rows(_run(_gate(_cells(over)), accepted_gap="test")[0])}["M0"]
+    assert m0["total_pnl"] == "20"
+    assert m0["hit_rate"] == "1"
+    assert m0["total_pnl_harsh"] == "-10"
 
 
 def test_pair_with_a_model_outside_the_run_is_excluded():
     outer = set(LABEL_OF) - {"nlog"}
-    row = _find(_rows(_run(_gate(_cells()), outer=outer)[1]), "H2", "N", "primary")
+    row = _find(_rows(_run(_gate(_cells()), outer=outer)[1]), "H2", "N", "mid")
     assert row["status"] == "not_testable: pair_member_excluded"
 
 
 def test_single_quarter_is_not_testable():
     quarter = {e: "2025Q1" for e in EVENTS}
-    row = _find(_rows(_run(_gate(_cells()), quarter=quarter)[1]), "H2", "H", "primary")
+    row = _find(_rows(_run(_gate(_cells()), quarter=quarter)[1]), "H2", "H", "mid")
     assert row["status"] == "not_testable: too_few_quarters_or_tickers"
 
 
@@ -179,7 +191,7 @@ def test_an_event_absent_from_quarter_of_does_not_raise():
     secs = gprod_report.sections(gate, gate, label_of=LABEL_OF, role_model=ROLE_MODEL, roster=ROSTER,
                                  outer_models=set(LABEL_OF), quarter_of=QUARTER, tick={**TICK, "E9": "BBB"},
                                  stored_gate=STORED, accepted_gap=None, ladder=None)
-    row = _find(_rows(secs[1]), "H2", "H", "primary")
+    row = _find(_rows(secs[1]), "H2", "H", "mid")
     assert row["status"] == "ok"  # a contrast summary, not too_few_quarters_or_tickers or an exception
     assert row["n"] == "9"  # E1..E8 plus E9, where both members are determined
 
