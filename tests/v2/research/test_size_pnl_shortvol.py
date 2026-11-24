@@ -690,6 +690,9 @@ def test_penny_quote_publishes_a_float_lot_count_that_round_trips(tmp_path):
     scored = sv.score(chunk, events_for("A"), taken(chunk, "A"), "CND-PS", 0.5)
     row = scored.iloc[0]
     assert 0 < row["entry_cost"] < 1e-6
+    expected = float(math.floor(CAPITAL_PER_TRADE / (row["entry_cost"] * 100)))
+    assert row["lots"] == expected
+    assert row["lots"] == pytest.approx(CAPITAL_PER_TRADE / (5.204170427930421e-18 * 100), rel=1e-9)
     assert isinstance(row["lots"], float) and row["lots"] > 2 ** 63
     path = tmp_path / "x.parquet"
     scored.to_parquet(path)
