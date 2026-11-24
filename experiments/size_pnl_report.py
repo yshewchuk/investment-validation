@@ -267,7 +267,8 @@ def t10_verdicts(hypotheses):
             for name, (sign, pairs) in hypotheses.items()]
     note = (f"The {CLEAR_SHARE:.0%} and {DIRECTIONAL_SHARE:.0%} quarter shares are the author's "
             "judgement calls, not derived. Categories use signs and interval exclusion only "
-            "(consistency), never a P&L magnitude; results do not change any SIZE winner.")
+            "(consistency), never a P&L magnitude; results do not change any SIZE winner."
+            f" Every verdict here is a {POST_HOC} of the pre-registered one; the original text is `preregistered_original` in spec.yaml.")
     return _section("T10 Verdicts", ["hypothesis", "predicted_sign", "category"], rows, note=note)
 
 
@@ -289,7 +290,13 @@ def t11_synthetic(result):
 
 AMENDMENT_6_LINE = ("Amendment 6 (post-hoc revision by the user, 2026-11-24): short vol is as-is only; the re-tuned arm, T5 "
                     "and the divisor c were removed.")
+POST_HOC = "post-hoc revision by the user, 2026-11-24"
+CHOOSER_STATEMENT = ("Production's DYN-SV chooser trades one structure per event; EXP-188 scores all seven short-vol structures "
+                     "as independent books, so book totals are not board P&L.")
+TABLE_IDS_NOTE = ("Table ids are stable: T5 (the re-tuned arm) is retired and its id is not reused, so T6-T11 keep their numbers "
+                  "(spec.yaml names them).")
 
 
 def build_report(sections):
-    return "# EXP-188 REPORT\n\n" + AMENDMENT_6_LINE + "\n\n" + "\n\n".join(sections) + "\n"
+    return ("# EXP-188 REPORT\n\n" + AMENDMENT_6_LINE + "\n\n" + CHOOSER_STATEMENT + "\n\n" + TABLE_IDS_NOTE + "\n\n"
+            + "\n\n".join(sections) + "\n")
