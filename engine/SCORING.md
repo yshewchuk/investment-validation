@@ -246,6 +246,6 @@ Stated so nobody has to rediscover them.
 Design: `guides/price_structure_index_design.md`.
 
 - `price_structure` keeps its signature and outputs bit for bit, including exception types and messages.
-- A twin module `engine/chain_index.py` provides `resolve_structure`, `price_resolution` and `price_structure_indexed`, bit-identical to `price_structure`. `engine/structures.py` and `engine/fills.py` are not modified and nothing in the v14 closure imports the twin.
-- `ChainSnapshot.rows` is immutable once priced through the twin.
+- Planned, not yet implemented: a twin module `engine/chain_index.py` will provide `resolve_structure`, `price_resolution` and `price_structure_indexed`, bit-identical to `price_structure`. `engine/structures.py` and `engine/fills.py` stay unmodified and nothing in the v14 closure may import the twin.
+- Planned: `ChainSnapshot.rows` must be immutable once priced through the twin.
 - Retirement trigger: the v14-bound experiments end; then `price_structure` wraps the twin.
