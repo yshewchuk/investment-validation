@@ -47,14 +47,13 @@ def _scene():
     cur = events_for(*CUR, date="2024-06-10")
     sessions = {e: (pd.Timestamp("2024-05-15"), pd.Timestamp("2024-05-25")) for e in PRIOR}
     sessions.update({e: (pd.Timestamp("2024-06-11"), pd.Timestamp("2024-06-21")) for e in CUR})
-    sims = sv.simulate(chunk, pd.concat([prior, cur], ignore_index=True), POOL, draws=DRAW)
-    return chunk, prior, cur, sessions, sims
+    return chunk, prior, cur, sessions
 
 
 def _run(sweep, scene):
-    chunk, prior, cur, sessions, sims = scene
-    sweep.add_month(chunk, prior, POOL, output=False, sessions=sessions, draws=DRAW, sims=sims)
-    sweep.add_month(chunk, cur, POOL, output=True, sessions=sessions, draws=DRAW, sims=sims)
+    chunk, prior, cur, sessions = scene
+    sweep.add_month(chunk, prior, POOL, output=False, sessions=sessions, draws=DRAW)
+    sweep.add_month(chunk, cur, POOL, output=True, sessions=sessions, draws=DRAW)
     return sweep
 
 
