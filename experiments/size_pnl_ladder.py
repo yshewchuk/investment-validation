@@ -34,7 +34,7 @@ _PLAN_COLS = ("event_id", "ticker", "event_date", "session", "entry_date", "exit
 _DATE_COLS = ("event_date", "entry_date", "exit_date")
 _SESSIONS = ("AMC", "BMO")
 _CODE = {"P": 0, "C": 1}
-_SELECTOR = ExpirySelector(kind="first_post_event")
+SELECTOR = ExpirySelector(kind="first_post_event")
 _SCALARS = {"event_id": object, "expiry": "datetime64[ns]", "spot_entry": np.float64,
             "spot_exit": np.float64, "dte_entry": np.int32, "dte_exit": np.int32}
 _FLATS = {"right": np.int8, "strike": np.float64, "bid_e": np.float64, "ask_e": np.float64,
@@ -240,7 +240,7 @@ def ladder_chunks(admitted, plan, load_index, *, expiry_selector=None):
                         entry_date=pd.to_datetime(plan["entry_date"]),
                         exit_date=pd.to_datetime(plan["exit_date"]))
     frame = frame.assign(quarter=frame["event_date"].dt.to_period("Q").astype(str))
-    yield from _quarters(frame, load_index, expiry_selector or _SELECTOR)
+    yield from _quarters(frame, load_index, expiry_selector or SELECTOR)
 
 
 def default_load_index(repository, snapshot):

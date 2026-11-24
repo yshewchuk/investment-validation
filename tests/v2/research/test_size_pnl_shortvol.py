@@ -10,9 +10,9 @@ from engine.entry_rules import MAX_REL_SPREAD, MCAP_FLOOR
 from engine.fills import FillModel
 from engine.forecast_sizing import FORECAST_SIZED, forecast_params
 from engine.pnl_sim import expected_pnl
-from engine.portfolio import CONTRACT_MULTIPLIER
+from engine.portfolio import CAPITAL_PER_TRADE, CONTRACT_MULTIPLIER
 from engine.score import _mean_relative_spread
-from engine.structures import CALL, PUT, STRUCTURES, ChainSnapshot, price_structure
+from engine.structures import BUY, CALL, PUT, STRUCTURES, ChainSnapshot, ExpirySelector, price_structure
 from experiments import size_pnl_ladder as lad
 from experiments import size_pnl_shortvol as sv
 from experiments.size_pnl_pool import build_pool
@@ -166,6 +166,30 @@ def test_score_refuses_a_drifted_factory(monkeypatch):
     assert caught.value.details["reason"] == "factory_default_mismatch"
 
 
+@pytest.mark.parametrize("off", [
+    ExpirySelector(kind="first_post_event", max_dte=30),
+    ExpirySelector(kind="nearest_dte", target_dte=30),
+])
+@pytest.mark.parametrize("index", range(len(STRUCTURES["TWIN-P"]().legs)))
+def test_pinned_refuses_a_leg_expiry_off_the_ladder_selector(monkeypatch, index, off):
+    # Only leg ``index`` is moved off the ladder's selector: that one leg alone is refused, and the refusal names it.
+    real = STRUCTURES["TWIN-P"]
+
+    def patched():
+        spec = real()
+        legs = list(spec.legs)
+        legs[index] = dataclasses.replace(legs[index], expiry=off)
+        return dataclasses.replace(spec, legs=tuple(legs))
+
+    monkeypatch.setitem(STRUCTURES, "TWIN-P", patched)
+    with pytest.raises(sv.Refusal) as caught:
+        sv.pinned("TWIN-P")
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.details["reason"] == "factory_default_mismatch"
+    assert caught.value.details["structure"] == "TWIN-P"
+    assert caught.value.details["field"] == real().legs[index].name
+
+
 @pytest.mark.parametrize("index", [0, 1])
 def test_pinned_refuses_any_call_leg(monkeypatch, index):
     # Index 0 is the short anchor leg (side SELL) and index 1 a long wing: each refuses on its own.
@@ -239,10 +263,30 @@ def test_missing_mirror_strike_is_unresolved():
     assert sv.resolve(chunk, 0, "TWIN-P", PRED) == (None, "structure_unresolved")
 
 
-def test_negative_floor_refuses(monkeypatch):
+def test_flipped_condor_resolves_without_a_floor_drop(monkeypatch):
+    # The EXP-133 zero floor is gone: a short-the-wings condor resolves like any other.
     real = STRUCTURES["CND-PS"]
     monkeypatch.setitem(STRUCTURES, "CND-PS", lambda **kw: flipped(real(**kw)))
-    assert sv.resolve(chunk_of(("A", {})), 0, "CND-PS", PRED) == (None, "negative_floor")
+    legs, reason = sv.resolve(chunk_of(("A", {})), 0, "CND-PS", PRED)
+    assert reason is None and len(legs) > 0
+    # Pin the flipped orientation: resolved (side, qty) equals the flipped spec's, for the legs with qty > 0.
+    want = [(leg.side, leg.qty) for leg in flipped(real()).legs if leg.qty > 0]
+    got = [(leg["side"], leg["qty"]) for leg in legs if leg["qty"] > 0]
+    assert got == want and len(got) > 0
+
+
+def test_flipped_condor_is_scored_with_a_hand_oracle(monkeypatch):
+    # Flipped CND-PS SELLS 94 and 106 and BUYS 97 and 103 at entry. At alpha 0.5 (mid) the chunk's mids give
+    # cost = 2*1.09 - 2*1.36 = -0.54 a share: not a debit, so the row is undetermined as entry_not_debit, not scored.
+    real = STRUCTURES["CND-PS"]
+    monkeypatch.setitem(STRUCTURES, "CND-PS", lambda **kw: flipped(real(**kw)))
+    chunk = chunk_of(("A", {}))
+    grid = np.arange(80.0, 121.0)
+    means = 0.001 * (grid - 80.0) ** 2
+    out = sv.score_events(chunk, events_for("A"), {"A": (grid, means)}, "CND-PS").iloc[0]
+    assert out["entry_cost"] == pytest.approx(2 * 1.09 - 2 * 1.36)  # -0.54
+    assert out["status"] == "undetermined" and out["reason"] == "entry_not_debit"
+    assert math.isnan(out["exp_pnl_sim"])
 
 
 def test_unflipped_condor_has_a_floor():
@@ -303,20 +347,66 @@ def test_score_events_reasons(pool):
     nan_leg = chunk_of(("A", {}), entry=lambda k: (NAN, NAN) if k == 94 else quote(k))
     assert run(nan_leg, events_for("A"), pool).loc[0, "reason"] == "entry_quote_unusable"
     flat = chunk_of(("A", {}), entry=lambda k: (1.0, 2.0))  # buys and sells cancel to exactly 0
-    assert run(flat, events_for("A"), pool).loc[0, "reason"] == "entry_not_debit"
+    out = run(flat, events_for("A"), pool).iloc[0]
+    assert out["reason"] == "entry_not_debit" and out["status"] == "undetermined" and math.isnan(out["exp_pnl_sim"])
 
 
-def test_debit_of_a_nanodollar_is_not_a_debit(pool):
-    # Mids are 1.5 everywhere except the BUY at 94 (mid 1.5 + 1e-9): the entry debit is 1e-9 a share, under MIN_DEBIT.
+def test_score_events_negative_cost_is_not_a_debit(pool):
+    # Sells (97, 103) mid 2.5 each exceed buys (94, 106) mid 1.5 each: the entry cost is -2.0 a share.
+    neg = chunk_of(("A", {}), entry=lambda k: (2.0, 3.0) if k in (97, 103) else (1.0, 2.0))
+    out = run(neg, events_for("A"), pool).iloc[0]
+    assert out["entry_cost"] == pytest.approx(-2.0)
+    assert out["reason"] == "entry_not_debit" and out["status"] == "undetermined" and math.isnan(out["exp_pnl_sim"])
+
+
+def test_debit_of_a_nanodollar_is_simulated():
+    # Mids are 1.5 everywhere except the BUY at 94 (mid 1.5 + 1e-9): the entry debit is 1e-9 a share, and any positive debit is simulated.
     thin = chunk_of(("A", {}), entry=lambda k: (1.0, 2.0 + 2e-9) if k == 94 else (1.0, 2.0))
-    out = run(thin, events_for("A"), pool).iloc[0]
-    assert out["entry_cost"] == pytest.approx(1e-9, abs=1e-12) and out["reason"] == "entry_not_debit"
+    # Hand-supplied simulation on the chunk's strike grid 80..120. A quadratic is used rather than a line: a line is
+    # symmetric about the condor's centre (100), so the BUY and SELL terms would cancel and the oracle would be -1 for any sign.
+    grid = np.arange(80.0, 121.0)
+    means = 0.001 * (grid - 80.0) ** 2
+    sims = {"A": (grid, means)}
+    out = sv.score_events(thin, events_for("A"), sims, "CND-PS").iloc[0]
+    assert out["status"] == "scored" and math.isfinite(out["exp_pnl_sim"]) and pd.isna(out["reason"])
+    # Independent oracle, by hand from the literals. CND-PS traded legs, one contract each (as in the cost assertion
+    # 2*1.36 - 2*1.09): BUY 94 and 106, SELL 97 and 103. A BUY leg closes at +mean, a SELL leg at -mean.
+    def mean_at(k):
+        return 0.001 * (k - 80.0) ** 2
+    value = mean_at(94) + mean_at(106) - mean_at(97) - mean_at(103)  # 0.196 + 0.676 - 0.289 - 0.529 = 0.054
+    cost = 1e-9
+    assert out["entry_cost"] == pytest.approx(cost, abs=1e-12)
+    assert out["exp_pnl_sim"] == pytest.approx((value - cost) / cost, rel=1e-3)
 
 
-def test_score_refuses_a_nanodollar_debit():
+def test_score_accepts_a_nanodollar_debit():
     thin = chunk_of(("A", {}), entry=lambda k: (1.0, 2.0 + 2e-9) if k == 94 else (1.0, 2.0))
-    with pytest.raises(ValueError, match="entry debit below"):
-        sv.score(thin, events_for("A"), taken(thin, "A"), "CND-PS", 0.5)
+    scored = sv.score(thin, events_for("A"), taken(thin, "A"), "CND-PS", 0.5)
+    assert len(scored) == 1 and scored.iloc[0]["entry_cost"] == pytest.approx(1e-9, abs=1e-12)
+    row = scored.iloc[0]
+    # Exit quotes default to locked at 1.0 on rung 1 (put_legs), so every leg marks at 1.0 under any alpha.
+    # One contract each: BUY 94 and 106 at +1.0 each, SELL 97 and 103 at -1.0 each, so exit = 1 + 1 - 1 - 1 = 0.0.
+    assert row["rung"] == "rung1"
+    assert row["exit_value"] == pytest.approx(0.0, abs=1e-9)
+    assert row["pnl_per_share"] < 0
+    assert row["pnl_per_share"] == pytest.approx(-1e-9, rel=1e-3)  # exit 0.0 less the 1e-9 debit
+    # Lots from the capital rule by hand, on the row's own entry cost (about 1e-9, so the count is ~1e11 and float
+    # noise in the cost matters: use the cost the row carries, not the literal).
+    assert row["lots"] == math.floor(CAPITAL_PER_TRADE / (row["entry_cost"] * 100))
+
+
+@pytest.mark.parametrize("entry, cost", [
+    # Sells (97, 103) mid 2.5 exceed buys (94, 106) mid 1.5: the entry cost is -2.0 a share.
+    (lambda k: (2.0, 3.0) if k in (97, 103) else (1.0, 2.0), -2.0),
+    # Flat chunk: every mid is 1.5, so buys and sells cancel to exactly 0, the zero-cost boundary.
+    (lambda k: (1.0, 2.0), 0.0),
+])
+def test_score_refuses_a_non_debit_entry(entry, cost):
+    neg = chunk_of(("A", {}), entry=entry)
+    decisions = taken(neg, "A")  # priced at alpha 0.5 from the chunk, so the bound check passes and the debit check fires
+    assert decisions.loc[0, "entry_cost"] == pytest.approx(cost) and decisions.loc[0, "alpha"] == 0.5
+    with pytest.raises(ValueError, match="not a debit"):
+        sv.score(neg, events_for("A"), decisions, "CND-PS", 0.5)
 
 
 def test_score_events_refuses_bad_alpha(pool):
@@ -593,5 +683,28 @@ def test_crossed_entry_quote_on_a_traded_strike_is_unusable_not_raised(pool):
     chunk = chunk_of(("A", {}), entry=lambda k: (2.0, 1.0) if k == 94 else quote(k))
     assert sv.resolve_priced(chunk, 0, "CND-PS", PRED, FillModel(0.5)) == (None, None, "entry_quote_unusable")
     assert run(chunk, events_for("A"), pool).loc[0, "reason"] == "entry_quote_unusable"
+
+
+def test_cancellation_residue_is_a_zero_cost_not_a_debit(pool):
+    # The raw cost is the float cancellation residue of 0.03 + 0.03 - 0.01 - 0.05 (about 5.2e-18, not a market price).
+    # It is within ZERO_RESIDUE of the gross premium, so it is an exact zero: undetermined, never simulated.
+    premium = {94: 0.01, 97: 0.03, 103: 0.03, 106: 0.05}
+    chunk, events = chunk_of(("A", {}), entry=lambda k: (premium.get(k, 1.0),) * 2), events_for("A")
+    out = run(chunk, events, pool).iloc[0]
+    assert out["entry_cost"] == 0.0
+    assert out["status"] == "undetermined" and out["reason"] == "entry_not_debit"
+    scored_decisions = taken(chunk, "A")
+    with pytest.raises(ValueError, match="not a debit"):
+        sv.score(chunk, events, scored_decisions.assign(entry_cost=0.0), "CND-PS", 0.5)
+
+
+def test_debit_of_a_nanodollar_against_penny_premiums_is_not_zeroed():
+    # The same penny premiums plus a real 1e-9 debit on the 94 buy: 1e-9 is far above ZERO_RESIDUE * gross (~1e-13),
+    # so the cost is kept as a debit and not zeroed.
+    premium = {94: 0.01, 97: 0.03, 103: 0.03, 106: 0.05}
+    chunk = chunk_of(("A", {}), entry=lambda k: (premium.get(k, 1.0) + (1e-9 if k == 94 else 0.0),) * 2)
+    priced, _legs, _ = sv.resolve_priced(chunk, 0, "CND-PS", PRED, FillModel(0.5))
+    cost = sv.entry(priced)[0]
+    assert cost == pytest.approx(1e-9, abs=1e-12) and cost > 0
 
 

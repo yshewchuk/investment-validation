@@ -13,10 +13,11 @@ STOP_IDS = ("X1", "X2", "X6", "X7")  # spec.yaml:129 and design section 5; I1 is
 SHORT, STRADDLE = "short_vol", "straddle"
 SHIFTS, RATIO_S = (0.1, -0.1), 0.6
 TAIL = 100 * (1 - contrast.INTERVAL) / 2
-# Model-dependent geometry/economics outcomes (design sections 4-5): width declined, ladder too coarse, negative floor, entry not a debit.
+# Model-dependent geometry outcomes (design sections 4-5): width declined, ladder too coarse.
 # On a short-vol row these are non-trades: P&L 0 and the event stays in E; on a straddle row the event leaves E.
-# Missing quotes or strikes (entry_quote_unusable, structure_unresolved) are missing facts, not non-trades: they stay undetermined and drop the event.
-NON_TRADE_REASONS = frozenset({"width_declined", "ladder_too_coarse", "negative_floor", "entry_not_debit"})
+# Missing quotes or strikes (entry_quote_unusable, structure_unresolved) and an entry cost that is not a debit (entry_not_debit)
+# are missing facts, not non-trades: they stay undetermined and drop the event.
+NON_TRADE_REASONS = frozenset({"width_declined", "ladder_too_coarse"})
 
 
 def _wide(g):
@@ -103,9 +104,10 @@ def _safe(rows):
 
 def population(decisions):
     """The evaluated population E (design sections 4-5): the events with no undetermined row under any (model, unit), except short-vol non-trades.
-    Only a short-vol row (book == SHORT) whose reason is in NON_TRADE_REASONS is exempt: model-dependent geometry/economics
-    outcomes (width declined, ladder too coarse, negative floor, entry not a debit) are non-trades and stay in E with P&L 0.
-    Missing quotes or strikes (entry_quote_unusable, structure_unresolved) are undetermined and drop the event under any book.
+    Only a short-vol row (book == SHORT) whose reason is in NON_TRADE_REASONS is exempt: model-dependent geometry
+    outcomes (width declined, ladder too coarse) are non-trades and stay in E with P&L 0.
+    Missing quotes or strikes (entry_quote_unusable, structure_unresolved) and an entry cost that is not a debit (entry_not_debit)
+    are undetermined and drop the event under any book.
     Every other undetermined row drops its event, including a straddle row with a non-trade reason (missing fact = undetermined,
     design section 4 (a missing fact is undetermined)), and burn-in or data-missing short-vol rows (unsimulable, thin_history, missing_spread, missing_mcap).
     A missing "book" or "reason" column exempts nothing."""

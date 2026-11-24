@@ -2,15 +2,17 @@
 for (the scoring needs the full simulator); the receipts, refusals, evaluation, publish and T11 are the real code."""
 import copy
 import json
+from functools import partial
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from engine.pnl_sim import trailing_cutoff
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import OpsError
 from experiments import size_pnl_decisions as decisions, size_pnl_driver as driver, size_pnl_readers as readers
-from experiments import size_pnl_synthetic as synthetic, size_pnl_receipts as tuning
+from experiments import size_pnl_pool, size_pnl_synthetic as synthetic, size_pnl_receipts as tuning
 from experiments.size_pnl_shortvol import Refusal
 
 CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
@@ -57,6 +59,13 @@ def use_chunks(monkeypatch, pairs):
     def fake(admitted, plan, load_index):
         yield from pairs
     monkeypatch.setattr(driver.ladder, "ladder_chunks", fake)
+
+
+def min_window_one(monkeypatch):
+    """trailing_cutoff with min_window=1 in both modules that import it by name (the short-vol decide and the pool's thin_window)."""
+    fast = partial(trailing_cutoff, min_window=1)
+    monkeypatch.setattr(driver.shortvol, "trailing_cutoff", fast)
+    monkeypatch.setattr(size_pnl_pool, "trailing_cutoff", fast)
 
 
 def snapshot(out):
@@ -511,12 +520,12 @@ def _straddle_decide(events, edges, rule, chunk_):
 
 def test_the_real_scoring_loop_drops_an_event_unscoreable_for_one_model_from_every_model(tmp_path, monkeypatch):
     """No _synthetic_scores stub: the real month loop runs. The shrinkage model has no E1 (its first quarter), so E1 leaves the
-    common population; one non-shrinkage model has no simulation for E3, so E3 leaves for every model. MIN_WINDOW is 1 here, since
-    the production 100 leaves every short-vol row thin on six events. Then E2 (no prior history) and E6 (no prior row in its six-month
+    common population; one non-shrinkage model has no simulation for E3, so E3 leaves for every model. trailing_cutoff's min_window is 1
+    here, since the production 100 leaves every short-vol row thin on six events. Then E2 (no prior history) and E6 (no prior row in its six-month
     window) are undetermined under every short-vol unit: published as evidence, but outside E. E4 and E5 are determined and form E.
     Predictions are 5.0 except E3 (104.0) and the realised abs_move is 4.0, so on E = {E4, E5} rmse = mae = 1.0.
     Each straddle P&L is 10 x its event number (E2 20, E4 40, E5 50, E6 60)."""
-    monkeypatch.setattr(driver.shortvol, "MIN_WINDOW", 1)
+    min_window_one(monkeypatch)
     def generate(admitted, labels, production, arm):
         entries = fake_entries(labels, arm)
         shrink = {mid for mid in entries if entries[mid]["family"] == "shrinkage"}
@@ -605,7 +614,7 @@ def test_reads_take_only_the_planned_events_and_an_unplanned_admitted_event_is_n
 def test_the_real_loop_drops_a_planned_event_one_model_lacks_from_every_model(monkeypatch):
     """_pool_tables is replaced so model m2's table has no E3 while m1's does. The real month loop must still complete, E3 must be
     absent from every model's frames, and scoreability_dropped must count it (E3 is the only dropped id)."""
-    monkeypatch.setattr(driver.shortvol, "MIN_WINDOW", 1)
+    min_window_one(monkeypatch)
     full = pd.DataFrame({"event_date": DATES3, "pred_move": 5.0, "pred_crush": -10.0}, index=pd.Index(list(EVENTS3), name="event_id"))
     short = full.drop(index=["E3"])
     ready = {mid: {"status": "ready", "family": "oracle", "params": {}, "table": full} for mid in ("m1", "m2")}
@@ -635,7 +644,7 @@ def test_the_real_loop_counts_width_declined_rows_per_model_and_unit(monkeypatch
     width_declined; for NAMES[1] E5 is declined with reason other_reason, which must not be counted. Hand count: m1 sees E1..E6 (6
     candidates), m2 sees E1, E2, E4, E5, E6 (5 candidates, E3 absent). So NAMES[0] is [2, 6] for m1 and [2, 5] for m2, NAMES[1] and
     every other unit is [0, 6] for m1 and [0, 5] for m2."""
-    monkeypatch.setattr(driver.shortvol, "MIN_WINDOW", 1)
+    min_window_one(monkeypatch)
     full = pd.DataFrame({"event_date": DATES3, "pred_move": 5.0, "pred_crush": -10.0}, index=pd.Index(list(EVENTS3), name="event_id"))
     short = full.drop(index=["E3"])
     ready = {mid: {"status": "ready", "family": "oracle", "params": {}, "table": full} for mid in ("m1", "m2")}
@@ -677,7 +686,7 @@ def test_the_real_loop_counts_width_declined_rows_per_model_and_unit(monkeypatch
 
 def _real_month_loop(monkeypatch):
     """The real synthetic month loop on the six inner events, with the shortvol and straddle scorers stood in for as in the tests above."""
-    monkeypatch.setattr(driver.shortvol, "MIN_WINDOW", 1)
+    min_window_one(monkeypatch)
     monkeypatch.setattr(synthetic, "generate", lambda admitted, labels, production, arm: fake_entries(labels, arm))
     monkeypatch.setattr(driver, "build_pool", lambda table, labels: table)
     monkeypatch.setattr(driver.shortvol, "simulate", lambda chunk_, events, pool, **kw: {e: "sim" for e in events["event_id"]})
