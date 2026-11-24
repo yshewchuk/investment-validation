@@ -44,7 +44,7 @@ So any byte change to `engine/structures.py` or `engine/fills.py`, or a new modu
 
 There is no TTL and no explicit invalidate API: a changed chain is a new snapshot.
 
-**Eligibility, then fallback.** The index is used only when the snapshot is in the proven shape. Ineligible snapshots run the legacy code (S5: kept as `_price_structure_legacy`; before S5, the indexed entry point calls `engine.structures.price_structure`). The decision is made before any leg runs, so paths never mix inside a call. Ineligible: empty rows; `strike` not float64 or int64, or non-finite; `expiry` not tz-naive datetime64, or any NaT; `dte` with NaN, or an expiry with several distinct `dte` (legacy quicksort tie order is unspecified); non-numeric `bid`, `ask` or `delta`; spot not a finite float; for `first_post_event`, an `event_date` that is not a tz-naive `pd.Timestamp`; for a pin or `fixed` selector, a non-tz-naive expiry. Validated ORATS chains are eligible; the fallback means exactness never depends on that.
+**Eligibility, then fallback.** The index is used only when the snapshot is in the proven shape. Ineligible snapshots run the legacy code (S5: kept as `_price_structure_legacy`; before S5, the indexed entry point calls `engine.structures.price_structure`). The decision is made before any leg runs, so paths never mix inside a call. Ineligible: empty rows; duplicate `rows.index` labels (legacy `loc` then returns a Series and raises `TypeError`); an expiry outside the ns range (1678–2262); `strike` not float64 or int64, or non-finite; `expiry` not tz-naive datetime64, or any NaT; `dte` with NaN, or an expiry with several distinct `dte` (legacy quicksort tie order is unspecified); non-numeric `bid`, `ask` or `delta`; spot not a finite float; for `first_post_event`, an `event_date` that is not a tz-naive `pd.Timestamp`; for a pin or `fixed` selector, a non-tz-naive expiry. Validated ORATS chains are eligible; the fallback means exactness never depends on that.
 
 ## 2. Resolution and how `pin=` and `closing` map onto it
 
@@ -111,6 +111,7 @@ Each case asserts equal `StructurePrice.to_dict()` and field types, or the same 
 - Every refusal in section 4, each expiry-rule and strike-selector error, a calls-only chain for a put leg (all-rights fallback), crossed, negative and NaN quotes, a `ValueError` on leg 1 with a `StructureError` on leg 2, missing spot, missing column.
 - `isclose` edges: a target just inside and just outside tolerance, two listed strikes inside one tolerance, duplicate rows for one contract, equidistant strikes in both row orders.
 - Ineligible shapes (NaN or float32 strike, tz-aware expiry, two `dte` for one expiry, empty chain) match the oracle via the fallback.
+- `nearest_dte` ties in both orders, and `price_resolution` refusing a different snapshot (`ValueError`).
 - Seeded property test: 200 random chains per structure; results equal or both refuse identically.
 - Call-order independence, verify mode (an in-place `rows` edit raises `ChainSnapshotMutated`), and a planted-defect control (a deliberately wrong tie rule must fail the battery).
 - S2 to S4: the diff of `engine/structures.py` and `engine/fills.py` against `origin/main` is empty.
@@ -127,7 +128,7 @@ For each prediction row with `strategy`, `structure_params`, a quote date and re
 
 ## 9. Slice split list (about 150 code lines each; test code excluded)
 
-Estimates per slice (code / test / doc lines): S1 0 / 350 / 0; S2 150 / 250 / 10; S3 150 / 200 / 10; S3b 250 split into two PRs of about 125 each / 120 / 15; S4 150 / 200 / 20 (updates `engine/SCORING.md`); S5 20 / 60 / 5.
+Estimates per slice (code / test / doc lines): S1 0 / 350 / 0; S2 150 / 250 / 10; S3 150 / 200 / 10; S3b-1 (benchmark) 120 / 50 / 5; S3b-2 (regression tool) 130 / 70 / 10; S4 150 / 200 / 20 (updates `engine/SCORING.md`); S5 20 / 60 / 5.
 
 | Slice | Content | Binding |
 | --- | --- | --- |

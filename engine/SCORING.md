@@ -247,4 +247,4 @@ Design: `guides/price_structure_index_design.md`.
 
 - `price_structure` keeps its signature and outputs bit for bit, including exception types and messages.
 - `ChainSnapshot.rows` is immutable once priced.
-- `price_structure` becomes the composition of `resolve_structure` and `price_resolution`.
+- `resolve_structure` and `price_resolution` compose to `price_structure`'s result; callers adopt them directly, or `price_structure` delegates (optional slice S5).
