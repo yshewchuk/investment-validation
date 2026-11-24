@@ -14,7 +14,6 @@ from experiments import size_pnl_gate_fold as fold, size_pnl_gprod as gp, size_p
 
 FEATURES = [f"x{i}" for i in range(45)] + list(gp.MODEL_COLS)
 START = pd.Timestamp("2025-01-01")
-EMPTY = pd.DataFrame({"event_date": pd.Series([], dtype=object), "edge": pd.Series([], dtype=float)})
 
 
 def _refusal(exc):
@@ -445,13 +444,11 @@ def test_band_matches_the_flat_pool_formula():
 def test_straddle_decide_gate_contract():
     events = pd.DataFrame([ev("hi", 3.0)])
     with pytest.raises(ValueError, match="needs a gate callable"):
-        sd.decide(events, EMPTY, "G_PROD", good("hi"))
-    with pytest.raises(ValueError, match="unknown rule"):
-        sd.decide(events, EMPTY, "R_L", good("hi"), gate=lambda e: ("taken", None))
-    assert sd.RULES == ("R_L", "R_L2") and "G_PROD" not in sd.RULES
+        sd.decide(events, good("hi"), None)
+    assert sd.GATE_RULE == "G_PROD"
 
 
 def test_missing_forecast_is_undetermined_before_the_gate_is_asked():
-    out = sd.decide(pd.DataFrame([ev("u", 1.0, implied=float("nan"))]), EMPTY, "G_PROD", good("u"),
+    out = sd.decide(pd.DataFrame([ev("u", 1.0, implied=float("nan"))]), good("u"),
                     gate=lambda e: pytest.fail("gate must not be called"))
     assert out.loc[0, "status"] == "undetermined" and out.loc[0, "reason"] == "missing_forecast"

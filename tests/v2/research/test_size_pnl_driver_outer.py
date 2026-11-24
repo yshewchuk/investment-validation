@@ -23,6 +23,7 @@ from tests.v2.research.test_size_pnl_driver import (  # noqa: F401  (bounded, st
 
 FRONT = ["model_id", "book", "arm_or_rule", "structure", "event_id", "event_date", "status", "reason"]
 EMPTY_MARKS = ["event_id", "entry_cost", "exit_value", "rung", "lots", "pnl_per_share", "pnl_dollars"]
+STUB_GATE = gp.Gate(None, ("f",), 0.05, pd.DataFrame({"f": [0.0]}, index=["x"]), "a" * 64, "b" * 64)  # the G_PROD book is built only with a gate bound
 
 
 def use_chunks(monkeypatch, pairs, seen=None):
@@ -58,22 +59,24 @@ def _argv_for(tmp_path, stage, *extra):
 
 @pytest.fixture
 def outer_stubs(stubs, monkeypatch):
-    """Scorers and straddle stubs for the outer stage: every row is scored and none is taken. The straddle decisions
-    append their ids to the shared ``stubs`` log, so the tests can order decisions against label reads."""
+    """Scorers and G_PROD stubs for the outer stage: every row is scored and none is taken. The G_PROD decider (the straddle
+    book, built only when a gate is bound) appends its ids to the shared ``stubs`` log, so the tests can order decisions against label reads."""
     def fake_scored(chunk_, events, sims, name, *, alpha=0.5):
         return pd.DataFrame({"event_id": events["event_id"].astype(str).to_numpy(), "event_date": events["event_date"].to_numpy(),
                              "structure": name, "status": "scored", "reason": "scored"})
 
-    def fake_straddle(events, history, rule, chunk_):
-        stubs.append(("decide", tuple(sorted(events["event_id"].astype(str)))))
-        return pd.DataFrame({"event_id": events["event_id"].astype(str), "event_date": events["event_date"],
-                             "edge": events["pred_abs_move"] - events["implied_move"], "cutoff": np.nan, "rel_spread": np.nan,
-                             "status": "undetermined", "reason": "thin_history"})
+    def fake_gate(gate_, table, labels, start_m):
+        def decide(events, chunk_):
+            stubs.append(("decide", tuple(sorted(events["event_id"].astype(str)))))
+            return pd.DataFrame({"event_id": events["event_id"].astype(str), "event_date": events["event_date"],
+                                 "edge": events["pred_abs_move"] - events["implied_move"], "rel_spread": np.nan,
+                                 "status": "undetermined", "reason": "thin_history"})[driver.straddle.DECISION_COLS]
+        return decide
 
     monkeypatch.setattr(driver.shortvol, "score_events", fake_scored)
     monkeypatch.setattr(driver.shortvol, "decide", lambda scored: scored.assign(cutoff=np.nan))
     monkeypatch.setattr(driver.shortvol, "score", lambda chunk_, events, decisions, name, alpha, *, drop_unquoted=False, mid_marks=False: pd.DataFrame(columns=EMPTY_MARKS))
-    monkeypatch.setattr(driver.straddle, "decide", fake_straddle)
+    monkeypatch.setattr(driver.gprod, "month_decider", fake_gate)
     monkeypatch.setattr(driver.straddle, "score", lambda chunk_, events, dec, alpha, **kw: pd.DataFrame(columns=EMPTY_MARKS))
     return stubs
 
@@ -288,19 +291,21 @@ def test_oracle_one_taken_2025_event_carries_its_literal_marks(tmp_path, outer_s
 def test_oracle_one_taken_2025_straddle_event_carries_zero_secured_and_dates(tmp_path, outer_stubs, monkeypatch):
     """Only E3 is taken on the straddle book; its scorer marks are literal. Every taken straddle row must carry
     secured_per_contract 0.0 (the account restates it as debit x 100 later) and E3's literal PLAN_FRAME entry and exit dates."""
-    def decide_e3_taken(events, history, rule, chunk_):
-        ids = events["event_id"].astype(str)
-        is_e3 = (ids == "E3").to_numpy()
-        return pd.DataFrame({"event_id": ids, "event_date": events["event_date"], "edge": events["pred_abs_move"] - events["implied_move"],
-                             "cutoff": np.nan, "rel_spread": np.nan, "status": np.where(is_e3, "taken", "undetermined"),
-                             "reason": np.where(is_e3, "taken", "thin_history")})
+    def gate_e3_taken(gate_, table, labels, start_m):
+        def decide(events, chunk_):  # the G_PROD decider: E3 is taken, every other event undetermined
+            ids = events["event_id"].astype(str)
+            is_e3 = (ids == "E3").to_numpy()
+            return pd.DataFrame({"event_id": ids, "event_date": events["event_date"], "edge": events["pred_abs_move"] - events["implied_move"],
+                                 "rel_spread": np.nan, "status": np.where(is_e3, "taken", "undetermined"),
+                                 "reason": np.where(is_e3, "taken", "thin_history")})[driver.straddle.DECISION_COLS]
+        return decide
 
     marks = {"event_id": ["E3"], "exit_value": [101.5], "rung": [2], "lots": [3], "pnl_dollars": [-42.25], "entry_cost": [10.0], "pnl_per_share": [-0.5]}
     mid_marks_values = {**marks, "exit_value": [105.0], "pnl_dollars": [-10.5]}  # the sensitivity arm: other columns as the primary
-    monkeypatch.setattr(driver.straddle, "decide", decide_e3_taken)
+    monkeypatch.setattr(driver.gprod, "month_decider", gate_e3_taken)
     monkeypatch.setattr(driver.straddle, "score", lambda chunk_, events, dec, alpha, **kw:
                         pd.DataFrame(mid_marks_values if kw.get("mid_marks") else marks))
-    _run_both(tmp_path, monkeypatch)
+    _run_both(tmp_path, monkeypatch, dataclasses.replace(sources(), gate=STUB_GATE))
     frame = pd.read_parquet(tmp_path / "decisions.parquet")
     straddle_taken = frame[(frame["book"] == "straddle") & (frame["status"] == "taken")]
     assert len(straddle_taken) > 0
@@ -540,9 +545,9 @@ def test_outer_reads_a_month_s_labels_only_after_its_rows_are_complete(tmp_path,
     driver.run(sources(), "inner", tmp_path, prereg=OK)  # writes the inputs, inner and inner_decisions receipts
     outer_stubs.clear()
     use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
-    summary = driver.run(sources(fetch=recording(outer_stubs)), "outer", tmp_path, prereg=OK)
-    # Two 2025 months, each with one row per (arm, short-vol name) and one per straddle rule.
-    assert summary["rows"] == 2 * (len(driver.shortvol.NAMES) + len(driver.straddle.RULES))
+    summary = driver.run(dataclasses.replace(sources(fetch=recording(outer_stubs)), gate=STUB_GATE), "outer", tmp_path, prereg=OK)
+    # Two 2025 months, each with one row per (arm, short-vol name) and one G_PROD row (the straddle book is G_PROD only).
+    assert summary["rows"] == 2 * (len(driver.shortvol.NAMES) + 1)
     assert (tmp_path / "decisions.parquet").exists()
     assert not list(tmp_path.glob("*.tmp"))
     for event in ("E3", "E4"):
@@ -914,8 +919,8 @@ def test_cross_month_history_oracle_through_the_driver(tmp_path, outer_stubs, mo
 
 
 def test_outer_rows_carry_literal_marks_and_forecasts(tmp_path, outer_stubs, monkeypatch):
-    """Short vol is as-is only (Amendment 6): its taken rows carry the scorer's mark (100.0 a row). Every straddle rule
-    carries literal marks; each model's rows carry that model's literal pred_move and pred_crush."""
+    """Short vol is as-is only (Amendment 6): its taken rows carry the scorer's mark (100.0 a row). The G_PROD straddle rows
+    carry literal marks; each model's rows carry that model's literal pred_move and pred_crush."""
     literals = {"prod": (5.25, -12.5), "cand": (6.75, -17.0)}  # (pred_move, pred_crush): distinct per model and per column
     marks = {"exit_value": 101.5, "rung": 2, "lots": 3, "pnl_dollars": -42.25}
 
@@ -943,9 +948,11 @@ def test_outer_rows_carry_literal_marks_and_forecasts(tmp_path, outer_stubs, mon
         return pd.DataFrame({"event_id": ids, "exit_value": marks["exit_value"], "rung": marks["rung"], "lots": marks["lots"],
                              "entry_cost": 10.0, "pnl_per_share": -0.5, "pnl_dollars": 100.0})
 
-    def taken_straddle(events, history, rule, chunk_):
-        return pd.DataFrame({"event_id": events["event_id"].astype(str).to_numpy(), "event_date": events["event_date"].to_numpy(),
-                             "edge": 0.5, "cutoff": np.nan, "rel_spread": np.nan, "status": "taken", "reason": "taken"})
+    def taken_gate(gate_, table, labels, start_m):
+        def decide(events, chunk_):  # the G_PROD decider takes every event
+            return pd.DataFrame({"event_id": events["event_id"].astype(str).to_numpy(), "event_date": events["event_date"].to_numpy(),
+                                 "edge": 0.5, "rel_spread": np.nan, "status": "taken", "reason": "taken"})[driver.straddle.DECISION_COLS]
+        return decide
 
     def straddle_marks(chunk_, events, dec, alpha, **kw):
         ids = dec["event_id"].astype(str).to_numpy()
@@ -954,10 +961,10 @@ def test_outer_rows_carry_literal_marks_and_forecasts(tmp_path, outer_stubs, mon
 
     monkeypatch.setattr(driver.shortvol, "score_events", recording_score_events)
     monkeypatch.setattr(driver.shortvol, "score", short_marks)
-    monkeypatch.setattr(driver.straddle, "decide", taken_straddle)
+    monkeypatch.setattr(driver.gprod, "month_decider", taken_gate)
     monkeypatch.setattr(driver.straddle, "score", straddle_marks)
     use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
-    driver.run(sources(), "outer", tmp_path, prereg=OK)
+    driver.run(dataclasses.replace(sources(), gate=STUB_GATE), "outer", tmp_path, prereg=OK)
 
     outer = tuning.load_receipt(tmp_path / "receipts" / "outer.json")
     assert "tuning" not in outer and "c" not in outer
@@ -969,12 +976,11 @@ def test_outer_rows_carry_literal_marks_and_forecasts(tmp_path, outer_stubs, mon
     assert len(rows) > 0
     assert np.isclose(rows["pnl_dollars"].to_numpy(dtype=float), 100.0).all()
     straddle_rows = frame[frame["book"] == "straddle"]
-    assert set(straddle_rows["arm_or_rule"]) == set(driver.straddle.RULES)
-    for rule in driver.straddle.RULES:
-        rows = straddle_rows[straddle_rows["arm_or_rule"] == rule]
-        assert len(rows) > 0
-        for col, value in marks.items():
-            assert rows[col].notna().all() and (rows[col].to_numpy(dtype=float) == value).all()
+    assert set(straddle_rows["arm_or_rule"]) == {driver.straddle.GATE_RULE}
+    rows = straddle_rows[straddle_rows["arm_or_rule"] == driver.straddle.GATE_RULE]
+    assert len(rows) > 0
+    for col, value in marks.items():
+        assert rows[col].notna().all() and (rows[col].to_numpy(dtype=float) == value).all()
     for mid, (move, crush) in literals.items():
         rows = frame[frame["model_id"] == mid]
         assert len(rows) > 0
