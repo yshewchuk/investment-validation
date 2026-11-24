@@ -46,10 +46,19 @@ def read(a0, a1):
 
 
 def section(frame):
-    """The breakeven table of the evaluated ``frame`` over its TAKEN rows, one row per (model, book, rule, calendar year)."""
-    if not set(ENDPOINT_COLS) <= set(frame.columns) or frame[ENDPOINT_COLS].isna().all().all():
+    """The breakeven table of the evaluated ``frame`` over its TAKEN rows, one row per (model, book, rule, calendar year); raises ValueError on a lone endpoint column or a non-finite taken endpoint."""
+    present = [col in frame.columns for col in ENDPOINT_COLS]
+    if not any(present):
         return NOT_TESTABLE
-    taken = frame[frame["taken"].astype(bool)].copy()
+    if not all(present):
+        raise ValueError("breakeven endpoints come as a pair: pnl_dollars_a0 and pnl_dollars_a1")
+    taken_mask = frame["taken"].astype(bool).to_numpy()
+    finite = np.isfinite(frame[ENDPOINT_COLS].to_numpy(dtype=float)).all(axis=1)
+    if (taken_mask & ~finite).any():
+        raise ValueError("a taken row has a non-finite pnl_dollars_a0 or pnl_dollars_a1")
+    if frame[ENDPOINT_COLS].isna().all().all():
+        return NOT_TESTABLE
+    taken = frame[taken_mask].copy()
     taken["year"] = pd.to_datetime(taken["event_date"]).dt.year
     keys = ["model_id", "book", "arm_or_rule", "year"]
     grouped = taken.groupby(keys)

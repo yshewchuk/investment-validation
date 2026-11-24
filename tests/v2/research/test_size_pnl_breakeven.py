@@ -72,7 +72,35 @@ def test_two_years_give_two_table_rows():
 def test_missing_endpoint_columns_give_the_not_testable_string():
     frame = _frame([("e1", "M0", "short_vol", "as_is", "2024-06-10", True, 1)])
     assert breakeven.section(frame) == NOT_TESTABLE
-    assert breakeven.section(frame.assign(pnl_dollars_a0=np.nan, pnl_dollars_a1=np.nan)) == NOT_TESTABLE
+    # An all-NaN taken row is refused, not reported as not testable.
+    with pytest.raises(ValueError, match="a taken row has a non-finite pnl_dollars_a0 or pnl_dollars_a1"):
+        breakeven.section(frame.assign(pnl_dollars_a0=np.nan, pnl_dollars_a1=np.nan))
+    # With no taken rows, all-NaN endpoints keep the not_testable string.
+    untaken = _frame([("e1", "M0", "short_vol", "as_is", "2024-06-10", False, 1)])
+    assert breakeven.section(untaken.assign(pnl_dollars_a0=np.nan, pnl_dollars_a1=np.nan)) == NOT_TESTABLE
+
+
+def test_a_lone_endpoint_column_raises():
+    frame = _frame([("e1", "M0", "short_vol", "as_is", "2024-06-10", True, 1)]).assign(pnl_dollars_a0=[-10.0])
+    with pytest.raises(ValueError, match="breakeven endpoints come as a pair: pnl_dollars_a0 and pnl_dollars_a1"):
+        breakeven.section(frame)
+
+
+def test_a_nan_taken_endpoint_pair_raises_the_gate_example():
+    # The gate's example: two taken rows, a0 = (-60, NaN), a1 = (20, 30).
+    frame = _frame([("e1", "M0", "short_vol", "as_is", "2024-06-10", True, 1),
+                    ("e2", "M0", "short_vol", "as_is", "2024-07-08", True, 1)]).assign(
+        pnl_dollars_a0=[-60.0, np.nan], pnl_dollars_a1=[20.0, 30.0])
+    with pytest.raises(ValueError, match="a taken row has a non-finite pnl_dollars_a0 or pnl_dollars_a1"):
+        breakeven.section(frame)
+
+
+def test_a_nan_endpoint_on_an_untaken_row_does_not_raise():
+    frame = _frame([("e1", "M0", "short_vol", "as_is", "2024-06-10", True, 1),
+                    ("e2", "M0", "short_vol", "as_is", "2024-07-08", False, 1)]).assign(
+        pnl_dollars_a0=[-60.0, np.nan], pnl_dollars_a1=[20.0, np.nan])
+    text = breakeven.section(frame)  # only e1 is taken: totals -60 and 20, breakeven 60 / 80 = 0.750
+    assert "| M0 | short_vol | as_is | 2024 | 1 | -60.00 | 20.00 | 0.750 |" in text
 
 
 def test_repriced_short_vol_scores_at_the_endpoint_alpha(pool):
