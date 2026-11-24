@@ -19,6 +19,7 @@ INNER = (pd.Timestamp("2023-07-01"), pd.Timestamp("2025-01-01"))
 _TAKEN = ["event_id", "event_date", "structure", "k", "entry_date", "exit_date", "entry_cost", "exit_value",
           "exit_value_mid", "pnl_dollars", "pnl_dollars_mid", "secured_per_contract"]
 RET_COLS = [f"ret_a{a:.2f}" for a in LADDER]
+_DECLINED = ["event_id", "event_date", "structure", "status", "reason", "arm"]
 
 
 def admit_k(k):
@@ -59,7 +60,7 @@ class Sweep:
     def __init__(self, ks=GRID, names=sv.NAMES, *, pricing=sv, ladder=False):
         """``pricing`` is the one seam for strike resolution: it must expose simulate, score_events, decide, score and secured with the signatures of experiments.size_pnl_shortvol."""
         self.ks, self.names = tuple(admit_k(k) for k in ks), tuple(names)
-        self.pricing, self.ladder, self.fresh = pricing, bool(ladder), []
+        self.pricing, self.ladder, self.fresh, self.fresh_declined = pricing, bool(ladder), [], []
         if not self.ks or len(set(self.ks)) != len(self.ks): raise ValueError(f"ks must be non-empty and unique: {self.ks}")
         if not self.names or len(set(self.names)) != len(self.names) or any(n not in sv.NAMES for n in self.names): raise ValueError(f"names must be non-empty, unique and in sv.NAMES: {self.names}")
         self.scored, self.taken, self.declined = {}, {}, {}
@@ -67,9 +68,10 @@ class Sweep:
     def add_month(self, chunk, events, pool, *, output, sessions, draws=DRAWS):
         """Simulate once, score every (structure, k) and E, decide on the accumulated history. ``output`` False (burn-in) only adds history.
         ``sessions`` maps event_id -> (entry_date, exit_date); a missing event leaves NaT dates and the account refuses it.
-        Returns the month's fresh taken rows (a frame with the ``_TAKEN`` columns plus ``arm``, and the ``RET_COLS`` columns when ``ladder`` is true; empty when ``output`` is False)."""
+        Returns the month's fresh taken rows only (a frame with the ``_TAKEN`` columns plus ``arm``, and the ``RET_COLS`` columns when ``ladder`` is true; empty when ``output`` is False).
+        The month's declined decisions are not returned: they are in ``declined_rows()``, which this call resets along with ``fresh``."""
         started = time.time()
-        self.fresh = []
+        self.fresh, self.fresh_declined = [], []
         sims = self.pricing.simulate(chunk, events, pool, draws=draws)
         keep = np.array([sims.get(str(e)) is not None for e in events["event_id"]], dtype=bool)  # unsimulable events are dropped, as EXP-188 does
         events = events[keep]
@@ -81,10 +83,15 @@ class Sweep:
         rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
         print(f"[width_sweep] month events={len(events)} output={output} elapsed={time.time() - started:.1f}s rss={rss:.0f}MiB",
               file=sys.stderr)
-        return pd.concat(self.fresh, ignore_index=True) if self.fresh else pd.DataFrame(columns=_TAKEN + ["arm"])
+        return pd.concat(self.fresh, ignore_index=True) if self.fresh else pd.DataFrame(columns=_TAKEN + (RET_COLS if self.ladder else []) + ["arm"])
+
+    def declined_rows(self):
+        """The declined (not taken) decisions of the last ``add_month``: event_id, event_date, structure, status, reason and arm (a str).
+        Empty with those six columns when none, in particular after a burn-in month (``output`` False)."""
+        return pd.concat(self.fresh_declined, ignore_index=True) if self.fresh_declined else pd.DataFrame(columns=_DECLINED)
 
     def _decide(self, chunk, events, frame, name, arm, ids, output, sessions):
-        """Adds ``frame`` to the history of (name, arm) and, when ``output``, decides, prices and records the taken rows."""
+        """Adds ``frame`` to the history of (name, arm) and, when ``output``, decides, prices and records the taken rows and the declined ones."""
         key = (name, arm)
         history = self.scored.setdefault(key, [])
         history.append(frame)
@@ -92,6 +99,7 @@ class Sweep:
             return
         decided = self.pricing.decide(pd.concat(history, ignore_index=True))
         declined = decided[decided["event_id"].isin(ids) & (decided["structure"] == name) & (decided["status"] != "taken")]
+        self.fresh_declined.append(declined[["event_id", "event_date", "structure", "status", "reason"]].assign(arm=str(arm)))
         reasons = self.declined.setdefault(key, {})
         for reason, count in declined["reason"].fillna("none").value_counts().items():
             reasons[str(reason)] = reasons.get(str(reason), 0) + int(count)

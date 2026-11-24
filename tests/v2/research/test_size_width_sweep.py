@@ -340,6 +340,21 @@ def test_ladder_columns():
     assert list(plain.taken[(NAME, 1.0)][0].columns) == _TAKEN
 
 
+def test_fresh_declined_rows_are_the_month_declined_decisions_with_arm_strings(monkeypatch):
+    _small_window(monkeypatch)
+    pool = build_pool(*_tables(), floor=None)
+    chunk, prior, cur, sessions = _two_months()
+    sweep = Sweep(names=(NAME,))
+    sweep.add_month(chunk, prior, pool, output=False, sessions=sessions, draws=DRAW)
+    burn = sweep.declined_rows()
+    assert burn.empty and list(burn.columns) == ["event_id", "event_date", "structure", "status", "reason", "arm"]
+    sweep.add_month(chunk, cur, pool, output=True, sessions=sessions, draws=DRAW)
+    got = sweep.declined_rows()
+    assert not got.empty and (got["status"] != "taken").all() and set(got["event_id"]) <= set(CUR)
+    assert all(isinstance(a, str) for a in got["arm"]) and "1.0" in set(got["arm"])
+    assert (got[got["arm"] == "1.0"]["structure"] == NAME).all()
+
+
 def test_add_month_returns_fresh_rows(monkeypatch):
     _small_window(monkeypatch)
     pool = build_pool(*_tables(), floor=None)

@@ -3,6 +3,7 @@ is walked) and the pool is stubbed as the EXP-188 driver tests stub it; the sour
 import pandas as pd
 import pytest
 
+from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import OpsError, fail
 from experiments import size_pnl_driver as base
 from experiments import size_pnl_readers as readers
@@ -12,6 +13,7 @@ from experiments import size_width_driver as driver
 from experiments import size_width_fake as fake
 from experiments import size_width_tuning as tuning
 from experiments.size_pnl_shortvol import NAMES, Refusal
+from experiments.size_width_sizing import GRID
 from experiments.size_width_success import LADDER, breakeven_alpha
 from experiments.size_width_sweep import _TAKEN, RET_COLS, WINDOWS, Sweep
 from tests.v2.research.test_size_pnl_driver import BASE, EVENTS, OK, PLAN_FRAME, chunk, sources, use_chunks
@@ -167,6 +169,10 @@ def test_smoke_inner_runs_end_to_end_without_a_fake_and_writes_no_tuning_c(tmp_p
     inner = receipts.load_receipt(out / "receipts" / "inner_summary.json")
     assert inner["c_status"] == "smoke_no_fake" and inner["smoke"] is True
     assert not (out / "receipts" / "tuning_C.json").exists()
+    assert set(inner["results"]) == {"production", "A", "B", "D", "E"}
+    assert all(set(periods) == {"2023H2", "2024"} for periods in inner["results"].values())
+    assert set(inner["stats"]["production"]["2024"]) == {"trades", "x", "mid", "alpha0"}
+    assert set(inner["declined"]) == set(NAMES) and all("E" in inner["declined"][n] for n in NAMES)
 
 
 def test_the_full_inner_run_with_too_few_events_refuses_m0_inputs_insufficient(tmp_path, m0, pricing, monkeypatch):
@@ -227,6 +233,18 @@ def test_outer_freezes_each_2025_month_before_its_labels_are_read(tmp_path, m0, 
     assert (out / "receipts" / "outer_summary.json").exists()
     outer = receipts.load_receipt(out / "receipts" / "outer_summary.json")
     assert outer["inputs_outer"].startswith("sha256:") and outer["labels_2025"].startswith("sha256:")
+    assert set(outer["results"]) == {"production", "A", "B", "D", "E"}
+    assert all(set(periods) == {"2025"} for periods in outer["results"].values())
+    assert outer["arms"] == ["A", "B", "D", "E"]
+    jan, feb = (real(src.fetch, src.admitted, start=pd.Timestamp(s), end=pd.Timestamp(e), event_ids=None)
+                for s, e in (("2025-01-01", "2025-02-01"), ("2025-02-01", "2025-03-01")))
+    assert outer["labels_2025"] == content_hash(base._label_rows([jan, feb]))
+    # the Jan 2025 freeze holds E3's declined rows: every (structure, arm) pair, all thin_history, none taken
+    frozen = pd.read_parquet(out / "months" / "2025-01.parquet")
+    assert set(frozen["event_id"]) == {"E3"} and (frozen["status"] == "undetermined").all()
+    assert (frozen["reason"] == "thin_history").all() and (frozen["book"] == "short_vol").all() and (frozen["model_id"] == "M0").all()
+    assert len(frozen) == len(NAMES) * (len(GRID) + 1)
+    assert set(frozen["arm_or_rule"]) == {str(k) for k in GRID} | {"E"}
 
 
 # ---- stats and declined share -----------------------------------------------------

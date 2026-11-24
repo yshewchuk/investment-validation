@@ -193,7 +193,9 @@ def _outer(src, out, loaded, pre=None):
         fresh = sweep.add_month(chunk, events, _pool(table, labels, period.start_time), output=output, sessions=sessions)
         _progress("outer", count, total, started)
         if output:
-            decisions.freeze_month(out, period, [fresh.assign(model_id="M0", book="short_vol", arm_or_rule=fresh["arm"], status="taken", reason=None)])
+            taken = fresh.assign(model_id="M0", book="short_vol", arm_or_rule=fresh["arm"], status="taken", reason=None)
+            dec = sweep.declined_rows().assign(model_id="M0", book="short_vol", arm_or_rule=lambda f: f["arm"])
+            decisions.freeze_month(out, period, [taken, dec])
             got = readers.read_labels(src.fetch, src.admitted, start=period.start_time, end=(period + 1).start_time, event_ids=ids)
             fresh_labels.append(got)
             labels = pd.concat([labels, got])
