@@ -166,18 +166,25 @@ def test_score_refuses_a_drifted_factory(monkeypatch):
     assert caught.value.details["reason"] == "factory_default_mismatch"
 
 
-def test_pinned_refuses_a_leg_expiry_off_the_ladder_selector(monkeypatch):
+@pytest.mark.parametrize("index", range(len(STRUCTURES["TWIN-P"]().legs)))
+def test_pinned_refuses_a_leg_expiry_off_the_ladder_selector(monkeypatch, index):
+    # Only leg ``index`` is moved off the ladder's selector: that one leg alone is refused, and the refusal names it.
     real = STRUCTURES["TWIN-P"]
     off = ExpirySelector(kind="first_post_event", max_dte=30)
-    monkeypatch.setitem(STRUCTURES, "TWIN-P",
-                        lambda: dataclasses.replace(real(), legs=tuple(dataclasses.replace(leg, expiry=off)
-                                                                       for leg in real().legs)))
+
+    def patched():
+        spec = real()
+        legs = list(spec.legs)
+        legs[index] = dataclasses.replace(legs[index], expiry=off)
+        return dataclasses.replace(spec, legs=tuple(legs))
+
+    monkeypatch.setitem(STRUCTURES, "TWIN-P", patched)
     with pytest.raises(sv.Refusal) as caught:
         sv.pinned("TWIN-P")
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.details["reason"] == "factory_default_mismatch"
     assert caught.value.details["structure"] == "TWIN-P"
-    assert caught.value.details["field"] == real().legs[0].name
+    assert caught.value.details["field"] == real().legs[index].name
 
 
 @pytest.mark.parametrize("index", [0, 1])
@@ -385,11 +392,16 @@ def test_score_accepts_a_nanodollar_debit():
     assert row["lots"] == math.floor(CAPITAL_PER_TRADE / (row["entry_cost"] * 100))
 
 
-def test_score_refuses_a_non_debit_entry():
-    # Sells (97, 103) mid 2.5 exceed buys (94, 106) mid 1.5: the entry cost is -2.0 a share, and score refuses it.
-    neg = chunk_of(("A", {}), entry=lambda k: (2.0, 3.0) if k in (97, 103) else (1.0, 2.0))
+@pytest.mark.parametrize("entry, cost", [
+    # Sells (97, 103) mid 2.5 exceed buys (94, 106) mid 1.5: the entry cost is -2.0 a share.
+    (lambda k: (2.0, 3.0) if k in (97, 103) else (1.0, 2.0), -2.0),
+    # Flat chunk: every mid is 1.5, so buys and sells cancel to exactly 0, the zero-cost boundary.
+    (lambda k: (1.0, 2.0), 0.0),
+])
+def test_score_refuses_a_non_debit_entry(entry, cost):
+    neg = chunk_of(("A", {}), entry=entry)
     decisions = taken(neg, "A")  # priced at alpha 0.5 from the chunk, so the bound check passes and the debit check fires
-    assert decisions.loc[0, "entry_cost"] == pytest.approx(-2.0) and decisions.loc[0, "alpha"] == 0.5
+    assert decisions.loc[0, "entry_cost"] == pytest.approx(cost) and decisions.loc[0, "alpha"] == 0.5
     with pytest.raises(ValueError, match="not a debit"):
         sv.score(neg, events_for("A"), decisions, "CND-PS", 0.5)
 
@@ -668,5 +680,19 @@ def test_crossed_entry_quote_on_a_traded_strike_is_unusable_not_raised(pool):
     chunk = chunk_of(("A", {}), entry=lambda k: (2.0, 1.0) if k == 94 else quote(k))
     assert sv.resolve_priced(chunk, 0, "CND-PS", PRED, FillModel(0.5)) == (None, None, "entry_quote_unusable")
     assert run(chunk, events_for("A"), pool).loc[0, "reason"] == "entry_quote_unusable"
+
+
+def test_penny_quote_publishes_a_float_lot_count_that_round_trips(tmp_path):
+    # The cost is the float cancellation residue of 0.03 + 0.03 - 0.01 - 0.05 (about 5.2e-18, found by search,
+    # not a market price); the test only needs it positive and tiny.
+    premium = {94: 0.01, 97: 0.03, 103: 0.03, 106: 0.05}
+    chunk = chunk_of(("A", {}), entry=lambda k: (premium.get(k, 1.0),) * 2)
+    scored = sv.score(chunk, events_for("A"), taken(chunk, "A"), "CND-PS", 0.5)
+    row = scored.iloc[0]
+    assert 0 < row["entry_cost"] < 1e-6
+    assert isinstance(row["lots"], float) and row["lots"] > 2 ** 63
+    path = tmp_path / "x.parquet"
+    scored.to_parquet(path)
+    pd.testing.assert_frame_equal(pd.read_parquet(path), scored)
 
 

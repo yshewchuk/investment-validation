@@ -338,6 +338,28 @@ def test_equivalence_refuses_perturbed_fast_path(pool, monkeypatch):
     assert caught.value.problem.details["reason"] == "fast_path_mismatch"
 
 
+def test_tiny_entry_cost_passes_the_price_scaled_bound(pool):
+    # At a 1e-9 debit, the returns are about 1e9, so float rounding in the value (~1e-16) is ~1e-7 in return units:
+    # over the absolute 1e-9 bound, but a price error far under 1e-9 a share. The bound scales by 1/cost, so it passes.
+    out = check_equivalence(pool, [_item(SPREAD, 1e-9)], draws=DRAW)
+    assert out["checked"] == 1 and out["skipped"] == 0
+
+
+def test_tiny_entry_cost_still_refuses_a_wrong_fast_path(pool, monkeypatch):
+    # A 1e-6 shift on the means is a 1e-6 / 1e-9 = 1000 return error, far over the scaled bound of 1.0.
+    real = pool_mod.put_means
+
+    def shifted(*args, **kwargs):
+        means = real(*args, **kwargs)
+        return None if means is None else means + 1e-6
+
+    monkeypatch.setattr(pool_mod, "put_means", shifted)
+    with pytest.raises(OpsError) as caught:
+        check_equivalence(pool, [_item([SINGLE], 1e-9)], draws=DRAW)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.details["reason"] == "fast_path_mismatch"
+
+
 def test_equivalence_refuses_empty_sample(pool):
     with pytest.raises(ValueError, match="non-empty sample"):
         check_equivalence(pool, [], draws=DRAW)

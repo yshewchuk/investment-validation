@@ -180,7 +180,10 @@ def check_equivalence(pool, sample, *, tolerance=TOLERANCE, draws=DRAWS):
         ref = None if direct is None else direct["exp_pnl_sim"]
         if fast is None and ref is None:
             continue
-        if fast is None or ref is None or not abs(fast - ref) <= tolerance:
+        # fast and ref are returns on cost, so |diff| * cost is the price error. For a cost below one, a price error
+        # of at most `tolerance` a share means |diff| <= tolerance / cost, so the bound is scaled by 1 / cost there.
+        # A cost of one or more keeps the original absolute bound.
+        if fast is None or ref is None or not abs(fast - ref) <= tolerance * max(1.0, 1.0 / item["entry_cost"]):
             raise fail(_CONFLICT, "the fast path disagrees with expected_pnl",
                        details={"reason": "fast_path_mismatch"})
         compared += 1

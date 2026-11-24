@@ -49,6 +49,6 @@ def test_print_windows_are_the_calendar_anchors(sess, day, entry, exit_):
 
 
 @pytest.mark.parametrize("name", sv.NAMES)
-def test_every_short_vol_structure_enters_on_the_event_day_and_exits_the_next(name):
+def test_every_short_vol_name_enters_at_offset_zero_and_exits_at_offset_one(name):
     spec = STRUCTURES[name]()
     assert spec.entry_offset == 0 and spec.exit_offset == 1
