@@ -316,7 +316,10 @@ _VALUATION_COLS = ("pnl_dollars_mid", "pnl_dollars_a0", "pnl_dollars_a1")
 
 def _check_valuation_columns(*frames):
     """Every present window carries the same optional valuation columns: all of them or none, in the outer, inner and gate frames alike."""
-    present = {frozenset(c for c in _VALUATION_COLS if c in frame.columns) for frame in frames if frame is not None}
+    for frame in frames:
+        if frame is not None and len({"pnl_dollars_a0", "pnl_dollars_a1"} & set(frame.columns)) == 1:
+            raise _refuse("report_decisions_columns", "a decisions frame carries only one of pnl_dollars_a0 and pnl_dollars_a1; the breakeven endpoints come as a pair")
+    present ={frozenset(c for c in _VALUATION_COLS if c in frame.columns) for frame in frames if frame is not None}
     if len(present) > 1:
         raise _refuse("report_decisions_columns", "the outer, inner and gate decisions carry different optional valuation columns (pnl_dollars_mid, pnl_dollars_a0, pnl_dollars_a1); every window must be produced by the same run")
 

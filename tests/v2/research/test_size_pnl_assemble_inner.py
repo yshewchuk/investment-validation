@@ -297,6 +297,26 @@ def test_mismatched_optional_valuation_columns_across_windows_refuse(tmp_path, i
     assert not (out / "REPORT.md").exists()
 
 
+def _only_a0(rows):
+    """The endpoint rows with pnl_dollars_a1 dropped: alpha 0 without its pair."""
+    return [{k: v for k, v in row.items() if k != "pnl_dollars_a1"} for row in _with_endpoints(rows)]
+
+
+def _only_a1(rows):
+    """The endpoint rows with pnl_dollars_a0 dropped: alpha 1 without its pair."""
+    return [{k: v for k, v in row.items() if k != "pnl_dollars_a0"} for row in _with_endpoints(rows)]
+
+
+@pytest.mark.parametrize("fixture", [_only_a0, _only_a1], ids=["a0_without_a1", "a1_without_a0"])
+def test_a_lone_breakeven_endpoint_refuses_in_every_window(tmp_path, inner_events, fixture):
+    # both windows carry the same lone endpoint, so only the single-frame pairing check (not the cross-window check) can refuse
+    out = build_inner(tmp_path, INNER_2024, outer_dates=OUTER_2025, outer_rows_fn=fixture, inner_rows_fn=fixture)
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, plan_frame(TICKERS), admitted=None)
+    assert caught.value.details["reason"] == "report_decisions_columns"
+    assert not (out / "REPORT.md").exists()
+
+
 @pytest.mark.parametrize("kwargs", [{}, {"mid": True, "outer_rows_fn": _with_endpoints, "inner_rows_fn": _with_endpoints}],
                          ids=["none_in_either_window", "all_three_in_both_windows"])
 def test_matching_optional_valuation_columns_across_windows_do_not_refuse(tmp_path, inner_events, kwargs):
