@@ -1,9 +1,9 @@
 """EXP-189 W5: nearest-feasible-width fallback arm (design 12.3), its recovery statistics and T9."""
 import pandas as pd
 
+from engine.structures import BUY
 from experiments import size_pnl_shortvol as sv
-from experiments.size_width_band import rho_ladder
-from experiments.size_width_deviation import tier
+from experiments.size_width_band import rho_ladder, tier
 from experiments.size_width_sweep import _TAKEN, ALPHA, E_ARM, INNER, Sweep, admit_k, in_window, scaled
 from experiments.size_width_tuning import evaluate
 
@@ -11,7 +11,7 @@ from experiments.size_width_tuning import evaluate
 def floor_ok(legs):
     """True when the net put position of ``legs`` (dicts with strike, side, qty) never pays below zero at expiry."""
     def payoff(spot):
-        return sum(sv._sign(leg["side"]) * leg["qty"] * max(leg["strike"] - spot, 0.0) for leg in legs)
+        return sum((1.0 if leg["side"] == BUY else -1.0) * leg["qty"] * max(leg["strike"] - spot, 0.0) for leg in legs)
     return min(payoff(s) for s in [0.0, *(leg["strike"] for leg in legs)]) >= -1e-9
 
 

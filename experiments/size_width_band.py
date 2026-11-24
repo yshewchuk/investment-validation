@@ -49,6 +49,8 @@ def build_bands(curves):
     for name in NAMES:
         found = {label: curves[name].get(label) for label in ("B", "C", "anchor")}
         found = {label: s for label, s in found.items() if s is not None}
+        if "B" not in found:
+            raise ValueError(f"{name} has no B curve")
         out[name] = {"primary": "C" if "C" in found else "B",
                      "curves": {label: {str(p): band(s, p) for p in PHIS} for label, s in found.items()}}
     return out
@@ -56,6 +58,8 @@ def build_bands(curves):
 
 def write_bands(out, bands, inputs_hash):
     """Publishes ``bands`` as the write-once tuning_band receipt under ``out``; returns the receipt."""
+    if not _well_formed(bands):
+        raise ValueError("tuning_band body is malformed")
     return receipts.write_receipt(Path(out) / "receipts" / "tuning_band.json",
                                   {"experiment": "EXP-189", "arm": "band", "inputs_hash": inputs_hash, "window": WINDOW, "body": bands})
 
@@ -117,3 +121,12 @@ def adopt(phi, accounts, alpha):
     fb, base = alpha["fallback"], alpha["base"]
     alpha_ok = fb is not None and base is not None and fb <= base + ALPHA_MARGIN + 1e-12
     return {"adopt": beats and alpha_ok, "phi": phi, "beats": beats, "alpha_ok": alpha_ok, "reason": None}
+
+
+def tier(mcap):
+    """Market-cap tier in USD: ge_10B, 1B_10B or lt_1B; unknown for None or NaN."""
+    if mcap is None or math.isnan(mcap):
+        return "unknown"
+    if mcap >= 10e9:
+        return "ge_10B"
+    return "1B_10B" if mcap >= 1e9 else "lt_1B"

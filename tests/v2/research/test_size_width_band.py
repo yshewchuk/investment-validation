@@ -3,7 +3,7 @@ import pytest
 import experiments.size_pnl_receipts as receipts
 from experiments.size_pnl_shortvol import NAMES, Refusal
 from experiments.size_width_band import (PHIS, WINDOW, WINDOW_KEYS, adopt, band, band_range, build_bands, choose_phi,
-                                         frozen_bands, rho_ladder, write_bands)
+                                         frozen_bands, rho_ladder, tier, write_bands)
 
 
 def _curve(rets, *, unscored=()):
@@ -95,6 +95,13 @@ def test_build_bands_refuses_a_missing_structure():
         build_bands(curves)
 
 
+def test_build_bands_requires_b_even_with_c():
+    with pytest.raises(ValueError):
+        build_bands({n: {"C": CURVE} for n in NAMES})
+    with pytest.raises(ValueError):
+        build_bands({n: {"C": CURVE, "anchor": CURVE} for n in NAMES})
+
+
 def test_receipt_roundtrip_returns_the_body(tmp_path):
     bands = build_bands({n: {"B": CURVE} for n in NAMES})
     write_bands(tmp_path, bands, "h1")
@@ -105,6 +112,7 @@ def test_missing_receipt_refuses(tmp_path):
     with pytest.raises(Refusal) as exc:
         frozen_bands(tmp_path, "h1")
     assert exc.value.details["reason"] == "tuning_receipt_missing"
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 def test_other_inputs_hash_refuses(tmp_path):
@@ -112,6 +120,7 @@ def test_other_inputs_hash_refuses(tmp_path):
     with pytest.raises(Refusal) as exc:
         frozen_bands(tmp_path, "h2")
     assert exc.value.details["reason"] == "tuning_receipt_changed"
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 def test_wrong_arm_refuses(tmp_path):
@@ -121,6 +130,27 @@ def test_wrong_arm_refuses(tmp_path):
     with pytest.raises(Refusal) as exc:
         frozen_bands(tmp_path, "h1")
     assert exc.value.details["reason"] == "tuning_receipt_changed"
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+def test_wrong_experiment_refuses(tmp_path):
+    bands = build_bands({n: {"B": CURVE} for n in NAMES})
+    receipts.write_receipt(tmp_path / "receipts" / "tuning_band.json",
+                           {"experiment": "EXP-188", "arm": "band", "inputs_hash": "h1", "window": WINDOW, "body": bands})
+    with pytest.raises(Refusal) as exc:
+        frozen_bands(tmp_path, "h1")
+    assert exc.value.details["reason"] == "tuning_receipt_changed"
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+def test_wrong_window_refuses(tmp_path):
+    bands = build_bands({n: {"B": CURVE} for n in NAMES})
+    receipts.write_receipt(tmp_path / "receipts" / "tuning_band.json",
+                           {"experiment": "EXP-189", "arm": "band", "inputs_hash": "h1", "window": "2025", "body": bands})
+    with pytest.raises(Refusal) as exc:
+        frozen_bands(tmp_path, "h1")
+    assert exc.value.details["reason"] == "tuning_receipt_changed"
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 def test_body_missing_a_structure_refuses(tmp_path):
@@ -131,6 +161,7 @@ def test_body_missing_a_structure_refuses(tmp_path):
     with pytest.raises(Refusal) as exc:
         frozen_bands(tmp_path, "h1")
     assert exc.value.details["reason"] == "tuning_receipt_changed"
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 def test_receipt_cannot_be_rewritten_with_a_different_body(tmp_path):
@@ -139,6 +170,16 @@ def test_receipt_cannot_be_rewritten_with_a_different_body(tmp_path):
     with pytest.raises(Refusal) as exc:
         write_bands(tmp_path, other, "h1")
     assert exc.value.details["reason"] == "tuning_receipt_changed"
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+def test_write_bands_refuses_a_malformed_body(tmp_path):
+    bands = build_bands({n: {"B": CURVE} for n in NAMES})
+    del bands[NAMES[0]]
+    for body in ({}, bands):
+        with pytest.raises(ValueError, match="tuning_band body is malformed"):
+            write_bands(tmp_path, body, "h1")
+        assert not (tmp_path / "receipts" / "tuning_band.json").exists()
 
 
 def test_band_range_returns_lo_hi_or_none():
@@ -146,6 +187,12 @@ def test_band_range_returns_lo_hi_or_none():
     assert band_range(bands, NAMES[0], 0.90) == pytest.approx((1.125, 1.5))
     bands = build_bands({n: {"B": NEG} for n in NAMES})
     assert band_range(bands, NAMES[0], 0.90) is None
+
+
+def test_tier_boundaries_and_unknowns():
+    assert tier(10e9) == "ge_10B" and tier(9.99e9) == "1B_10B"
+    assert tier(1e9) == "1B_10B" and tier(999e6) == "lt_1B"
+    assert tier(float("nan")) == "unknown" and tier(None) == "unknown"
 
 
 # ---- rho ladder ------------------------------------------------------------
