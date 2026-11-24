@@ -3,8 +3,9 @@
 ``engine.chain_index.price_structure_indexed`` (twin).
 
 Chains are generated in memory from fixed seeds. This tool never reads data/
-or any store. Every twin result, including every timed repeat, is asserted
-bit-identical to the legacy result; a mismatch aborts the run.
+or any store. Each timed twin call and each profiled call is compared against
+the legacy outcome by status, exception type and message, ``to_dict()`` and
+``repr()``; a mismatch aborts the run.
 
 Usage:
     python3 tools/bench_chain_index.py [--tiny] [--reps N] [--no-profile]
@@ -36,14 +37,18 @@ from engine.structures import STRUCTURES, ChainSnapshot, price_structure  # noqa
 SPOT = 100.0
 OBS = pd.Timestamp("2026-03-09")
 EVENT = pd.Timestamp("2026-03-10")
-EXPIRIES = ((date(2026, 3, 10), 1), (date(2026, 3, 17), 8), (date(2026, 3, 24), 15))
+# (expiry, dte) candidates. The first entry is the AMC event date itself and is
+# never used: structures need an expiry after the event date. make_chain takes
+# EXPIRIES[1:1 + n_expiries], so 1 expiry = 03-17 and 3 expiries = 03-17, 03-24, 03-31.
+EXPIRIES = ((date(2026, 3, 10), 1), (date(2026, 3, 17), 8), (date(2026, 3, 24), 15),
+            (date(2026, 3, 31), 22))
 STRIKE_COUNTS = (40, 80)
 EXPIRY_COUNTS = (1, 3)
 RIGHTS = ("P", "CP")
 ALPHAS = (0.0, 0.5)
 PROFILE_CASE = (80, 3, "CP")
-DEFAULT_REPS = 20
-TINY_STRUCTURES = 3
+DEFAULT_REPS = 5
+PROGRESS_EVERY_S = 20.0
 
 
 def _log(msg: str) -> None:
@@ -55,12 +60,16 @@ def case_seed(n_strikes: int, n_expiries: int, rights: str) -> int:
 
 
 def make_chain(n_strikes: int, n_expiries: int, rights: str, seed: int) -> pd.DataFrame:
-    """Synthetic chain shaped like the equivalence battery's ``make_chain``."""
+    """Synthetic chain shaped like the equivalence battery's ``make_chain``.
+
+    Uses the first ``n_expiries`` expiries after the event date (``EXPIRIES[1:]``);
+    the event-date expiry is never included.
+    """
     strikes = SPOT + (np.arange(n_strikes) - n_strikes // 2) * 1.0
     rng = np.random.default_rng(seed)
     call_delta = 1.0 / (1.0 + np.exp((strikes - SPOT) / (0.05 * SPOT)))
     frames = []
-    for exp_date, dte in EXPIRIES[:n_expiries]:
+    for exp_date, dte in EXPIRIES[1:1 + n_expiries]:
         for right in rights:
             n = strikes.size
             bid = rng.uniform(0.05, 20.0, n)
@@ -111,10 +120,13 @@ def assert_identical(label, legacy, twin):
         raise AssertionError(f"{label}: value differs\n  legacy={a!r}\n  twin={b!r}")
 
 
-def run_case(n_strikes, n_expiries, rights, names, alphas, reps):
+def run_case(n_strikes, n_expiries, rights, names, alphas, reps, log_every=None):
     rows = make_chain(n_strikes, n_expiries, rights, case_seed(n_strikes, n_expiries, rights))
     out = []
-    for name, alpha in itertools.product(names, alphas):
+    combos = list(itertools.product(names, alphas))
+    case_label = f"{rights} {n_strikes}x{n_expiries}"
+    started = last_log = time.monotonic()
+    for i, (name, alpha) in enumerate(combos, 1):
         structure = STRUCTURES[name]()
         fill = FillModel(alpha)
         label = f"{rights} {n_strikes}x{n_expiries} {name} alpha={alpha}"
@@ -143,6 +155,10 @@ def run_case(n_strikes, n_expiries, rights, names, alphas, reps):
             row["warm_ms"] = statistics.median(warm_times) * 1000.0
             row["speedup"] = row["legacy_ms"] / max(row["warm_ms"], 1e-9)
         out.append(row)
+        now = time.monotonic()
+        if log_every is not None and now - last_log >= log_every:
+            last_log = now
+            _log(f"{case_label} {i}/{len(combos)} elapsed={now - started:.1f}s")
     return out
 
 
@@ -174,14 +190,15 @@ def print_table(results):
 
 def profile_top(call, rows, names):
     snap = make_snapshot(rows)
+    results = []
     prof = cProfile.Profile()
     prof.enable()
     for name, alpha in itertools.product(names, ALPHAS):
-        outcome(partial(call, STRUCTURES[name](), snap, FillModel(alpha)))
+        results.append(outcome(partial(call, STRUCTURES[name](), snap, FillModel(alpha))))
     prof.disable()
     buf = io.StringIO()
     pstats.Stats(prof, stream=buf).sort_stats("cumulative").print_stats(10)
-    return buf.getvalue()
+    return buf.getvalue(), results
 
 
 def main(argv=None) -> int:
@@ -199,7 +216,7 @@ def main(argv=None) -> int:
 
     if args.tiny:
         cases = [(40, 1, "CP")]
-        names = list(STRUCTURES)[:TINY_STRUCTURES]
+        names = ["STR-THRU", "CND-P", "BFLY-P"]
         alphas, reps, do_profile = (0.0,), 1, False
     else:
         cases = list(itertools.product(STRIKE_COUNTS, EXPIRY_COUNTS, RIGHTS))
@@ -210,7 +227,8 @@ def main(argv=None) -> int:
     _log(f"start: {len(cases)} case(s), {len(names)} structure(s), alphas={alphas}, reps={reps}")
     results = []
     for i, (n_strikes, n_expiries, rights) in enumerate(cases, 1):
-        results.extend(run_case(n_strikes, n_expiries, rights, names, alphas, reps))
+        results.extend(run_case(n_strikes, n_expiries, rights, names, alphas, reps,
+                                log_every=PROGRESS_EVERY_S))
         _log(f"case {i}/{len(cases)} strikes={n_strikes} expiries={n_expiries} "
              f"rights={rights} elapsed={time.perf_counter() - t0:.1f}s")
     print_table(results)
@@ -219,9 +237,16 @@ def main(argv=None) -> int:
     if do_profile:
         _log("profile: start")
         rows = make_chain(*PROFILE_CASE, case_seed(*PROFILE_CASE))
+        profiled = {}
         for label, call in (("legacy", price_structure), ("twin", price_structure_indexed)):
+            profiled[label] = profile_top(call, rows, names)
+        labels = list(itertools.product(names, ALPHAS))
+        for (name, alpha), legacy_res, twin_res in zip(
+                labels, profiled["legacy"][1], profiled["twin"][1]):
+            assert_identical(f"profile {name} alpha={alpha}", legacy_res, twin_res)
+        for label in ("legacy", "twin"):
             print(f"\n== cProfile top-10 by cumulative time: {label} ==")
-            print(profile_top(call, rows, names))
+            print(profiled[label][0])
         _log(f"profile: end elapsed={time.perf_counter() - t0:.1f}s")
 
     _log(f"done: elapsed={time.perf_counter() - t0:.1f}s")

@@ -7,9 +7,16 @@ from __future__ import annotations
 
 # packages: engine.v2.ops
 
+import dataclasses
+import re
 import time
+from functools import partial
+
+import pytest
 
 import tools.bench_chain_index as bench
+from engine.fills import FillModel
+from engine.structures import STRUCTURES, price_structure
 
 
 def test_bench_tiny_runs_fast_and_identical(capsys):
@@ -20,3 +27,25 @@ def test_bench_tiny_runs_fast_and_identical(capsys):
     assert rc == 0
     assert elapsed < 2.0, elapsed
     assert "speedup" in captured.out
+    match = re.search(r"^summary: ok_rows=(\d+)", captured.out, re.MULTILINE)
+    assert match is not None, captured.out
+    assert int(match.group(1)) >= 1, captured.out
+
+
+def test_bench_case_row_and_identity_control():
+    # (i) one real case runs, is identical to legacy, and reports a speedup.
+    rows = bench.make_chain(40, 1, "CP", bench.case_seed(40, 1, "CP"))
+    structure = STRUCTURES["STR-THRU"]()
+    fill = FillModel(0.0)
+    reference = bench.outcome(partial(price_structure, structure, bench.make_snapshot(rows), fill))
+    assert reference[0] == "ok"
+    out = bench.run_case(40, 1, "CP", ["STR-THRU"], (0.0,), 1)
+    assert len(out) == 1
+    assert out[0]["ok"] is True
+    assert out[0]["speedup"] > 0
+
+    # (ii) control: a numerically altered result must be caught by assert_identical.
+    a = reference[1]
+    b = dataclasses.replace(a, spot=a.spot + 1.0)
+    with pytest.raises(AssertionError):
+        bench.assert_identical("x", ("ok", a), ("ok", b))

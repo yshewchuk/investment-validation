@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Standalone operator tools. `bounded_run.py` is the wrapper every heavy job runs under: CPU pinning, memory, swap and box-floor limits, test slots and the heavy reservation. Its module docstring is the flag reference; `engine/v2/ops/ARCHITECTURE.md` describes it as an executor adapter.
+Standalone operator tools. `bounded_run.py` is the wrapper every heavy job runs under: CPU pinning, memory, swap and box-floor limits, test slots and the heavy reservation. Its module docstring is the flag reference; `engine/v2/ops/ARCHITECTURE.md` describes it as an executor adapter. `bench_chain_index.py` is a synthetic-only benchmark of `price_structure` against the chain-index twin (`--tiny`, `--reps`, `--no-profile`); it reads no data and CI runs only a tiny smoke of it.
 
 ## Mutation snapshot-worker budget
 

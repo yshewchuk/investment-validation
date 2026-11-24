@@ -853,6 +853,10 @@ ids = ["cli:tools/ci_shards.py"]
 reason = "CI test-shard matrix and per-shard file lists (tests/shards.toml); CI tooling, not a consumer."
 
 [[excluded]]
+ids = ["cli:tools/bench_chain_index.py"]
+reason = "Synthetic-only legacy-vs-twin price_structure benchmark (development tooling, not a consumer; no data read)."
+
+[[excluded]]
 ids = ["cli:tools/land.py"]
 reason = "Supervisor merge/gate/push wrapper (hygiene + bounded tests before pushing a branch to main); development tooling, not a board/nightly consumer."
 
