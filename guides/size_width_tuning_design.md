@@ -92,6 +92,8 @@ EXP-189 has its own `spec.yaml` (arms, grid, `N`, thresholds, success rule), its
 
 Re-split (supervisor, user 2026-11-24): W2 and W4 run in parallel; W4 builds the shared sweep and objective, W3 adds only seeded draws, `tuning_C` and the anchor.
 
+Re-split (supervisor, 2026-11-24): W6 splits into W6a (pure logic: breakeven alpha, the T7 success table, the recommendation order, the proposed board rule; `size_width_success.py`) and W6b (driver, smoke run, T2-T6, runbook; after W5).
+
 New `size_width_*` modules only; `size_pnl_*` is imported unchanged.
 
 ## 12. Width flexibility: tolerance band, nearest-feasible fallback, snap deviation (user 2026-11-24)
