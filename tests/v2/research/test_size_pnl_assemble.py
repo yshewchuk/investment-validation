@@ -784,6 +784,29 @@ def test_non_finite_mid_pnl_on_a_taken_row_refuses(tmp_path):
     assert not (out / "REPORT.md").exists()
 
 
+def test_nonfinite_breakeven_endpoint_on_a_taken_row_refuses(tmp_path):
+    def make(rows):
+        ends = _with_endpoints(rows)
+        return [{**ends[0], "pnl_dollars_a0": float("nan")}, *ends[1:]]
+
+    out = build(tmp_path, rows_fn=make)
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, plan_frame(), admitted=None)
+    assert caught.value.details["reason"] == "report_nonfinite_pnl"
+    assert not (out / "REPORT.md").exists()
+
+
+def test_nonfinite_breakeven_endpoint_on_a_non_taken_row_does_not_refuse(tmp_path):
+    def make(rows):
+        ends = _with_endpoints(rows)
+        # Row 0 becomes a declined row; its endpoint is NaN, which the taken-row check must ignore.
+        return [{**ends[0], "status": "not_taken", "reason": "width_declined", "pnl_dollars": 0.0, "pnl_dollars_a0": float("nan")}, *ends[1:]]
+
+    out = build(tmp_path, rows_fn=make)
+    assemble_mod.assemble(out, plan_frame(), admitted=None)
+    assert (out / "REPORT.md").exists()
+
+
 def test_non_numeric_mid_pnl_on_a_non_taken_row_refuses_as_decisions_invalid(tmp_path):
     def make(rows):
         # Every mid value is text, so the column is still writable; one value on a non-taken row is not a number.
