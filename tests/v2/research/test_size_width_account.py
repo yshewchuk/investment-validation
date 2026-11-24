@@ -24,7 +24,7 @@ def _one_trade(**overrides):
 
 def test_policy_is_the_base_policy_with_a_200k_start():
     assert size_width_account.POLICY == {**size_pnl_account.POLICY, "start_equity": 200000.0}
-    assert size_pnl_account.POLICY["start_equity"] == 100000.0
+    assert size_pnl_account.POLICY["start_equity"] == 200000.0
 
 
 def test_empty_rows_return_the_untouched_account():

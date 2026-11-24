@@ -12,7 +12,8 @@ from experiments import size_pnl_driver
 from experiments import size_pnl_receipts as tuning
 from experiments.size_pnl_shortvol import Refusal
 from tests.v2.research.test_size_pnl_assemble import (  # noqa: F401 (imported so the autouse check_plan no-op applies here)
-    EVENT_DATES, ROLES, TICKERS, _cells, _no_plan_admission, _rewrite, _rows, _section_lines, build, plan_frame)
+    EVENT_DATES, ROLES, TICKERS, _cells, _no_plan_admission, _rewrite, _rows, _section_lines, _with_endpoints, _with_mid, build,
+    plan_frame)
 
 NEW_EVENTS = {"E05": "2025-08-15", "E06": "2025-11-15", "E11": "2023-08-15", "E12": "2024-02-15",
               "E13": "2024-05-15", "E14": "2024-08-15", "E15": "2023-11-15"}
@@ -279,3 +280,26 @@ def test_without_inner_decisions_the_report_is_unchanged_in_shape(tmp_path):
     text = (out / "REPORT.md").read_text(encoding="utf-8")
     assert summary["sections"] == 15  # 11 headline (run, marks basis, T1-T4, T6-T10), the harsh not_testable note, breakeven, the Amendment 2 accounts, and the Amendment 6 board-match section
     assert "### Inner window" not in text
+
+
+MISMATCHED_VALUATION = [
+    ("endpoints_in_outer_only", {"outer_rows_fn": _with_endpoints}),  # inner without a0/a1, outer with them
+    ("mid_in_inner_only", {"inner_rows_fn": _with_mid}),  # inner with mid, outer without
+]
+
+
+@pytest.mark.parametrize("kwargs", [kw for _name, kw in MISMATCHED_VALUATION], ids=[name for name, _kw in MISMATCHED_VALUATION])
+def test_mismatched_optional_valuation_columns_across_windows_refuse(tmp_path, inner_events, kwargs):
+    out = build_inner(tmp_path, INNER_2024, outer_dates=OUTER_2025, **kwargs)
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, plan_frame(TICKERS), admitted=None)
+    assert caught.value.details["reason"] == "report_decisions_columns"
+    assert not (out / "REPORT.md").exists()
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"mid": True, "outer_rows_fn": _with_endpoints, "inner_rows_fn": _with_endpoints}],
+                         ids=["none_in_either_window", "all_three_in_both_windows"])
+def test_matching_optional_valuation_columns_across_windows_do_not_refuse(tmp_path, inner_events, kwargs):
+    out = build_inner(tmp_path, INNER_2024, outer_dates=OUTER_2025, **kwargs)
+    assemble_mod.assemble(out, plan_frame(TICKERS), admitted=None)
+    assert (out / "REPORT.md").exists()

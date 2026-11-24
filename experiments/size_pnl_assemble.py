@@ -311,6 +311,16 @@ def _account_sections(frame, role_model, label_of, universe):
     return size_pnl_account.tables(results, diffs)
 
 
+_VALUATION_COLS = ("pnl_dollars_mid", "pnl_dollars_a0", "pnl_dollars_a1")
+
+
+def _check_valuation_columns(*frames):
+    """Every present window carries the same optional valuation columns: all of them or none, in the outer, inner and gate frames alike."""
+    present = {frozenset(c for c in _VALUATION_COLS if c in frame.columns) for frame in frames if frame is not None}
+    if len(present) > 1:
+        raise _refuse("report_decisions_columns", "the outer, inner and gate decisions carry different optional valuation columns (pnl_dollars_mid, pnl_dollars_a0, pnl_dollars_a1); every window must be produced by the same run")
+
+
 def _sections(out, outer, inputs, inner, tickers, stored_gate=None, board_ledger=None):
     """The report's sections in order. Reads receipt fields throughout; the caller maps a missing or mistyped field to a refusal.
     Returns (sections, inner row count)."""
@@ -318,7 +328,8 @@ def _sections(out, outer, inputs, inner, tickers, stored_gate=None, board_ledger
     gate_rows = raw["arm_or_rule"] == GATE_RULE  # Amendment 3: G_PROD rows never enter E, E_str, T1-T10 or the verdicts; only the Amendment 2 accounts read them
     raw, gate_raw = raw[~gate_rows], raw[gate_rows]
     inner_raw = _load_inner(out, outer, inner)
-    tick = {str(e): str(t) for e, t in tickers.items()}
+    _check_valuation_columns(raw, inner_raw, gate_raw if not gate_raw.empty else None)  # an absent inner window or an empty gate frame is not compared
+    tick ={str(e): str(t) for e, t in tickers.items()}
     roster = inputs["roster"]
     label_of = {m["model_id"]: "+".join(m["roles"]) for m in roster["models"]}
     outer_models = set(outer["models"])
