@@ -17,6 +17,7 @@ WINDOWS = {"2023H2": (pd.Timestamp("2023-07-01"), pd.Timestamp("2024-01-01")),
 INNER = (pd.Timestamp("2023-07-01"), pd.Timestamp("2025-01-01"))
 _TAKEN = ["event_id", "event_date", "structure", "k", "entry_date", "exit_date", "entry_cost", "exit_value",
           "exit_value_mid", "pnl_dollars", "pnl_dollars_mid", "secured_per_contract"]
+TAKEN_COLS = _TAKEN  # public alias for the other width modules
 
 
 def admit_k(k):
@@ -69,12 +70,16 @@ class Sweep:
         events = events[keep]
         ids = set(events["event_id"].astype(str))
         for name in self.names:
-            by_k = {k: sv.score_events(chunk, scaled(events, k), sims, name, alpha=ALPHA) for k in self.ks}
-            for arm, frame in [*by_k.items(), (E_ARM, pick_e(by_k, self.ks))]:
+            for arm, frame in self._frames(chunk, events, sims, name):
                 self._decide(chunk, events, frame, name, arm, ids, output, sessions)
         rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
         print(f"[width_sweep] month events={len(events)} output={output} elapsed={time.time() - started:.1f}s rss={rss:.0f}MiB",
               file=sys.stderr)
+
+    def _frames(self, chunk, events, sims, name):
+        """[(arm, frame)] for one structure: every grid k, then arm E. Subclasses override this."""
+        by_k = {k: sv.score_events(chunk, scaled(events, k), sims, name, alpha=ALPHA) for k in self.ks}
+        return [*by_k.items(), (E_ARM, pick_e(by_k, self.ks))]
 
     def _decide(self, chunk, events, frame, name, arm, ids, output, sessions):
         """Adds ``frame`` to the history of (name, arm) and, when ``output``, decides, prices and records the taken rows."""
