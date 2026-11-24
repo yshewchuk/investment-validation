@@ -4,8 +4,8 @@ Design: ``guides/size_width_tuning_design.md`` section 4. The model is
 ``log f = L + b * (log y - mean_log_y) + s * z``, fitted to paired (forecast, label) rows where both
 are strictly positive and finite. Nothing is imputed; a fit with too few rows or a label with zero
 log-variance is refused. ``calibrate`` reports whether fake forecasts reproduce M0's RMSE and MAE
-within ``TOLERANCE`` but never raises for that: the caller omits the calibrated arm. Pure numpy:
-no I/O and no logging.
+within ``TOLERANCE`` but never raises for that: the caller omits the calibrated arm. No I/O and
+no logging; refusals use ``engine.v2.ops.errors.fail``.
 """
 import math
 
@@ -56,7 +56,7 @@ def fit(forecast, label):
     s = math.sqrt(float(np.sum(resid * resid)) / (n - 2))
     r = resid - np.mean(resid)
     m2 = float(np.mean(r * r))
-    if m2 > 0.0:
+    if m2 > 1e-24:
         skew = float(np.mean(r ** 3)) / m2 ** 1.5
         excess = float(np.mean(r ** 4)) / m2 ** 2 - 3.0
     else:
@@ -69,6 +69,8 @@ def fake_forecast(model, y, z):
     """``exp(L + b * (log y - mean_log_y) + s * z)``, never clipped."""
     y = np.asarray(y, dtype=float)
     z = np.asarray(z, dtype=float)
+    if not np.all(np.isfinite(z)):
+        raise ValueError("z must be finite")
     return np.exp(model["L"] + model["b"] * (np.log(y) - model["mean_log_y"]) + model["s"] * z)
 
 
@@ -77,7 +79,11 @@ def _rel(value, base):
 
 
 def calibrate(model, forecast, label, z):
-    """Compare M0 and the mean over draws of fake forecasts on the same kept rows."""
+    """Compare M0 and the mean over draws of fake forecasts on the same kept rows.
+
+    Returns ok when |rmse_rel| and |mae_rel| are each at most TOLERANCE (inclusive); never raises
+    for the gate. Raises ValueError only for malformed or non-finite ``z``.
+    """
     f = np.asarray(forecast, dtype=float)
     y = np.asarray(label, dtype=float)
     mask, _ = paired(f, y)

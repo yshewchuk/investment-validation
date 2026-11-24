@@ -245,3 +245,52 @@ def test_t1_markdown_cells():
     assert ("Dropped: nonpositive_forecast=3, nonpositive_label=5; "
             "residual skew=0.1234, excess kurtosis=-0.5000.") in lines
     assert "Calibration: PASS rmse_rel=+0.012, mae_rel=-0.034" in lines
+
+
+def test_fake_forecast_refuses_nonfinite_draws():
+    model = {"L": 0.3, "b": 0.7, "s": 0.2, "mean_log_y": 0.0}
+    y = np.array([1.0, 2.0, 3.0])
+    for bad in (np.nan, np.inf):
+        z = np.array([0.0, bad, 0.0])
+        with pytest.raises(ValueError):
+            fake_forecast(model, y, z)
+
+
+def test_fit_zero_residual_branch():
+    n = 300
+    ly = np.tile([-1.0, -1.0, 1.0, 1.0], 75) * 0.5
+    y = np.exp(ly)
+    f = np.exp(0.3 + 0.7 * ly)
+    model = fit(f, y)
+    assert model["s"] == pytest.approx(0.0, abs=1e-12)
+    assert model["skew"] == 0.0
+    assert model["excess_kurtosis"] == 0.0
+    assert model["n"] == n
+
+
+def test_calibrate_boundary_at_tolerance():
+    model = {"L": math.log(2), "b": 0.0, "s": 0.0, "mean_log_y": 0.0}
+    label = np.array([1.0, 1.0, 1.0, 1.0])
+    z = np.zeros((1, 4))
+
+    # Fake forecast is 2 everywhere, so fake error is 1 and rmse_fake = mae_fake = 1.
+    # M0 error is 1/k, so rel = k - 1 exactly.
+    inside_pos = np.full(4, 1 + 1 / 1.04)   # rel ~ +0.04
+    outside_pos = np.full(4, 1 + 1 / 1.07)  # rel ~ +0.07
+    outside_neg = np.full(4, 1 + 1 / 0.93)  # rel ~ -0.07
+
+    cal = calibrate(model, inside_pos, label, z)
+    assert cal["ok"] is True
+    assert cal["reason"] is None
+    assert cal["rmse_rel"] == pytest.approx(0.04)
+    assert cal["mae_rel"] == pytest.approx(0.04)
+
+    cal = calibrate(model, outside_pos, label, z)
+    assert cal["ok"] is False
+    assert cal["reason"] == "fake_not_calibrated"
+    assert cal["rmse_rel"] == pytest.approx(0.07)
+
+    cal = calibrate(model, outside_neg, label, z)
+    assert cal["ok"] is False
+    assert cal["reason"] == "fake_not_calibrated"
+    assert cal["rmse_rel"] == pytest.approx(-0.07)
