@@ -2,12 +2,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from engine.forecast_sizing import forecast_params
-from engine.pnl_sim import DRAWS
+from engine.forecast_sizing import SHORT_VOL_OUTER, forecast_params
+from engine.structures import BUY, STRUCTURES
 from experiments import size_pnl_shortvol as sv
 from experiments.size_pnl_pool import build_pool
+from experiments.size_pnl_straddle import lots
 from experiments.size_width_sizing import GRID, k_params
-from experiments.size_width_sweep import _TAKEN, E_ARM, WINDOWS, Sweep, feed, in_window, pick_e, scaled
+from experiments.size_width_sweep import _TAKEN, E_ARM, WINDOWS, Sweep, in_window, pick_e, scaled
 from tests.v2.research.test_size_pnl_shortvol import _tables, chunk_of, events_for
 
 DRAW = 200
@@ -194,25 +195,46 @@ def test_declined_counts_include_the_decision_gate_outcomes(monkeypatch):
     assert sweep.declined[(NAME, 1.0)] == expected
 
 
-class _Recorder:
-    def __init__(self):
-        self.calls = []
-
-    def add_month(self, chunk, events, pool, *, output, sessions, draws=DRAWS):
-        self.calls.append((chunk, output, draws))
+PRED = 6.0  # events_for's default pred_move
 
 
-def test_feed_stops_before_until_and_sets_output_from_output_from():
-    months = [
-        {"period": pd.Timestamp("2024-01-01"), "chunk": "c1", "events": None, "pool": None, "sessions": {}},
-        {"period": pd.Timestamp("2024-02-01"), "chunk": "c2", "events": None, "pool": None, "sessions": {}},
-        {"period": pd.Timestamp("2024-03-01"), "chunk": "c3", "events": None, "pool": None, "sessions": {}, "draws": 50},
-    ]
-    rec = _Recorder()
-    feed(rec, months, output_from=pd.Timestamp("2024-02-01"), until=pd.Timestamp("2024-03-01"))
-    assert [(c, o) for c, o, _d in rec.calls] == [("c1", False), ("c2", True)]
-    assert [d for _c, _o, d in rec.calls] == [DRAWS, DRAWS]
+def test_taken_row_and_scored_row_match_a_hand_derived_condor(monkeypatch):
+    # CND-PS: up1/dn1 SELL at atm -/+ w*spot, up2/dn2 BUY at atm -/+ 2w*spot, w = k*pred/100/divisor, atm 100, strikes snapped
+    # by hand (the integer ladder is exact here). Entry mid 1 + 0.01*(K-100)^2; every exit quote is bid = ask = 1.0.
+    _small_window(monkeypatch)
+    pool = build_pool(*_tables(), floor=None)
+    chunk, prior, cur, sessions = _two_months()
+    sweep = Sweep()
+    sweep.add_month(chunk, prior, pool, output=False, sessions=sessions, draws=DRAW)
+    sweep.add_month(chunk, cur, pool, output=True, sessions=sessions, draws=DRAW)
 
-    rec = _Recorder()
-    feed(rec, months, output_from=pd.Timestamp("2024-02-01"))
-    assert rec.calls[-1] == ("c3", True, 50)
+    def mid(strike):
+        return 1.0 + 0.01 * (strike - 100) ** 2
+
+    def hand_legs(k):
+        """(side_sign, qty, strike) of each leg: the legs of the structure, strikes by hand."""
+        w = k * PRED / 100.0 / SHORT_VOL_OUTER[NAME]
+        step = {"atm": 0, "up1": 1, "dn1": -1, "up2": 2, "dn2": -2}  # atm is the zero-quantity reference leg
+        return [(1.0 if leg.side == BUY else -1.0, float(leg.qty), round(100 + step[leg.name] * w * 100))
+                for leg in STRUCTURES[NAME](width_moneyness=w).legs]
+
+    cost1 = sum(sign * qty * mid(strike) for sign, qty, strike in hand_legs(1.0))  # 1.36 - 1.09 - 1.09 + 1.36
+    cost2 = sum(sign * qty * mid(strike) for sign, qty, strike in hand_legs(2.0))  # 2.44 - 1.36 - 1.36 + 2.44
+    assert cost1 == pytest.approx(0.54)
+    assert cost2 == pytest.approx(2.16)
+    assert cost2 - cost1 == pytest.approx(1.62)
+
+    row = sweep.rows([(NAME, 1.0)], WINDOW).iloc[0]
+    # each leg closes at its listed-quote 1.0: a long leg is sold for +1.0, a short leg is bought back for -1.0
+    exit_mid = sum(sign * qty * 1.0 for sign, qty, _strike in hand_legs(1.0))  # two longs +1 each, two shorts -1 each: 0 for the condor
+    assert row["entry_cost"] == pytest.approx(cost1)
+    assert row["exit_value_mid"] == pytest.approx(exit_mid)
+    assert row["pnl_dollars_mid"] == pytest.approx((exit_mid - cost1) * 100 * lots(cost1))
+
+    scored_k2 = sweep.scored[(NAME, 2.0)][-1]
+    hit = scored_k2[scored_k2["event_id"] == row["event_id"]].iloc[0]
+    assert hit["status"] == "scored"
+    assert hit["width"] == pytest.approx(2.0 * PRED / 100.0 / SHORT_VOL_OUTER[NAME])
+    assert hit["entry_cost"] == pytest.approx(cost2)
+
+

@@ -88,18 +88,6 @@ def test_secured_per_contract_counts_short_puts_at_strike_times_100():
     assert size_width_account.secured_per_contract(legs) == 5000.0
 
 
-def test_walk_returns_the_margin_table_for_taken_rows():
-    t = size_width_account.walk(_one_trade(), "mid")
-    assert len(t) == 1
-    assert bool(t["funded"].iloc[0])
-    assert t.attrs["final_equity"] == pytest.approx(200600.0)
-
-
-def test_walk_refuses_a_bad_mark():
-    with pytest.raises(ValueError, match="mark must be"):
-        size_width_account.walk(_one_trade(), "bogus")
-
-
 def test_quarter_returns_one_trade_pays_in_its_exit_quarter():
     quarters = pd.period_range("2024-01-01", periods=2, freq="Q")
     rows = _one_trade()  # exits 2024-02-02, so 2024Q1
@@ -115,6 +103,13 @@ def test_quarter_returns_of_no_rows_are_all_zero():
     assert size_width_account.quarter_returns(pd.DataFrame(columns=COLUMNS), quarters) == [0.0, 0.0]
 
 
+def test_quarter_returns_include_an_exit_after_the_window():
+    quarters = pd.period_range("2024-01-01", periods=2, freq="Q")
+    rows = _one_trade(entry_date="2024-07-02", exit_date="2024-08-02")  # exits in 2024Q3, after the two given quarters
+    gain = size_width_account.simulate_account(rows, "mid")["final_equity"] - 200000.0
+    assert size_width_account.quarter_returns(rows, quarters) == pytest.approx([0.0, 0.0, gain / 200000.0])
+
+
 def test_quarter_returns_compound_on_the_equity_at_each_quarter_start():
     rows = pd.DataFrame([
         {"entry_date": "2024-01-02", "exit_date": "2024-02-02", "entry_cost": 1.0, "exit_value": 1.5,
@@ -123,7 +118,9 @@ def test_quarter_returns_compound_on_the_equity_at_each_quarter_start():
          "exit_value_mid": 2.0, "secured_per_contract": 5000.0},
     ], columns=COLUMNS)
     quarters = pd.period_range("2024-01-01", periods=3, freq="Q")
-    t = size_width_account.walk(rows, "mid")
-    gains = t["pnl_usd"].to_numpy(dtype=float)  # trade 1 exits in Q1, trade 2 in Q2
-    got = size_width_account.quarter_returns(rows, quarters)
-    assert got == pytest.approx([gains[0] / 200000.0, gains[1] / (200000.0 + gains[0]), 0.0])
+    # trade 1 exits in Q1 (2024-02-02) before trade 2 is entered, so trade 2 is sized on the equity left after trade 1:
+    # its gain is the account's final equity with both trades less the account's final equity with trade 1 alone.
+    gain_1 = size_width_account.simulate_account(rows.iloc[[0]], "mid")["final_equity"] - 200000.0
+    gain_2 = size_width_account.simulate_account(rows, "mid")["final_equity"] - (200000.0 + gain_1)
+    got = size_width_account.quarter_returns(rows, quarters)  # trade 1 exits in Q1, trade 2 in Q2
+    assert got == pytest.approx([gain_1 / 200000.0, gain_2 / (200000.0 + gain_1), 0.0])

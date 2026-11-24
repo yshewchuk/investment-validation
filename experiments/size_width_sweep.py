@@ -1,9 +1,7 @@
 """EXP-189 W4: the shared sweep over the k grid for the seven short-vol structures (design sections 3, 5).
 
-k scales the forecast the sizing rule reads: forecast_params at k*f equals size_width_sizing.k_params at k
-(bounds apply after k), so EXP-188's size_pnl_shortvol scores, decides (per-structure trailing cutoff) and marks
-unchanged. The simulation always uses M0's own forecast, once per event, shared by every structure and k.
-Arm E picks, per event and structure, the grid k with the highest exp_pnl_sim among feasible widths
+k scales the forecast the sizing rule reads (forecast_params at k*f equals size_width_sizing.k_params at k), so EXP-188's
+scoring, cutoffs and marks are unchanged. Arm E picks the grid k with the highest exp_pnl_sim per event and structure
 (ties: nearest 1, then smaller); no realised outcome is read. Progress: one stderr line per month.
 """
 import resource
@@ -108,15 +106,13 @@ class Sweep:
         self.taken.setdefault(key, []).append(rows[_TAKEN])
 
     def rows(self, pairs, window):
-        """Taken rows of every (structure, arm) in ``pairs`` inside ``window`` (by event date), concatenated; empty frame with the columns when none."""
-        frames = [in_window(f, window) for pair in pairs for f in self.taken.get(tuple(pair), [])]
-        frames = [f for f in frames if not f.empty]
+        """Taken rows of every (structure, arm) in ``pairs`` inside ``window`` (by event date); empty frame with the columns when none."""
+        frames = [f for pair in pairs for f in (in_window(g, window) for g in self.taken.get(tuple(pair), [])) if not f.empty]
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=_TAKEN)
 
     def scored_rows(self, name, arm, window):
-        """Scored (status "scored") rows of (name, arm) inside ``window``, the candidates E or a fixed k put to the gate."""
-        frames = [in_window(f[f["status"] == "scored"], window) for f in self.scored.get((name, arm), [])]
-        frames = [f for f in frames if not f.empty]
+        """Scored rows of (name, arm) inside ``window``: the candidates E or a fixed k put to the gate."""
+        frames = [f for f in (in_window(g[g["status"] == "scored"], window) for g in self.scored.get((name, arm), [])) if not f.empty]
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=sv.SCORE_COLS + (["k"] if arm == E_ARM else []))
 
     def curves(self, name, window):
@@ -126,12 +122,3 @@ class Sweep:
             rows = self.scored_rows(name, arm, window)
             out[str(arm)] = float(pd.to_numeric(rows["exp_pnl_sim"]).mean()) if not rows.empty else None
         return out
-
-
-def feed(sweep, months, *, output_from, until=None):
-    """Run ``months`` (dicts with period, chunk, events, pool, sessions; period a Timestamp, month start) through ``sweep`` in order, stopping before ``until``."""
-    for m in months:
-        if until is not None and m["period"] >= until:
-            break
-        sweep.add_month(m["chunk"], m["events"], m["pool"], output=m["period"] >= output_from, sessions=m["sessions"],
-                        **({"draws": m["draws"]} if "draws" in m else {}))

@@ -1,7 +1,7 @@
-"""EXP-189 W4: objective, tie rule and tunings A, B, D, arm E's summary, tuning receipts, 2025 evaluation (design sections 3, 5, 6).
+"""EXP-189 W4: objective, tie rule, tunings A, B, D, arm E's summary, receipts and 2025 evaluation (design sections 3, 5, 6).
 
-All tuning reads the inner window (2023H2-2024) of the sweep only. Objective: stand-alone cash-secured $200,000 account return at
-marks_mid. Standard error: sd of quarterly returns / sqrt(quarter count) (0.0 with fewer than two quarters).
+Tuning reads the inner window (2023H2-2024) of the sweep only. Objective: stand-alone $200,000 account return at marks_mid;
+standard error: sd of quarterly returns / sqrt(quarter count), 0.0 under two quarters.
 """
 import math
 from pathlib import Path
@@ -72,9 +72,7 @@ def tune(sweep, arm, window=INNER):
 
 def factors(arm, body):
     """structure -> k (a float) from a tuned body; arm E maps every structure to E_ARM."""
-    if arm == E_ARM:
-        return {n: E_ARM for n in NAMES}
-    return {n: unit["k"] for unit in body.values() for n in unit["members"]}
+    return {n: E_ARM for n in NAMES} if arm == E_ARM else {n: unit["k"] for unit in body.values() for n in unit["members"]}
 
 
 def e_summary(sweep, window=INNER):
@@ -90,7 +88,7 @@ def e_summary(sweep, window=INNER):
 
 
 def evaluate(sweep, by_structure, window):
-    """Seven-structure $200,000 account at marks_mid and each structure's stand-alone account in ``window``; ``by_structure``: structure -> k or E_ARM."""
+    """Seven-structure $200,000 account at marks_mid and each structure's own account in ``window``; ``by_structure``: structure -> k or E_ARM."""
     pairs = [(n, by_structure[n]) for n in NAMES]
     per = {}
     for pair in pairs:
@@ -100,48 +98,41 @@ def evaluate(sweep, by_structure, window):
     return {"account": {**account.simulate_account(rows, "mid"), "trades": int(len(rows))}, "structures": per}
 
 
-def _path(out, arm):
-    return Path(out) / "receipts" / f"tuning_{arm}.json"
-
-
 def run_inner(sweep, out, inputs_hash):
-    """Tune A, B, D and summarise E on 2023-24, write tuning_A/B/D/E receipts (atomic, immutable, bound to ``inputs_hash``), and return
+    """Tune A, B, D, summarise E on 2023-24, write the atomic immutable receipts bound to ``inputs_hash``; returns
     {"tuned": ..., "results": {arm_or_production: {"2023H2": evaluate, "2024": evaluate}}}."""
     tuned = {arm: tune(sweep, arm) for arm in ("A", "B", "D")}
     tuned["E"] = e_summary(sweep)
     for arm, body in tuned.items():
-        receipts.write_receipt(_path(out, arm), {"experiment": "EXP-189", "arm": arm, "inputs_hash": inputs_hash,
-                                                 "window": "2023H2-2024", "body": body})
+        receipts.write_receipt(Path(out) / "receipts" / f"tuning_{arm}.json",
+                               {"experiment": "EXP-189", "arm": arm, "inputs_hash": inputs_hash, "window": "2023H2-2024", "body": body})
     labels = {"production": {n: 1.0 for n in NAMES}, **{arm: factors(arm, tuned[arm]) for arm in ("A", "B", "D", "E")}}
     results = {label: {w: evaluate(sweep, by, WINDOWS[w]) for w in ("2023H2", "2024")} for label, by in labels.items()}
     return {"tuned": tuned, "results": results}
 
 
 def _valid(arm, receipt):
-    """True when ``receipt`` names EXP-189, ``arm`` and the inner window with a dict body; for A, B and D the body has exactly the units
-    of ``arm``, each with its members and a k on the grid."""
+    """True when ``receipt`` is EXP-189 arm ``arm`` on the inner window with a dict body; A, B and D bodies hold exactly the units
+    of ``arm``, each with its members and a grid k (a bool is not a k)."""
+    body = receipt.get("body")
     if not (receipt.get("experiment") == "EXP-189" and receipt.get("arm") == arm and receipt.get("window") == "2023H2-2024"
-            and isinstance(receipt.get("body"), dict)):
+            and isinstance(body, dict)):
         return False
     if arm not in ("A", "B", "D"):
         return True
-    body = receipt["body"]
-    if set(body) != set(units(arm)):
-        return False
-    for unit, members in units(arm).items():
-        entry = body[unit]
-        if not isinstance(entry, dict) or entry.get("members") != list(members):
-            return False
-        k = entry.get("k")
-        if isinstance(k, bool) or not isinstance(k, (int, float)) or k not in GRID:
-            return False
-    return True
+    return set(body) == set(units(arm)) and all(
+        isinstance(body[u], dict) and body[u].get("members") == list(m) and _grid_k(body[u].get("k"))
+        for u, m in units(arm).items())
+
+
+def _grid_k(k):
+    return not isinstance(k, bool) and isinstance(k, (int, float)) and k in GRID
 
 
 def frozen(out, arm, inputs_hash):
-    """The factors of ``arm`` from its receipt. A missing receipt refuses tuning_receipt_missing (load_receipt); one that fails the
-    identity and shape checks, or is bound to other inputs, refuses tuning_receipt_changed. The receipt is validated before its factors are read."""
-    receipt = receipts.load_receipt(_path(out, arm))
+    """The factors of ``arm`` from its receipt, validated before they are read. A missing receipt refuses tuning_receipt_missing
+    (load_receipt); a failed identity or shape check, or other inputs, refuses tuning_receipt_changed."""
+    receipt = receipts.load_receipt(Path(out) / "receipts" / f"tuning_{arm}.json")
     if not _valid(arm, receipt):
         raise Refusal(_CONFLICT, f"tuning receipt {arm} does not match EXP-189 arm {arm} on the inner window",
                       {"reason": "tuning_receipt_changed"})
