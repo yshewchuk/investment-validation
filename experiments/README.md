@@ -145,7 +145,7 @@ Saved identity and later outcome/worker APIs' separate read policies do not chan
 
 `size_pnl_audit` (Amendment 6, production-audit table) is consumed only by `size_pnl_assemble` (`--stage report`); it calls `size_pnl_report.md_table` and holds static text with no I/O.
 
-`size_pnl_breakeven` (Amendment 7, breakeven alpha) is consumed only by `size_width_success` (EXP-189 W6a, the T7 breakeven margin) and, for EXP-188, `size_pnl_driver` (`_rows` adds the `pnl_dollars_a0/_a1` endpoint columns) and `size_pnl_assemble` (`--stage report`, the breakeven section); it calls `engine.fills.breakeven_alpha` and never reads or writes files. It is experiment-only: it has no production entrypoint and nothing on the board reaches it.
+`size_pnl_breakeven` (Amendment 7, breakeven alpha) is consumed only by `size_pnl_driver` (`_rows` adds the `pnl_dollars_a0/_a1` endpoint columns) and `size_pnl_assemble` (`--stage report`, the breakeven section); it calls `engine.fills.breakeven_alpha` and never reads or writes files. It is experiment-only: it has no production entrypoint and nothing on the board reaches it.
 
 `size_pnl_gprod` (Amendment 3, G_PROD) is consumed only by `size_pnl_driver` (`Sources.gate`, the outer stage) and `size_pnl_sources.build_sources` (`load_gate`); it calls `size_pnl_gate_fold` (constants), `size_pnl_pool.pool_history`, `size_pnl_straddle.decide`, `label_availability` and production's `tier4.interval_for`, and has no other caller.
 

@@ -1,11 +1,13 @@
 """EXP-189 W6a: the section 7 success table, recommendation order, proposed board rule and T7 rendering. Pure functions."""
 import math
+import numbers
 
-from experiments import size_pnl_breakeven as breakeven
+from engine.evaluate import breakeven_alpha_from_sweep
 from experiments.size_pnl_report import md_table
 from experiments.size_pnl_shortvol import NAMES
 
 PERIODS = ("2025", "2023H2", "2024")
+LADDER = (0.0, 0.25, 0.5, 0.75, 1.0)
 MARGIN = 0.05
 MAX_LOST = 2
 PREFERENCE = ("A", "D", "C", "B", "E")
@@ -16,41 +18,87 @@ RULE_HEADERS = ["structure", "k", "divisor", "flatness_se", "declined_share"]
 
 
 def _num(x):
+    """``x`` as a float if it is a finite real number (bool and str excluded), else None."""
+    if isinstance(x, bool) or not isinstance(x, numbers.Real):
+        return None
+    x = float(x)
+    return x if math.isfinite(x) else None
+
+
+def _fmt(x):
     """``x`` to 3 decimals, or n/a for None."""
     return "n/a" if x is None else f"{x:.3f}"
 
 
-def breakeven_alpha(a0, a1, trades):
-    """Breakeven alpha of the alpha-0 and alpha-1 totals over ``trades`` taken trades, or None (not_available)."""
-    if trades == 0 or not (math.isfinite(a0) and math.isfinite(a1)) or (a0 == 0 and a1 == 0):
+def _get(obj, *keys):
+    """``obj`` indexed by ``keys`` in turn; None when a key is missing or a level is not a dict."""
+    for k in keys:
+        if not isinstance(obj, dict) or k not in obj:
+            return None
+        obj = obj[k]
+    return obj
+
+
+def breakeven_alpha(sweep):
+    """The EXP-187 measure of design section 7: breakeven alpha of mean return per trade over LADDER, or None (not_available).
+
+    ``sweep`` is {alpha: {"mean": mean return per trade}} and must hold every ladder alpha with a finite real mean;
+    otherwise None. A crossing of zero is interpolated by ``engine.evaluate.breakeven_alpha_from_sweep``. With no
+    crossing: 0.0 if every mean is >= 0 (always positive), 1.0 if any is negative (always negative). All means exactly
+    zero is None.
+    """
+    if not isinstance(sweep, dict):
         return None
-    x = breakeven.breakeven_alpha(a0, a1)
+    means = []
+    for a in LADDER:
+        point = sweep.get(a)
+        m = _num(point.get("mean")) if isinstance(point, dict) else None
+        if m is None:
+            return None
+        means.append(m)
+    if all(m == 0.0 for m in means):
+        return None
+    x = breakeven_alpha_from_sweep({a: {"mean": m} for a, m in zip(LADDER, means)})
     if x is not None:
         return x
-    return 0.0 if a0 > 0 or (a0 >= 0 and a1 >= 0) else 1.0
+    return 0.0 if min(means) >= 0 else 1.0
+
+
+def _breakeven_2025(breakevens, label):
+    """The 2025 breakeven alpha of ``label``, or None when absent, non-dict or not a finite real number."""
+    return _num(_get(breakevens, label, "2025"))
 
 
 def _lost(arm, production):
-    """Structures whose 2025 total_return in ``arm`` is below production's; all of them when 2025 is missing."""
-    if "2025" not in arm or "2025" not in production:
+    """Structures whose 2025 total_return in ``arm`` is below production's. A structure whose return is missing or
+    not a finite number (NaN included) in either counts as lost; all of them count when 2025 structures are missing."""
+    a, p = _get(arm, "2025", "structures"), _get(production, "2025", "structures")
+    if not isinstance(a, dict) or not isinstance(p, dict):
         return len(NAMES)
-    a, p = arm["2025"]["structures"], production["2025"]["structures"]
-    return sum(not (a[n]["total_return"] >= p[n]["total_return"]) for n in NAMES)
+    lost = 0
+    for n in NAMES:
+        arm_ret = _num(_get(a, n, "total_return"))
+        prod_ret = _num(_get(p, n, "total_return"))
+        if arm_ret is None or prod_ret is None or arm_ret < prod_ret:
+            lost += 1
+    return lost
 
 
 def _row(label, arm, production, breakevens, e_summary):
     """One arm's success row: periods beaten, the 2025 breakeven margin, the structure guard and the same-k flag."""
     fails, beats = [], {}
     for p in PERIODS:
-        if p not in arm or p not in production:
+        arm_ret = _num(_get(arm, p, "account", "total_return"))
+        prod_ret = _num(_get(production, p, "account", "total_return"))
+        if arm_ret is None or prod_ret is None:
             beats[p] = False
             fails.append(f"missing_{p}")
             continue
-        beats[p] = arm[p]["account"]["total_return"] > production[p]["account"]["total_return"]
+        beats[p] = arm_ret > prod_ret
         if not beats[p]:
             fails.append(f"not_beat_{p}")
-    x = breakevens.get(label, {}).get("2025")
-    base = breakevens.get("production", {}).get("2025")
+    x = _breakeven_2025(breakevens, label)
+    base = _breakeven_2025(breakevens, "production")
     margin_ok = x is not None and base is not None and x <= base + MARGIN
     if x is None or base is None:
         fails.append("breakeven_not_available")
@@ -78,7 +126,9 @@ def _row(label, arm, production, breakevens, e_summary):
 
 
 def success_table(production, arms, breakevens, e_summary=None):
-    """{arm: row} of the section 7 success rule for each arm in ``arms`` against production."""
+    """{arm: row} of the section 7 success rule for each arm in ``arms`` against production; ValueError unless both are dicts."""
+    if not isinstance(production, dict) or not isinstance(arms, dict):
+        raise ValueError("production and arms must be dicts")
     return {label: _row(label, arm, production, breakevens, e_summary) for label, arm in arms.items()}
 
 
@@ -100,8 +150,8 @@ def board_rule(label, factors, flatness, declined):
 
 def render_t7(table):
     """T7 as markdown: the success table over its arms, then one recommendation line."""
-    rows = [[label, r["beats"]["2025"], r["beats"]["2023H2"], r["beats"]["2024"], _num(r["breakeven"]["x"]),
-             _num(r["breakeven"]["production"]), r["lost_structures"], r["passed"], ";".join(r["fails"])]
+    rows = [[label, r["beats"]["2025"], r["beats"]["2023H2"], r["beats"]["2024"], _fmt(r["breakeven"]["x"]),
+             _fmt(r["breakeven"]["production"]), r["lost_structures"], r["passed"], ";".join(r["fails"])]
             for label, r in table.items()]
     rec = recommend(table)
     line = "Recommendation: no change recommended." if rec is None else f"Recommendation: arm {rec}."
@@ -114,6 +164,6 @@ def render_rule(rule):
         return "No change recommended."
     if rule["recommendation"] == "E":
         return f"Recommendation: E, {rule['rule']}."
-    rows = [[r["structure"], _num(r["k"]), r["divisor"], _num(r["flatness_se"]), _num(r["declined_share"])]
+    rows = [[r["structure"], _fmt(r["k"]), r["divisor"], _fmt(r["flatness_se"]), _fmt(r["declined_share"])]
             for r in rule["rows"]]
     return "\n\n".join([f"### Proposed board width rule (arm {rule['recommendation']})", md_table(RULE_HEADERS, rows)])

@@ -5,6 +5,7 @@ from experiments import size_width_success as sws
 from experiments.size_pnl_shortvol import NAMES
 
 PERIODS = sws.PERIODS
+LADDER = sws.LADDER
 
 
 def _ev(ret, lost=0):
@@ -23,27 +24,65 @@ def _be(x):
     return {p: x for p in PERIODS}
 
 
+def _sweep(means):
+    """A breakeven sweep over LADDER with mean return ``means`` (one per ladder alpha, in order)."""
+    return {a: {"mean": m} for a, m in zip(LADDER, means)}
+
+
 PROD = {p: _ev(100.0) for p in PERIODS}
 BE = {"production": _be(0.5), "A": _be(0.5)}
 
 
+# --- breakeven alpha (sweep input) ---
+
 def test_breakeven_crossing():
-    assert sws.breakeven_alpha(-100.0, 100.0, 5) == pytest.approx(0.5)
+    assert sws.breakeven_alpha(_sweep([-1.0, -0.5, 0.0, 0.5, 1.0])) == pytest.approx(0.5)
+
+
+def test_breakeven_asymmetric_crossing_hand_computed():
+    # between alpha 0.25 (mean -1) and 0.5 (mean 3): 0.25 + (0 - (-1)) * (0.5 - 0.25) / (3 - (-1)) = 0.3125
+    assert sws.breakeven_alpha(_sweep([-2.0, -1.0, 3.0, 4.0, 5.0])) == pytest.approx(0.3125)
 
 
 def test_breakeven_always_positive():
-    assert sws.breakeven_alpha(10.0, 20.0, 5) == 0.0
+    assert sws.breakeven_alpha(_sweep([1.0, 2.0, 3.0, 4.0, 5.0])) == 0.0
 
 
 def test_breakeven_always_negative():
-    assert sws.breakeven_alpha(-10.0, -20.0, 5) == 1.0
+    assert sws.breakeven_alpha(_sweep([-1.0, -2.0, -3.0, -4.0, -5.0])) == 1.0
 
 
-def test_breakeven_not_available():
-    assert sws.breakeven_alpha(-100.0, 100.0, 0) is None
-    assert sws.breakeven_alpha(float("nan"), 100.0, 5) is None
-    assert sws.breakeven_alpha(0.0, 0.0, 5) is None
+def test_breakeven_all_zero_is_none():
+    assert sws.breakeven_alpha(_sweep([0.0] * 5)) is None
 
+
+def test_breakeven_missing_ladder_alpha_is_none():
+    sweep = _sweep([-1.0, -0.5, 0.0, 0.5, 1.0])
+    del sweep[0.5]
+    assert sws.breakeven_alpha(sweep) is None
+
+
+def test_breakeven_string_mean_is_none():
+    sweep = _sweep([-1.0, -0.5, 0.0, 0.5, 1.0])
+    sweep[0.25]["mean"] = "-0.5"
+    assert sws.breakeven_alpha(sweep) is None
+
+
+def test_breakeven_bool_and_nan_mean_are_none():
+    sweep = _sweep([-1.0, -0.5, 0.0, 0.5, 1.0])
+    sweep[0.0]["mean"] = True
+    assert sws.breakeven_alpha(sweep) is None
+    sweep = _sweep([-1.0, -0.5, 0.0, 0.5, 1.0])
+    sweep[1.0]["mean"] = float("nan")
+    assert sws.breakeven_alpha(sweep) is None
+
+
+def test_breakeven_not_a_dict_is_none():
+    assert sws.breakeven_alpha(None) is None
+    assert sws.breakeven_alpha([(0.0, -1.0)]) is None
+
+
+# --- success rule ---
 
 def test_pass_case():
     row = sws.success_table(PROD, {"A": _arm()}, BE)["A"]
@@ -81,6 +120,29 @@ def test_breakeven_none_fails():
     row = sws.success_table(PROD, {"A": _arm()}, be)["A"]
     assert row["passed"] is False
     assert row["fails"] == ["breakeven_not_available"]
+
+
+@pytest.mark.parametrize("bad", ["0.5", True, float("nan"), None], ids=["str", "bool", "nan", "none"])
+def test_arm_breakeven_not_finite_real_is_not_available(bad):
+    be = {"production": _be(0.5), "A": {**_be(0.5), "2025": bad}}
+    row = sws.success_table(PROD, {"A": _arm()}, be)["A"]
+    assert row["breakeven"]["x"] is None
+    assert row["passed"] is False
+    assert row["fails"] == ["breakeven_not_available"]
+
+
+def test_string_breakeven_not_available():
+    be = {"production": _be(0.5), "A": {**_be(0.5), "2025": "0.5"}}
+    row = sws.success_table(PROD, {"A": _arm()}, be)["A"]
+    assert row["fails"] == ["breakeven_not_available"]
+    assert row["passed"] is False
+
+
+def test_non_dict_breakeven_entry_not_available():
+    be = {"production": _be(0.5), "A": "0.5"}
+    row = sws.success_table(PROD, {"A": _arm()}, be)["A"]
+    assert row["fails"] == ["breakeven_not_available"]
+    assert row["passed"] is False
 
 
 def test_production_breakeven_none_fails():
@@ -172,8 +234,100 @@ def test_nan_structures_over_guard_fail():
     assert row["fails"] == ["guard"]
 
 
+def test_string_structure_return_counts_as_lost():
+    arm = _arm()
+    arm["2025"]["structures"][NAMES[0]]["total_return"] = "150.0"
+    row = sws.success_table(PROD, {"A": arm}, BE)["A"]
+    assert row["lost_structures"] == 1
+    assert row["passed"] is True
+
+
+def test_production_structure_invalid_counts_as_lost():
+    prod = {p: _ev(100.0) for p in PERIODS}
+    prod["2025"]["structures"][NAMES[0]]["total_return"] = None
+    row = sws.success_table(prod, {"A": _arm()}, BE)["A"]
+    assert row["lost_structures"] == 1
+
+
+def test_missing_2025_structures_counts_all_lost():
+    arm = _arm()
+    del arm["2025"]["structures"]
+    row = sws.success_table(PROD, {"A": arm}, BE)["A"]
+    assert row["lost_structures"] == len(NAMES)
+    assert row["fails"] == ["guard"]
+
+
+# --- admission: missing or invalid periods and accounts ---
+
+def test_arm_missing_account_key_fails_without_raising():
+    arm = _arm()
+    del arm["2025"]["account"]
+    row = sws.success_table(PROD, {"A": arm}, BE)["A"]
+    assert row["beats"]["2025"] is False
+    assert row["fails"] == ["missing_2025"]
+    assert row["passed"] is False
+
+
+def test_arm_missing_2025_fails_missing_and_guard():
+    arm = _arm()
+    del arm["2025"]
+    row = sws.success_table(PROD, {"A": arm}, BE)["A"]
+    assert row["beats"] == {"2025": False, "2023H2": True, "2024": True}
+    assert row["lost_structures"] == len(NAMES)
+    assert row["fails"] == ["missing_2025", "guard"]
+    assert row["passed"] is False
+
+
+def test_arm_missing_period_fails_missing():
+    arm = _arm()
+    del arm["2024"]
+    row = sws.success_table(PROD, {"A": arm}, BE)["A"]
+    assert row["beats"]["2024"] is False
+    assert row["fails"] == ["missing_2024"]
+    assert row["passed"] is False
+
+
+def test_arm_string_account_return_fails_missing_period():
+    arm = _arm()
+    arm["2024"]["account"]["total_return"] = "101.0"
+    row = sws.success_table(PROD, {"A": arm}, BE)["A"]
+    assert row["beats"]["2024"] is False
+    assert row["fails"] == ["missing_2024"]
+
+
+def test_production_missing_period_fails_missing():
+    prod = {p: _ev(100.0) for p in PERIODS}
+    del prod["2023H2"]
+    row = sws.success_table(prod, {"A": _arm()}, BE)["A"]
+    assert row["beats"]["2023H2"] is False
+    assert row["fails"] == ["missing_2023H2"]
+    assert row["passed"] is False
+
+
+@pytest.mark.parametrize("prod, arms", [([], {"A": _arm()}), (PROD, [("A", _arm())])],
+                         ids=["production_not_dict", "arms_not_dict"])
+def test_non_dict_inputs_raise_value_error(prod, arms):
+    with pytest.raises(ValueError):
+        sws.success_table(prod, arms, BE)
+
+
+# --- recommendation order ---
+
 def test_recommend_prefers_a_over_c():
     assert sws.recommend({"C": {"passed": True}, "A": {"passed": True}}) == "A"
+
+
+def test_recommend_d_before_c():
+    assert sws.recommend({"C": {"passed": True}, "D": {"passed": True}}) == "D"
+
+
+def test_recommend_c_before_b():
+    assert sws.recommend({"B": {"passed": True}, "C": {"passed": True}}) == "C"
+
+
+def test_recommend_e_last():
+    assert sws.recommend({"E": {"passed": True}, "B": {"passed": True}}) == "B"
+    assert sws.recommend({"E": {"passed": True}}) == "E"
 
 
 def test_recommend_b_when_only_b_and_e_pass():
@@ -185,6 +339,8 @@ def test_recommend_none_when_nothing_passes():
     assert sws.recommend({"A": {"passed": False}}) is None
     assert sws.recommend({}) is None
 
+
+# --- board rule ---
 
 def test_board_rule_no_change():
     assert sws.board_rule(None, {}, {}, {}) == {"recommendation": "no_change", "rows": []}
@@ -208,6 +364,8 @@ def test_board_rule_e_is_expectation_rule():
     assert "exp_pnl_sim" in rule["rule"]
 
 
+# --- rendering ---
+
 def test_render_t7_has_title_arms_and_recommendation():
     table = sws.success_table(PROD, {"A": _arm(), "B": _arm(lost=3)}, BE)
     text = sws.render_t7(table)
@@ -216,3 +374,54 @@ def test_render_t7_has_title_arms_and_recommendation():
     assert "| B |" in text
     assert "0.500" in text
     assert "Recommendation: arm A." in text
+
+
+def test_render_t7_exact_no_recommendation():
+    table = sws.success_table(PROD, {"A": _arm(ret=100.0)}, BE)
+    expected = "\n\n".join([
+        "### T7 success table (2025 NOT blind for widths)",
+        "\n".join([
+            "| arm | beats 2025 | beats 2023H2 | beats 2024 | breakeven x | breakeven production | lost structures | passed | fails |",
+            "|---|---|---|---|---|---|---|---|---|",
+            "| A | False | False | False | 0.500 | 0.500 | 0 | False | not_beat_2025;not_beat_2023H2;not_beat_2024 |",
+        ]),
+        "Recommendation: no change recommended.",
+    ])
+    assert sws.render_t7(table) == expected
+
+
+def test_render_t7_exact_recommended():
+    table = sws.success_table(PROD, {"A": _arm()}, BE)
+    expected = "\n\n".join([
+        "### T7 success table (2025 NOT blind for widths)",
+        "\n".join([
+            "| arm | beats 2025 | beats 2023H2 | beats 2024 | breakeven x | breakeven production | lost structures | passed | fails |",
+            "|---|---|---|---|---|---|---|---|---|",
+            "| A | True | True | True | 0.500 | 0.500 | 0 | True |  |",
+        ]),
+        "Recommendation: arm A.",
+    ])
+    assert sws.render_t7(table) == expected
+
+
+def test_render_rule_a_exact():
+    rule = sws.board_rule("A", {n: 1.5 for n in NAMES}, {n: 0.2 for n in NAMES}, {n: 0.1 for n in NAMES})
+    rows = "\n".join(f"| {n} | 1.500 | divisor / 1.5 | 0.200 | 0.100 |" for n in NAMES)
+    expected = "\n\n".join([
+        "### Proposed board width rule (arm A)",
+        "\n".join([
+            "| structure | k | divisor | flatness_se | declined_share |",
+            "|---|---|---|---|---|",
+            rows,
+        ]),
+    ])
+    assert sws.render_rule(rule) == expected
+
+
+def test_render_rule_e_exact():
+    assert sws.render_rule(sws.board_rule("E", {}, {}, {})) == \
+        "Recommendation: E, pick k maximising exp_pnl_sim per event."
+
+
+def test_render_rule_no_change_exact():
+    assert sws.render_rule(sws.board_rule(None, {}, {}, {})) == "No change recommended."

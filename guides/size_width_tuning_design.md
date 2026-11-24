@@ -88,7 +88,8 @@ EXP-189 has its own `spec.yaml` (arms, grid, `N`, thresholds, success rule), its
 | W3 | Seeded draws, `tuning_C` receipt, anchor, on W4's sweep | ~170 / ~170 / 60 | W2, W4 |
 | W4 | Shared sweep and objective, tunings A, B, D, arm E (per-event `exp_pnl_sim` argmax, curves), 2025 and inner runs | ~170 / ~170 / 60 | W1 (parallel with W2) |
 | W5 | Tolerance bands for three `phi`, `tuning_band` receipt, realised-width and decline tables (T8), `fallback` arm, T9, adoption rule | ~170 / ~170 / 80 | W4 |
-| W6 | Breakeven alpha, report T2-T7, success table, proposed rule, driver and smoke, runbook | ~150 / ~140 / 100 | W5 |
+| W6a | Breakeven alpha (ladder sweep), T7 success table, recommendation, proposed rule | ~110 / ~170 / 20 | W4 |
+| W6b | Driver and smoke, report T2-T6, runbook | ~100 / ~90 / 80 | W5, W6a |
 
 Re-split (supervisor, user 2026-11-24): W2 and W4 run in parallel; W4 builds the shared sweep and objective, W3 adds only seeded draws, `tuning_C` and the anchor.
 
