@@ -1,5 +1,7 @@
 # SIZE decision-level P&L re-score (design)
 
+**Amendment 6 (section 18, 2026-11-24, post-hoc user revision) makes this experiment production-exact: the re-tuned arm, R_L and R_L2 are removed; the original text below is kept unedited for the record.**
+
 Design; S1 (PR #2570) adds the scaffold and guard, later slices add the rest. Contract text lands in the ARCHITECTURE files with the slice that changes a contract (net-zero: both docs are at their word ceiling). Experiment id **EXP-188** (next free: the local ledger ends at EXP-187, no open PR claims it; S1 re-checks).
 
 **Question (user, 2026-11-17).** Short-vol structures have capped loss and set strike width from the forecast, so they may prefer a *median* forecast (MAE-like). Long straddles pay for the tail, so they may prefer a *mean* forecast (RMSE-like). Does decision P&L agree? A SEPARATE experiment: it reads stored SIZE predictions and scores the trading decisions they produce, selects nothing for SIZE and feeds no P&L back into it.
@@ -326,3 +328,75 @@ python3 -m experiments.size_pnl_gate_fold inputs --year 2025 --admitted-events /
 **Unchanged.** Short-vol scoring, tuning and receipts' content, the roster, marks, sizing, alpha, the exit rules, R_L2's rule, G_PROD's gate and inputs, the `decisions.parquet` schema.
 
 **Registration.** The spec's `amendments` list gains Amendment 5; the spec hash changes, so a new PLANNED row is needed (the supervisor registers it; `experiments/LEDGER.csv` is not touched here). Inner receipts bind `spec_hash`, so the supervisor reruns all stages.
+
+## 18. Amendment 6 (2026-11-24): production-exact (post-hoc revision by the user)
+
+**Reason (user decision 2026-11-24).** EXP-188 must compare forecast models only; every other behaviour is exactly production's. Width tuning moves to a separate experiment (EXP-189, another owner); nothing here designs it. **This is a post-hoc revision by the user, made after the pre-registered verdict inputs were seen** (2025 outer outputs, as disclosed in Amendments 3-5). Sections 1-17 above, including the pre-registered H1-H3, R_L/R_L2, the re-tuned arm and the T5/T7/T10 definitions, stay unedited for the record; the report labels every changed verdict "post-hoc revision by the user, 2026-11-24" and the amended spec lists the original text under `preregistered_original`.
+
+**Changes.**
+1. **Short vol: as-is only.** Remove the re-tuned arm, the `c` tuning stage and the Amendment 4 grid. Width is production's rule at k=1 (`forecast_params(name, pred)`; no divisor `c`). T5 goes; T7 and T10 lose their retuned rows. The `tuning` receipt and `size_pnl_tuning` go with them; the inner stage keeps pools, cutoffs and decisions. The "sign holds in both geometry arms" Clear condition is dropped (one arm).
+2. **Straddles: G_PROD only.** Production's gate refit once through 2024 (Amendment 3) is the only rule; R_L and R_L2 are removed. H2 (`d < 0`) is evaluated on G_PROD over E_str. The G_PROD sensitivity framing goes, since it is now the rule; its look-ahead caveat (registered threshold chosen on all-year walk-forward predictions) and the "favours M0's forecast scale" caveat stay in the report. The "both R_L and R_L2" Clear condition is dropped. H3 pairs E with E_str as before.
+3. **Seven independent books, no chooser.** The report states plainly: production's DYN-SV chooser trades one structure per event; EXP-188 scores all seven short-vol structures as independent books, so book totals are not board P&L.
+4. **Production audit** (below): every divergence is fixed to production in the slices, or is an open question.
+5. **Board-match check** for M0 (below).
+6. **Kept unchanged:** marks (primary and `marks_mid`), the Amendment 2 cash-secured accounts, the synthetic T11 controls.
+7. **Registration.** `spec.yaml` gains Amendment 6; the hash changes; a new PLANNED row (the supervisor registers it; `experiments/LEDGER.csv` is never written here); a full rerun of all stages.
+
+### Production audit
+
+"Imports" means the experiment calls or reads the production symbol. Rows 1-3 and 7-12 have a fix or a pinned test; rows marked *keep* are justified divergences, each flagged below as an open question where the user may disagree.
+
+| # | Rule | Production source | EXP-188 today | Status and action |
+| --- | --- | --- | --- | --- |
+| 1 | Width rule (divisors) | `engine/forecast_sizing.py` `forecast_params`, `FORECAST_SIZED`, `PLATEAU_CENTRE`, `FIVE_STRIKE_PEAK`, `SHORT_VOL_OUTER` | `size_pnl_shortvol._width_params` calls `forecast_params(name, pred / c)` | Imports. Fix: drop `c`; call `forecast_params(name, pred)`. |
+| 2 | `WIDTH_MIN/MAX`, decline | same module (inside the rules); `engine/score.py:3602` flags `NO_FORECAST`, no structure | `width_declined`, a non-trade at P&L 0 | Imports (implicitly). Same outcome: no trade. Kept, counted by reason. |
+| 3 | Strike selection and snapping | `engine/structures.py` `StrikeSelector.select` (`offset_from`, `mirror`, `bracket`), driven by `price_structure`; the only width path is `width_moneyness` snapped to the listed ladder (no separate dollar-width path found, see Q7) | selectors imported via `STRUCTURES[name](**params)`, but `shortvol.resolve` re-implements `price_structure`'s resolve loop | **Re-implements (fix to import).** Resolve through `price_structure` on a `ChainSnapshot` built from the ladder chunk (one expiry, puts, entry quotes); delete the local loop. Decline and error paths below. |
+| 4 | `ladder_too_coarse` | `price_structure` raises `LadderTooCoarse` on any two legs (reference legs included) at the same exact `(right, strike, expiry)` | `np.isclose` over all leg pairs | **Re-implements (fix to import).** Falls out of row 3; the local check is deleted. A decline is a non-trade at P&L 0, as the board withholds (`NO_FORECAST`/error). |
+| 5 | Zero-floor re-check | none: production trades what `price_structure` returns | `_floor_ok` drops a negative-floor candidate (EXP-133 rule) | **Divergence, fix.** Delete the drop; the structure trades as production would. Count `negative_floor_taken` as a diagnostic in the report (never a rule). Rung-3 marks stay at zero; if the count is nonzero the report says so. |
+| 6 | Entry cost not a debit | `pnl_sim.expected_pnl` returns `None` for `entry_cost <= 0`: `exp_pnl_sim` missing, verdict undetermined | `entry_not_debit` non-trade at P&L 0 for cost below `MIN_DEBIT` (1e-6), event stays in E | **Divergence, fix.** `cost <= 0` is undetermined (leaves E for all models, as any missing fact); a positive cost is simulated at any size. `MIN_DEBIT` is deleted. Counted by reason. |
+| 7 | `exp_pnl_sim` | `engine/pnl_sim.py` `expected_pnl`, `ResidualPool`, `DRAWS`, `MIN_POOL` | imports `DRAWS`, `ResidualPool`; `put_means` + `structure_pnl` is the linear fast path | *Keep*, imports the constants. Held to `expected_pnl` within 1e-9 by the existing equivalence preflight, which also runs through the row-3 resolver. Seed: production `key=strategy` (`Scorer._expectation`); EXP-188 `key=event_id` (R3) so the stream is common across models and structures. Noise only. Q3. |
+| 8 | Residual pool | `Scorer._residual_pool`: all Tier-4 history from 2018 | per-model `ResidualPool`, 2023+ common support | *Keep* (Decision 4; the model's own residuals are the forecast model). T9 reports the production-length pool as the labelled sensitivity. |
+| 9 | Trailing cutoff | `pnl_sim.trailing_cutoff` (`WINDOW_MONTHS`, `QUANTILE`, `min_window=100`) over `load_history()`, ONE stored series for all strategies, seeded from EXP-129 | imports `trailing_cutoff`; copies `MIN_WINDOW = 100`; history is the model's own scores per structure | Function imports. **Fix:** delete the `MIN_WINDOW` copy (use the default). *Keep* the history: production's stored series is a function of production's forecast and cannot be reused per model. Per-structure vs pooled: Q2. |
+| 10 | `MCAP_FLOOR`, `MAX_REL_SPREAD`, mean relative spread | `engine/entry_rules.py` (also copied in `engine/v2/scoring/native_entry_rule.py`); `engine.score._mean_relative_spread(priced)` | imports the two constants; `entry_legs` re-implements the spread (all resolved legs, mid > 0) | Constants import. **Fix:** compute the spread by calling `_mean_relative_spread` on the row-3 `StructurePrice`. A test pins the legacy constants equal to the native copy. |
+| 11 | `CAPITAL_PER_TRADE`, lots | `engine/portfolio.py` `build_book`: `floor(capital / (cost * 100))`, floor of one, cost 0 gives 1 | imports `CAPITAL_PER_TRADE`, `CONTRACT_MULTIPLIER`; `straddle.lots` re-implements the line | The line is inline in `build_book`, not callable. Keep `lots`; a test runs `build_book` on synthetic ledger rows and requires equal contracts. |
+| 12 | Entry/exit timing | factory `entry_offset=0`, `exit_offset=1`; `calendar.last_pre_print` (`engine/score.py`) | `pinned()` checks the factory defaults (imports); sessions from `plan_frame` through the existing calendar helper | Imports. Add a test: AMC and BMO synthetic events give the sessions `last_pre_print` gives. |
+| 13 | Expiry selection | each factory leg's `ExpirySelector` (`first_post_event`; v2 port `engine/v2/research/_pricing.py`) | `size_pnl_ladder._SELECTOR = ExpirySelector(kind="first_post_event")`, hard-coded | **Copies (fix).** `pinned()` requires every leg's expiry selector equal to the ladder's (kind and `max_dte`), else `factory_default_mismatch`. |
+| 14 | Straddle universe | `engine/score.py` `GATE_MCAP_FLOOR`, `BAD_QUOTE_COST_PCT` (`engine/fills.py`) | imports both (Amendment 5) | Imports. The BAD_QUOTE cost is at the mid mark; it equals production's at alpha 0.5. |
+| 15 | Straddle gate | registered threshold and recipe (`engine/models/registry.json`, `gate.fit`), refit through 2024 (Amendment 3) | `size_pnl_gate_fold` calls production's `fit`, `train_all._engine_trades`, `gate_forecast_analog.build_dataset` | Imports (user-approved refit). Unchanged. |
+| 16 | Straddle legs and entry quotes | `STRUCTURES["STR-THRU"]` ATM via `StrikeSelector`; `price_structure` prices a zero-bid quote normally | `straddle.atm_legs` re-implements ATM (ties to the lower strike); `entry_state` refuses zero-bid and locked entries | **Re-implements and diverges (fix).** Resolve through `price_structure` as row 3; a zero-bid or locked entry quote is priced; crossed or non-finite stays undetermined (`FillModel` refuses). |
+| 17 | Marks and exits | `engine/replay.py` `price_structure(..., closing=True)`, `structure_return`: every leg at the fill alpha | primary: rung-2 legs at alpha 0; `marks_mid`: every usable leg at alpha | Kept by user decision. Plainly: `marks_mid` is the production rule; the primary is the pre-registered conservative one. A test checks `marks_mid` against `structure_return`. |
+| 18 | DYN-SV chooser | `engine/score.py` chooser | out of scope | Seven independent books; statement in the report (change 3). |
+
+**Slice impact.** Rows 3-4, 10 and 16 route resolution through `price_structure`, which runs about 600,000 times (7 structures x 12 models x ~7,000 events; the straddle adds one per model-event). If the 50-ticker smoke shows it too slow, the fallback is to keep the local resolver and add a runtime parity preflight over a fixed sample against `price_structure` (like the fast-path preflight), refusing on any difference; the audit row then reads "re-implements, held by preflight".
+
+### Timing: D-1 vs D0
+
+The board of record decides at D0 while the stored forecasts are lead-1 (made at D-1); the user approved this rule on 2026-10-31 and EXP-188 keeps it. Recommendation: keep it. The v14 predictions are sealed at lead 1 and are the object under comparison; a D0 decision needs different forecasts and breaks the sealed inputs. Any D0 test is another experiment.
+
+### Board-match check (M0)
+
+The ledger is `ledger/predictions/*.jsonl` (`engine.ledger.read_predictions`; rows carry `event_id`, `strategy`, `structure.legs` with strike, side, qty). It starts 2026-09-02; EXP-188's population ends in 2025, so the common event set is expected to be empty. The check reads the ledger through `read_predictions` by path from `--sources-config` (optional `board_ledger`; never read in tests), intersects on `event_id` and strategy for M0's as-is strikes, and reports the number of common events, strike-set matches and the match rate, with mismatches by cause (width, snap, collision). With no common events it writes `not_available` with reason `no_common_events` and both date ranges; an unreachable path writes `not_available` with `ledger_unreachable`. The board's recorded strikes come from a D0 decision with a live forecast, so a mismatch is expected to include forecast differences; the report says so. The in-run substitute for the same question is the row-3 resolver, which is production's own `price_structure`.
+
+### Open questions for the user
+
+1. **T11 (synthetic controls).** With tuning gone, T11 is a width-calibration control (X1 failed on width, Amendment 4) and costs about 1.75 h per run. Recommendation: keep it here as the power read of the as-is arm (a perfect-move oracle that loses under as-is widths is itself the finding), and let EXP-189 carry its own copy. Alternative: move T11 to EXP-189 and cut this run's cost.
+2. **Cutoff history.** Production uses one stored series for the bar of all seven structures; EXP-188 uses each model's own scores per structure. Recommendation: keep per (model, structure); a single pooled series per model would mix structures whose returns differ by an order of magnitude.
+3. **Draw stream.** Keep `key=event_id` (common random numbers across models; noise only), against production's `key=strategy` (7x the simulation cost).
+4. **Residual pool length.** Keep Decision 4 (2023+ for every model, T9 shows production's full-history pool).
+5. **D-1.** Keep (above).
+6. **Which board.** Production exists twice, legacy `engine.*` and the v2 native stages; EXP-188 imports the legacy symbols and pins the native constants equal by test. Confirm legacy is the reference.
+7. **"Dollar-width path."** I found one width path in `engine/structures.py` (`width_moneyness` snapped to the listed ladder, `LadderTooCoarse` on collision). If the board has a second path that sizes legs in dollars, name its file and the audit gains a row.
+
+### Split list (code PRs, about 150 non-test lines each; deletions are free)
+
+| Slice | Scope | After |
+| --- | --- | --- |
+| A6-1 | Remove the re-tuned arm, `c`, `size_pnl_tuning`, the tuning receipt, T5 and the retuned T7/T10 rows; width through `forecast_params(name, pred)`; `spec.yaml` Amendment 6 and `preregistered_original` | - |
+| A6-2 | Short-vol parity: `price_structure` resolve (rows 3-4, 10), delete `_floor_ok` and `MIN_DEBIT` (rows 5-6), `MIN_WINDOW` and the expiry pin (rows 9, 13), tests for rows 10-12 | A6-1 |
+| A6-3 | Straddle: G_PROD only, delete R_L/R_L2, `price_structure` legs and entry quotes (row 16), H2 and T6/T7/T10 on G_PROD over E_str | A6-1 |
+| A6-4 | Board-match reader and report section; `marks_mid` vs `structure_return` test | A6-2 |
+| A6-5 | Report: post-hoc labels, the chooser statement, the audit table, renumbered tables; contract lines in the two `ARCHITECTURE.md` files; runbook | A6-3, A6-4 |
+
+The PLANNED row is registered by the supervisor after A6-5; the spec hash changes in A6-1 and again if a later slice edits `spec.yaml`. No slice reads the real store, `/root/rebuild-logs` or the ledger; tests use synthetic fixtures, and nothing heavy runs.
+
+**Standard-tool check.** The audit's rule is to import production's own symbols; the only new code is the thin `ChainSnapshot` adapter and the ledger reader (`read_predictions` is production's).
