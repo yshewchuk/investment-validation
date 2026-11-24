@@ -32,6 +32,12 @@ def _score(eid, k, value, status="scored", reason=None):
             "reason": reason, "alpha": 0.5}
 
 
+def _small_window(monkeypatch):
+    real = sv.trailing_cutoff
+    monkeypatch.setattr(sv, "trailing_cutoff",
+                        lambda history, as_of, **kw: real(history, as_of, **{**kw, "min_window": 1}))
+
+
 # ---- scaling and parity ---------------------------------------------------
 
 def test_scaled_multiplies_pred_move_keeps_nan_and_takes_an_array():
@@ -80,7 +86,7 @@ def test_pick_e_takes_the_best_k_then_nearest_one_then_smaller():
 # ---- the sweep itself -----------------------------------------------------
 
 def test_add_month_at_k_one_takes_what_experiment_188_takes(monkeypatch):
-    monkeypatch.setattr(sv, "MIN_WINDOW", 1)
+    _small_window(monkeypatch)
     pool = build_pool(*_tables(), floor=None)
     chunk, prior, cur, sessions = _two_months()
     sweep = Sweep()
@@ -105,7 +111,7 @@ def test_add_month_at_k_one_takes_what_experiment_188_takes(monkeypatch):
 
 
 def test_burn_in_month_adds_history_and_no_taken_rows(monkeypatch):
-    monkeypatch.setattr(sv, "MIN_WINDOW", 1)
+    _small_window(monkeypatch)
     pool = build_pool(*_tables(), floor=None)
     chunk, prior, _cur, sessions = _two_months()
     sweep = Sweep()
@@ -116,7 +122,7 @@ def test_burn_in_month_adds_history_and_no_taken_rows(monkeypatch):
 
 
 def test_e_arm_rows_carry_grid_k_and_curves_cover_every_arm(monkeypatch):
-    monkeypatch.setattr(sv, "MIN_WINDOW", 1)
+    _small_window(monkeypatch)
     pool = build_pool(*_tables(), floor=None)
     chunk, prior, cur, sessions = _two_months()
     sweep = Sweep()
@@ -133,7 +139,7 @@ def test_e_arm_rows_carry_grid_k_and_curves_cover_every_arm(monkeypatch):
 
 
 def test_event_absent_from_the_chunk_is_dropped(monkeypatch):
-    monkeypatch.setattr(sv, "MIN_WINDOW", 1)
+    _small_window(monkeypatch)
     pool = build_pool(*_tables(), floor=None)
     chunk, prior, cur, sessions = _two_months()
     cur_plus_ghost = pd.concat([cur, events_for("GHOST", date="2024-06-10")], ignore_index=True)
@@ -170,7 +176,7 @@ def test_in_window_is_half_open():
 
 
 def test_declined_counts_include_the_decision_gate_outcomes(monkeypatch):
-    monkeypatch.setattr(sv, "MIN_WINDOW", 1)
+    _small_window(monkeypatch)
     pool = build_pool(*_tables(), floor=None)
     chunk, prior, cur, sessions = _two_months()
     sweep = Sweep()
