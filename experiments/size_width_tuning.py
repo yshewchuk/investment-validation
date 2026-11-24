@@ -129,7 +129,7 @@ def _finite_real(x):
         return False
 
 
-def _fake_model_ok(model):
+def fake_model_ok(model):
     """True when ``model`` is a dict whose L, b, s and mean_log_y are finite real numbers, s >= 0, and n an int >= MIN_EVENTS."""
     if not isinstance(model, dict):
         return False
@@ -157,7 +157,7 @@ def _valid(arm, receipt):
             admit_draws(fake.get("N"))
         except Refusal:
             return False
-        if fake.get("seed_tag") != FAKE_SEED_TAG or not _fake_model_ok(fake.get("model")):
+        if fake.get("seed_tag") != FAKE_SEED_TAG or not fake_model_ok(fake.get("model")):
             return False
     try:
         return set(body) == set(units(arm)) and all(

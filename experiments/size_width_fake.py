@@ -108,6 +108,9 @@ def write_tuning_c(out, body, inputs_hash, model, cal, n):
         raise Refusal("EXPERIMENT_IDENTITY_CONFLICT", "tuning C refused: the fake forecast is not calibrated to M0",
                       {"reason": "fake_not_calibrated"})
     n = tuning.admit_draws(n)
+    if not tuning.fake_model_ok(model):
+        raise Refusal("EXPERIMENT_IDENTITY_CONFLICT", "tuning C refused: the fake error model is malformed",
+                      {"reason": "fake_model_invalid"})
     return receipts.write_receipt(Path(out) / "receipts" / "tuning_C.json", {
         "experiment": "EXP-189", "arm": "C", "inputs_hash": inputs_hash, "window": "2023H2-2024", "body": body,
         "fake": {"N": n, "seed_tag": SEED_TAG, "model": model, "calibration": cal}})
@@ -117,6 +120,9 @@ def run_fake(months, table, labels, model, sessions, out, inputs_hash, *, n=N_DR
     """Calibrate the fake, else run draws 0..n-1 and write the tuning_C receipt. Returns {"status": "ok", "body", "calibration", "pooled"}
     or {"status": "fake_not_calibrated", "calibration"} (no draws, no receipt)."""
     n = tuning.admit_draws(n)
+    if not tuning.fake_model_ok(model):
+        raise Refusal("EXPERIMENT_IDENTITY_CONFLICT", "tuning C refused: the fake error model is malformed",
+                      {"reason": "fake_model_invalid"})
     started = time.time()
     _say(f"stage start n={n} draws={draws} rss={_rss():.0f}MiB")
     cal = calibration(model, table, labels, n)

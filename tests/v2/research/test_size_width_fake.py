@@ -365,7 +365,7 @@ def test_units_c_is_b_and_frozen_checks_the_arm_c_shape(tmp_path):
 def test_write_tuning_c_refuses_an_uncalibrated_fake_and_writes_nothing(tmp_path, monkeypatch):
     _small_draws(monkeypatch)
     with pytest.raises(Refusal) as caught:
-        fake.write_tuning_c(tmp_path, {}, "h", MODEL, {"ok": False, "reason": "fake_not_calibrated"}, 2)
+        fake.write_tuning_c(tmp_path, {}, "h", C_MODEL, {"ok": False, "reason": "fake_not_calibrated"}, 2)
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.details["reason"] == "fake_not_calibrated"
     assert not (tmp_path / "receipts" / "tuning_C.json").exists()
@@ -385,9 +385,38 @@ def test_run_fake_refuses_a_reduced_draw_count_before_calibration_and_writes_not
 
 def test_write_tuning_c_refuses_a_reduced_draw_count_with_an_ok_calibration_and_writes_nothing(tmp_path):
     with pytest.raises(Refusal) as caught:
-        fake.write_tuning_c(tmp_path, {}, "h", MODEL, {"ok": True}, 2)
+        fake.write_tuning_c(tmp_path, {}, "h", C_MODEL, {"ok": True}, 2)
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.details["reason"] == "fake_draws_not_protocol"
+    assert not (tmp_path / "receipts" / "tuning_C.json").exists()
+
+
+BAD_MODELS = {
+    "no_n": MODEL,
+    "n_10": {**MODEL, "n": 10},
+    "L_none": {**C_MODEL, "L": None},
+}
+
+
+@pytest.mark.parametrize("name", list(BAD_MODELS))
+def test_write_tuning_c_refuses_a_malformed_fake_model_and_writes_nothing(name, tmp_path):
+    with pytest.raises(Refusal) as caught:
+        fake.write_tuning_c(tmp_path, {}, "h", BAD_MODELS[name], {"ok": True}, 20)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.details["reason"] == "fake_model_invalid"
+    assert not (tmp_path / "receipts" / "tuning_C.json").exists()
+
+
+@pytest.mark.parametrize("name", list(BAD_MODELS))
+def test_run_fake_refuses_a_malformed_fake_model_before_any_draw(name, tmp_path, monkeypatch):
+    table, labels, _ = _world()
+    months, sessions = _months()
+    monkeypatch.setattr(fake, "calibration", lambda *a, **k: pytest.fail("no calibration for a malformed model"))
+    monkeypatch.setattr(fake, "run_draw", lambda *a, **k: pytest.fail("no draws for a malformed model"))
+    with pytest.raises(Refusal) as caught:
+        fake.run_fake(months, table, labels, BAD_MODELS[name], sessions, tmp_path, "hash-1", n=20, draws=DRAW)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.details["reason"] == "fake_model_invalid"
     assert not (tmp_path / "receipts" / "tuning_C.json").exists()
 
 
