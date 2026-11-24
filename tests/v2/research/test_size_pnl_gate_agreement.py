@@ -60,6 +60,28 @@ def test_read_stored_refuses_an_empty_event_id(tmp_path):
     assert _reason(caught) == "stored_gate_invalid"
 
 
+def test_read_stored_refuses_a_whitespace_only_event_id(tmp_path):
+    path = tmp_path / "transactions.csv"
+    path.write_text("event_id,ret\n   ,0.1\nE2,0.2\n", encoding="utf-8")
+    with pytest.raises(OpsError) as caught:
+        agreement.read_stored(path)
+    assert _reason(caught) == "stored_gate_invalid"
+
+
+def test_read_stored_refuses_an_all_boolean_ret_column(tmp_path):
+    path = tmp_path / "transactions.csv"
+    path.write_text("event_id,ret\nE1,True\nE2,False\n", encoding="utf-8")
+    with pytest.raises(OpsError) as caught:
+        agreement.read_stored(path)
+    assert _reason(caught) == "stored_gate_invalid"
+
+
+def test_read_stored_keeps_an_event_id_with_leading_zeros_verbatim(tmp_path):
+    path = tmp_path / "transactions.csv"
+    path.write_text("event_id,ret\n007,0.1\n", encoding="utf-8")
+    assert agreement.read_stored(path) == {"selected": {"007": 0.1}}
+
+
 def test_read_stored_refuses_a_symlink(tmp_path):
     target = tmp_path / "transactions.csv"
     target.write_text("event_id,ret\nE1,0.1\n", encoding="utf-8")
@@ -210,6 +232,18 @@ def test_section_without_a_ladder_renders_the_no_ladder_note():
 @pytest.mark.parametrize("value", [{}, {"band": {"E1": 0.1}}, {"band": {}}])
 def test_ladder_valid_accepts_well_formed_ladders(value):
     assert agreement.ladder_valid(value) is True
+
+
+def test_ladder_valid_rejects_a_ladder_keyed_by_the_as_run_label():
+    assert agreement.ladder_valid({agreement.AS_RUN: {"E1": 0.1}}) is False
+    assert agreement.ladder_valid({"band": {"E1": 0.1}, agreement.AS_RUN: {}}) is False
+
+
+# ---- valid -------------------------------------------------------------------
+
+def test_valid_rejects_a_whitespace_only_id():
+    assert agreement.valid({"selected": {"   ": 0.1}}) is False
+    assert agreement.valid({"selected": {"E1": 0.1}}) is True
 
 
 @pytest.mark.parametrize("value", [

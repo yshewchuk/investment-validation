@@ -16,6 +16,7 @@ MIN_JACCARD = 0.5
 QUANTILES = (0.05, 0.25, 0.5, 0.75, 0.95, 0.99)
 MAX_STORED_BYTES = 64 << 20
 HEADING = "### G_PROD M0 agreement with production's stored 2025 gate decisions"
+AS_RUN = "decisions (M0 gate_score as run)"
 _INVALID = "INVALID_EXPERIMENT_SPEC"
 NOTE = ("covered = M0's determined 2025 events in E (the transactions file holds selected rows only, so a covered event absent from it is "
         "read as not selected; stored events outside the covered set are counted, not used). Diagnostics are never rules and no threshold "
@@ -51,32 +52,36 @@ def read_stored(path):
     if len(data) > MAX_STORED_BYTES:
         raise _refuse("stored_gate_unreadable", "the stored gate file is larger than its size cap")
     try:
-        table = pd.read_csv(io.BytesIO(data))
+        table = pd.read_csv(io.BytesIO(data), dtype=str, keep_default_na=False)
     except Exception:  # empty, malformed or not CSV
         raise _refuse("stored_gate_unreadable", "the stored gate file cannot be parsed as CSV") from None
     if not {"event_id", "ret"} <= set(table.columns):
         raise _refuse("stored_gate_columns", "the stored gate file lacks event_id or ret")
-    if table["event_id"].isna().any() or (table["event_id"].astype(str).str.strip() == "").any():
-        raise _refuse("stored_gate_invalid", "the stored gate file has an empty event id")
-    ids = table["event_id"].astype(str)
-    ret = pd.to_numeric(table["ret"], errors="coerce").to_numpy(dtype=float)
-    if ids.duplicated().any():
+    ids = list(table["event_id"])
+    rets = []
+    for text in table["ret"]:
+        try:
+            rets.append(float(text))
+        except ValueError:
+            raise _refuse("stored_gate_invalid", "the stored gate file has a non-numeric or non-finite ret") from None
+    if len(set(ids)) != len(ids):
         raise _refuse("stored_gate_invalid", "the stored gate file repeats an event id")
-    if not np.isfinite(ret).all():
-        raise _refuse("stored_gate_invalid", "the stored gate file has a non-finite ret")
-    return {"selected": {eid: float(r) for eid, r in zip(ids, ret)}}
+    stored = {"selected": dict(zip(ids, rets))}
+    if not valid(stored):
+        raise _refuse("stored_gate_invalid", "the stored gate file has an empty or whitespace-only event id or a non-finite ret")
+    return stored
 
 
 def valid(stored) -> bool:
-    """True when ``stored`` is {"selected": {event_id: finite ret}} with non-empty string ids (bool values refused)."""
+    """True when ``stored`` is {"selected": {event_id: finite ret}} with non-blank string ids (bool values refused)."""
     if not (isinstance(stored, dict) and set(stored) == {"selected"} and isinstance(stored["selected"], dict)):
         return False
-    return all(isinstance(e, str) and e and _finite(v) for e, v in stored["selected"].items())
+    return all(isinstance(e, str) and e.strip() and _finite(v) for e, v in stored["selected"].items())
 
 
 def ladder_valid(ladder) -> bool:
-    """True when ``ladder`` is {label: {event_id: finite score}} with str labels and non-empty str event ids."""
-    return isinstance(ladder, dict) and all(
+    """True when ``ladder`` is {label: {event_id: finite score}} with str labels (not AS_RUN) and non-empty str event ids."""
+    return isinstance(ladder, dict) and AS_RUN not in ladder and all(
         isinstance(label, str) and isinstance(steps, dict) and all(isinstance(e, str) and e and _finite(s) for e, s in steps.items())
         for label, steps in ladder.items())
 
@@ -156,7 +161,7 @@ def section(m0, selected, *, accepted_gap=None, ladder=None):
             ["only production, stored ret", st["only_prod"], st["ret_only_prod"]],
             ["both, G_PROD ret", st["both"], st["ret_both_gprod"]],
             ["only G_PROD, G_PROD ret", st["only_gprod"], st["ret_only_gprod"]]]
-    steps = {"decisions (M0 gate_score as run)": dict(zip(m0["event_id"], m0["gate_score"]))}
+    steps = {AS_RUN: dict(zip(m0["event_id"], m0["gate_score"]))}
     steps.update(ladder or {})
     ladder_text = ladder_table(steps, covered, prod, REGISTERED_THRESHOLD) + ("" if ladder else "\n\n" + NO_LADDER)
     parts = [HEADING] + ([label] if label else []) + [NOTE,
