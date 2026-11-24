@@ -254,6 +254,6 @@ Stated so nobody has to rediscover them.
 Design: `guides/price_structure_index_design.md`.
 
 - `price_structure` keeps its signature and outputs bit for bit, including exception types and messages.
-- Planned, not yet implemented: a twin module `engine/chain_index.py` will provide `resolve_structure`, `price_resolution` and `price_structure_indexed`, bit-identical to `price_structure`. `engine/structures.py` and `engine/fills.py` stay unmodified and nothing in the v14 closure may import the twin.
-- Planned: `ChainSnapshot.rows` must be immutable once priced through the twin.
+- Implemented (section 7a): the twin module `engine/chain_index.py` provides `price_structure_indexed` (expiry selection, strike selection and contract lookup from the index), bit-identical to `price_structure`. Not yet implemented: `resolve_structure`, `price_resolution` and the `Resolution` split. `engine/structures.py` and `engine/fills.py` stay unmodified and nothing in the v14 closure may import the twin. It has no production caller by design; the first consumer is the EXP-189 adapter slice.
+- `ChainSnapshot.rows` must be immutable once priced through the twin (verify-mode checksums enforce it).
 - Retirement trigger: the v14-bound experiments end; then `price_structure` wraps the twin.

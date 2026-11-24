@@ -7,10 +7,17 @@ cached numpy arrays of the strike and right columns, grouped by expiry and right
 rules are copied verbatim from :class:`engine.structures.StrikeSelector`; a case the arrays do
 not cover falls back to the legacy DataFrame path for that leg. bid, ask, dte and delta are read
 live from the snapshot, never cached. Pricing, the ``LadderTooCoarse`` check and the messages are
-the same code, so results are bit-identical. The index is built lazily, lives with its snapshot,
-and calls or snapshots outside the proven shape go whole to ``price_structure``. The checksums
-cover expiry, dte, strike, right and index uniqueness on every call; a change raises
-:class:`ChainSnapshotMutated`. ``ENGINE_CHAIN_INDEX_VERIFY=0`` disables the check.
+the same code, so results are bit-identical. The index is built lazily and lives with its snapshot.
+A call outside the proven shape (non-numeric spot, selector field or pin expiry) or a snapshot
+without an expiry index goes whole to ``price_structure``; a snapshot whose strike or right columns
+are outside the proven shape keeps the expiry index and runs strike selection and lookup through
+the legacy code. The checksums cover expiry, dte, strike, right and index uniqueness on every
+call; a change raises :class:`ChainSnapshotMutated`. ``ENGINE_CHAIN_INDEX_VERIFY=0`` disables the
+check.
+
+Reachability: this twin has no production caller by design (design #2839). It is an experiment-side
+tool, outside the v14 SIZE closure; the first consumer is the EXP-189 adapter slice, and
+``price_structure`` stays the board's pricer.
 """
 from __future__ import annotations
 
