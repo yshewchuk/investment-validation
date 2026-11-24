@@ -9,6 +9,7 @@ import pandas as pd
 from engine.pnl_sim import DRAWS
 from experiments import size_pnl_shortvol as sv
 from experiments.size_width_sizing import GRID
+from experiments.size_width_success import LADDER
 
 ALPHA, E_ARM = 0.5, "E"
 WINDOWS = {"2023H2": (pd.Timestamp("2023-07-01"), pd.Timestamp("2024-01-01")),
@@ -17,6 +18,8 @@ WINDOWS = {"2023H2": (pd.Timestamp("2023-07-01"), pd.Timestamp("2024-01-01")),
 INNER = (pd.Timestamp("2023-07-01"), pd.Timestamp("2025-01-01"))
 _TAKEN = ["event_id", "event_date", "structure", "k", "entry_date", "exit_date", "entry_cost", "exit_value",
           "exit_value_mid", "pnl_dollars", "pnl_dollars_mid", "secured_per_contract"]
+RET_COLS = [f"ret_a{a:.2f}" for a in LADDER]
+_DECLINED = ["event_id", "event_date", "structure", "status", "reason", "arm"]
 TAKEN_COLS = _TAKEN  # public alias for the other width modules
 
 
@@ -55,17 +58,22 @@ def pick_e(by_k, ks):
 
 class Sweep:
     """Scored history (it feeds each trailing cutoff), taken rows and decline reasons per (structure, arm); arm is a grid k or E_ARM."""
-    def __init__(self, ks=GRID, names=sv.NAMES):
+    def __init__(self, ks=GRID, names=sv.NAMES, *, pricing=sv, ladder=False):
+        """``pricing`` is the one seam for strike resolution: it must expose simulate, score_events, decide, score and secured with the signatures of experiments.size_pnl_shortvol."""
         self.ks, self.names = tuple(admit_k(k) for k in ks), tuple(names)
+        self.pricing, self.ladder, self.fresh, self.fresh_declined = pricing, bool(ladder), [], []
         if not self.ks or len(set(self.ks)) != len(self.ks): raise ValueError(f"ks must be non-empty and unique: {self.ks}")
         if not self.names or len(set(self.names)) != len(self.names) or any(n not in sv.NAMES for n in self.names): raise ValueError(f"names must be non-empty, unique and in sv.NAMES: {self.names}")
         self.scored, self.taken, self.declined = {}, {}, {}
 
     def add_month(self, chunk, events, pool, *, output, sessions, draws=DRAWS):
         """Simulate once, score every (structure, k) and E, decide on the accumulated history. ``output`` False (burn-in) only adds history.
-        ``sessions`` maps event_id -> (entry_date, exit_date); a missing event leaves NaT dates and the account refuses it."""
+        ``sessions`` maps event_id -> (entry_date, exit_date); a missing event leaves NaT dates and the account refuses it.
+        Returns the month's fresh taken rows only (a frame with the ``_TAKEN`` columns plus ``arm``, and the ``RET_COLS`` columns when ``ladder`` is true; empty when ``output`` is False).
+        The month's declined decisions are not returned: they are in ``declined_rows()``, which this call resets along with ``fresh``."""
         started = time.time()
-        sims = sv.simulate(chunk, events, pool, draws=draws)
+        self.fresh, self.fresh_declined = [], []
+        sims = self.pricing.simulate(chunk, events, pool, draws=draws)
         keep = np.array([sims.get(str(e)) is not None for e in events["event_id"]], dtype=bool)  # unsimulable events are dropped, as EXP-188 does
         events = events[keep]
         ids = set(events["event_id"].astype(str))
@@ -75,21 +83,28 @@ class Sweep:
         rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
         print(f"[width_sweep] month events={len(events)} output={output} elapsed={time.time() - started:.1f}s rss={rss:.0f}MiB",
               file=sys.stderr)
+        return pd.concat(self.fresh, ignore_index=True) if self.fresh else pd.DataFrame(columns=_TAKEN + (RET_COLS if self.ladder else []) + ["arm"])
+
+    def declined_rows(self):
+        """The declined (not taken) decisions of the last ``add_month``: event_id, event_date, structure, status, reason and arm (a str).
+        Empty with those six columns when none, in particular after a burn-in month (``output`` False)."""
+        return pd.concat(self.fresh_declined, ignore_index=True) if self.fresh_declined else pd.DataFrame(columns=_DECLINED)
 
     def _frames(self, chunk, events, sims, name):
         """[(arm, frame)] for one structure: every grid k, then arm E. Subclasses override this."""
-        by_k = {k: sv.score_events(chunk, scaled(events, k), sims, name, alpha=ALPHA) for k in self.ks}
+        by_k = {k: self.pricing.score_events(chunk, scaled(events, k), sims, name, alpha=ALPHA) for k in self.ks}
         return [*by_k.items(), (E_ARM, pick_e(by_k, self.ks))]
 
     def _decide(self, chunk, events, frame, name, arm, ids, output, sessions):
-        """Adds ``frame`` to the history of (name, arm) and, when ``output``, decides, prices and records the taken rows."""
+        """Adds ``frame`` to the history of (name, arm) and, when ``output``, decides, prices and records the taken rows and the declined ones."""
         key = (name, arm)
         history = self.scored.setdefault(key, [])
         history.append(frame)
         if not output:
             return
-        decided = sv.decide(pd.concat(history, ignore_index=True))
+        decided = self.pricing.decide(pd.concat(history, ignore_index=True))
         declined = decided[decided["event_id"].isin(ids) & (decided["structure"] == name) & (decided["status"] != "taken")]
+        self.fresh_declined.append(declined[["event_id", "event_date", "structure", "status", "reason"]].assign(arm=str(arm)))
         reasons = self.declined.setdefault(key, {})
         for reason, count in declined["reason"].fillna("none").value_counts().items():
             reasons[str(reason)] = reasons.get(str(reason), 0) + int(count)
@@ -100,18 +115,26 @@ class Sweep:
         else:
             ks = float(arm)
         ev = scaled(events, ks)
-        primary = sv.score(chunk, ev, mine, name, ALPHA)
-        mid = sv.score(chunk, ev, mine, name, ALPHA, mid_marks=True)
-        sec = sv.secured(chunk, ev, mine, name)
+        primary = self.pricing.score(chunk, ev, mine, name, ALPHA)
+        mid = self.pricing.score(chunk, ev, mine, name, ALPHA, mid_marks=True)
+        sec = self.pricing.secured(chunk, ev, mine, name)
         rows = (primary[["event_id", "structure", "entry_cost", "exit_value", "pnl_dollars"]]
                 .merge(mid[["event_id", "exit_value", "pnl_dollars"]].rename(columns={"exit_value": "exit_value_mid",
                                                                                      "pnl_dollars": "pnl_dollars_mid"}), on="event_id")
                 .merge(sec, on="event_id")
                 .merge(mine[["event_id", "event_date"]], on="event_id"))
+        if self.ladder:
+            for a, col in zip(LADDER, RET_COLS):
+                lad = self.pricing.score(chunk, ev, mine, name, a, mid_marks=True, repriced=True)
+                cost = pd.to_numeric(lad["entry_cost"], errors="coerce")
+                ret = (pd.to_numeric(lad["pnl_per_share"], errors="coerce") / cost).where(cost > 0)
+                rows[col] = rows["event_id"].map(dict(zip(lad["event_id"], ret)))
         rows["k"] = rows["event_id"].map(kmap) if arm == E_ARM else float(arm)
         rows["entry_date"] = rows["event_id"].map(lambda e: sessions.get(e, (np.nan, np.nan))[0])
         rows["exit_date"] = rows["event_id"].map(lambda e: sessions.get(e, (np.nan, np.nan))[1])
-        self.taken.setdefault(key, []).append(rows[_TAKEN])
+        taken = rows[_TAKEN + (RET_COLS if self.ladder else [])]
+        self.taken.setdefault(key, []).append(taken)
+        self.fresh.append(taken.assign(arm=str(arm)))
 
     def rows(self, pairs, window):
         """Taken rows of every (structure, arm) in ``pairs`` inside ``window``: trades are selected by event date and must also EXIT inside the window; a trade exiting later belongs to no account of this window, so no later P&L enters a window's objective or evaluation. Empty frame with the columns when none."""

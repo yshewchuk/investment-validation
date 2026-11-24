@@ -1,3 +1,5 @@
+import types
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -8,7 +10,7 @@ from experiments import size_pnl_shortvol as sv
 from experiments.size_pnl_pool import build_pool
 from experiments.size_pnl_straddle import lots
 from experiments.size_width_sizing import GRID, k_params
-from experiments.size_width_sweep import _TAKEN, E_ARM, WINDOWS, Sweep, admit_k, in_window, pick_e, scaled
+from experiments.size_width_sweep import RET_COLS, _TAKEN, E_ARM, WINDOWS, Sweep, admit_k, in_window, pick_e, scaled
 from tests.v2.research.test_size_pnl_shortvol import _tables, chunk_of, events_for
 
 DRAW = 200
@@ -274,5 +276,96 @@ def test_rows_keep_only_trades_that_exit_inside_the_window():
                                               taken("in", "2024-12-02", "2024-12-20")], columns=_TAKEN)]
     assert list(sweep.rows([(NAME, 1.0)], WINDOWS["2024"])["event_id"]) == ["in"]
     assert sweep.rows([(NAME, 1.0)], WINDOWS["2025"]).empty  # both event dates are in 2024
+
+
+# ---- pricing seam, ladder columns, fresh rows -----------------------------
+
+def _stub_pricing(log):
+    """A pricing seam that records each call in ``log`` and returns minimal frames; C0 has a non-positive entry cost."""
+    def simulate(chunk, events, pool, draws=DRAW):
+        log.append(("simulate",))
+        return {str(e): "sim" for e in events["event_id"]}
+
+    def score_events(chunk, ev, sims, name, alpha=0.5):
+        log.append(("score_events", name, alpha))
+        return pd.DataFrame([_score(e, 1.0, 0.1) for e in ev["event_id"]], columns=sv.SCORE_COLS)
+
+    def decide(hist):
+        log.append(("decide",))
+        return hist.assign(status="taken", reason=None)
+
+    def score(chunk, ev, mine, name, alpha, mid_marks=False, repriced=False):
+        log.append(("score", alpha, mid_marks, repriced))
+        eids = list(mine["event_id"])
+        return pd.DataFrame({"event_id": eids, "structure": name, "entry_cost": [-1.0 if e == "C0" else 2.0 for e in eids],
+                             "exit_value": 1.0, "rung": 0, "lots": 1, "pnl_per_share": [alpha * 3.0 - 0.5 for _ in eids],
+                             "pnl_dollars": 100.0})
+
+    def secured(chunk, ev, mine, name):
+        log.append(("secured",))
+        return pd.DataFrame({"event_id": list(mine["event_id"]), "secured_per_contract": 5.0})
+
+    return types.SimpleNamespace(simulate=simulate, score_events=score_events, decide=decide, score=score, secured=secured)
+
+
+def test_pricing_seam_is_used(monkeypatch):
+    def refuse(*args, **kwargs):
+        raise AssertionError("sv.simulate must not run when a pricing seam is given")
+    monkeypatch.setattr(sv, "simulate", refuse)
+    chunk, _prior, cur, sessions = _two_months()
+    log = []
+    sweep = Sweep(ks=(1.0,), names=(NAME,), pricing=_stub_pricing(log))
+    sweep.add_month(chunk, cur, None, output=True, sessions=sessions)
+    assert {c[0] for c in log} == {"simulate", "score_events", "decide", "score", "secured"}
+    assert set(sweep.taken[(NAME, 1.0)][0]["event_id"]) == set(CUR)
+    assert Sweep().pricing is sv
+
+
+def test_ladder_columns():
+    chunk, _prior, cur, sessions = _two_months()
+    log = []
+    sweep = Sweep(ks=(1.0,), names=(NAME,), pricing=_stub_pricing(log), ladder=True)
+    sweep.add_month(chunk, cur, None, output=True, sessions=sessions)
+    taken = sweep.taken[(NAME, 1.0)][0]
+    assert list(taken.columns) == _TAKEN + RET_COLS
+    assert RET_COLS == ["ret_a0.00", "ret_a0.25", "ret_a0.50", "ret_a0.75", "ret_a1.00"]
+    by_id = taken.set_index("event_id")
+    assert np.isnan(by_id.loc["C0", "ret_a1.00"])
+    assert by_id.loc["C1", "ret_a1.00"] == pytest.approx((1.0 * 3.0 - 0.5) / 2.0)
+    assert by_id.loc["C1", "ret_a0.00"] == pytest.approx(-0.5 / 2.0)
+    assert ("score", 1.0, True, True) in log
+
+    plain = Sweep(ks=(1.0,), names=(NAME,), pricing=_stub_pricing([]))
+    plain.add_month(chunk, cur, None, output=True, sessions=sessions)
+    assert list(plain.taken[(NAME, 1.0)][0].columns) == _TAKEN
+
+
+def test_fresh_declined_rows_are_the_month_declined_decisions_with_arm_strings(monkeypatch):
+    _small_window(monkeypatch)
+    pool = build_pool(*_tables(), floor=None)
+    chunk, prior, cur, sessions = _two_months()
+    sweep = Sweep(names=(NAME,))
+    sweep.add_month(chunk, prior, pool, output=False, sessions=sessions, draws=DRAW)
+    burn = sweep.declined_rows()
+    assert burn.empty and list(burn.columns) == ["event_id", "event_date", "structure", "status", "reason", "arm"]
+    sweep.add_month(chunk, cur, pool, output=True, sessions=sessions, draws=DRAW)
+    got = sweep.declined_rows()
+    assert not got.empty and (got["status"] != "taken").all() and set(got["event_id"]) <= set(CUR)
+    assert all(isinstance(a, str) for a in got["arm"]) and "1.0" in set(got["arm"])
+    assert (got[got["arm"] == "1.0"]["structure"] == NAME).all()
+
+
+def test_add_month_returns_fresh_rows(monkeypatch):
+    _small_window(monkeypatch)
+    pool = build_pool(*_tables(), floor=None)
+    chunk, prior, cur, sessions = _two_months()
+    sweep = Sweep(names=(NAME,))
+    burn = sweep.add_month(chunk, prior, pool, output=False, sessions=sessions, draws=DRAW)
+    assert burn.empty and list(burn.columns) == _TAKEN + ["arm"]
+    fresh = sweep.add_month(chunk, cur, pool, output=True, sessions=sessions, draws=DRAW)
+    assert {"1.0", "E"}.issubset(set(fresh["arm"]))
+    for arm in [*sweep.ks, E_ARM]:
+        n = sum(len(f) for f in sweep.taken.get((NAME, arm), []))
+        assert (fresh["arm"] == str(arm)).sum() == n
 
 

@@ -12,6 +12,7 @@ import pandas as pd
 from engine.pnl_sim import DRAWS
 from experiments import label_availability
 from experiments import size_pnl_receipts as receipts
+from experiments import size_pnl_shortvol as sv
 from experiments import size_width_errmodel as errmodel
 from experiments.size_pnl_pool import build_pool
 from experiments.size_pnl_shortvol import NAMES, Refusal
@@ -54,7 +55,7 @@ def fake_pred(model, event_ids, labels, d):
     return pd.Series(np.where(ok, fake, np.nan), index=[str(e) for e in event_ids])
 
 
-def _run(months, table, labels, pred, sessions, *, draws, names):
+def _run(months, table, labels, pred, sessions, *, draws, names, pricing=sv):
     """One full sweep on the forecast Series ``pred``: per calendar month, a pool of a model whose forecasts are ``pred``
     (crush stays M0's), built causally: rows with event_date before the month start, and labels whose ``available`` date
     is before the month start (the labels frame needs an ``available`` column, else a refusal). Then the unit score of
@@ -62,7 +63,7 @@ def _run(months, table, labels, pred, sessions, *, draws, names):
     months, names = list(months), tuple(names)
     if "available" not in labels.columns:
         raise Refusal("EXPERIMENT_IDENTITY_CONFLICT", "labels need the available column", {"reason": "labels_availability_missing"})
-    sweep = Sweep(names=names)
+    sweep = Sweep(names=names, pricing=pricing)
     for chunk, events, output in months:
         start = pd.to_datetime(events["event_date"]).dt.to_period("M").min().start_time
         t = table[pd.to_datetime(table["event_date"]) < start]
@@ -73,19 +74,19 @@ def _run(months, table, labels, pred, sessions, *, draws, names):
     return {name: {k: unit_score(sweep.rows([(name, k)], INNER), INNER) for k in sweep.ks} for name in names}
 
 
-def run_draw(months, table, labels, model, d, sessions, *, draws=DRAWS, names=NAMES):
+def run_draw(months, table, labels, model, d, sessions, *, draws=DRAWS, names=NAMES, pricing=sv):
     """Draw ``d`` of the seeded fake model: the sweep scores of that model's forecasts."""
     names = tuple(names)
-    return _run(months, table, labels, fake_pred(model, table.index, labels, d), sessions, draws=draws, names=names)
+    return _run(months, table, labels, fake_pred(model, table.index, labels, d), sessions, draws=draws, names=names, pricing=pricing)
 
 
-def run_anchor(months, table, labels, sessions, *, draws=DRAWS, names=NAMES):
+def run_anchor(months, table, labels, sessions, *, draws=DRAWS, names=NAMES, pricing=sv):
     """Perfect-forecast anchor: the forecast is the actual move (same gate, marks and exit). Descriptive only."""
     names = tuple(names)
     actual = labels["abs_move"].reindex(table.index).to_numpy(dtype=float)
     ok = np.isfinite(actual) & (actual > 0)
     pred = pd.Series(np.where(ok, actual, np.nan), index=[str(e) for e in table.index])
-    return _run(months, table, labels, pred, sessions, draws=draws, names=names)
+    return _run(months, table, labels, pred, sessions, draws=draws, names=names, pricing=pricing)
 
 
 def pool_draws(per_draw):
@@ -132,7 +133,7 @@ def _write_tuning_c(out, body, inputs_hash, model, cal, n, sim_draws):
         "fake": {"N": n, "seed_tag": SEED_TAG, "model": model, "calibration": cal, "sim_draws": sim_draws}})
 
 
-def run_fake(months, table, labels, model, sessions, out, inputs_hash, *, n=N_DRAWS, draws=DRAWS):
+def run_fake(months, table, labels, model, sessions, out, inputs_hash, *, n=N_DRAWS, draws=DRAWS, pricing=sv):
     """Calibrate the fake, else run draws 0..n-1 and write the tuning_C receipt. Returns {"status": "ok", "body", "calibration", "pooled"}
     or {"status": "fake_not_calibrated", "calibration"} (no draws, no receipt)."""
     n = tuning.admit_draws(n)
@@ -152,7 +153,7 @@ def run_fake(months, table, labels, model, sessions, out, inputs_hash, *, n=N_DR
         return {"status": "fake_not_calibrated", "calibration": cal}
     per_draw = []
     for d in range(n):
-        per_draw.append(run_draw(months, table, labels, model, d, sessions, draws=draws))
+        per_draw.append(run_draw(months, table, labels, model, d, sessions, draws=draws, pricing=pricing))
         elapsed = time.time() - started
         _say(f"draw {d + 1}/{n} elapsed={elapsed:.1f}s eta={elapsed / (d + 1) * (n - d - 1):.1f}s "
              f"rate={(d + 1) / max(elapsed, 1e-9) * 60:.1f}draws/min rss={_rss():.0f}MiB")
