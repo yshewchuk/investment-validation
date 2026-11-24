@@ -8,11 +8,13 @@ import pandas as pd
 from experiments import size_pnl_receipts as receipts
 from experiments import size_width_account as account
 from experiments.size_pnl_shortvol import NAMES, Refusal
+from experiments.size_width_errmodel import MIN_EVENTS
 from experiments.size_width_sizing import GRID
 from experiments.size_width_sweep import E_ARM, INNER, WINDOWS, admit_k
 
 MIN_TRADES, SAME_K_SHARE = 300, 0.8
 FAKE_DRAWS = 20
+FAKE_SEED_TAG = "exp189-v1"
 EDGES = (min(GRID), max(GRID))
 TWIN = ("TWIN-P", "TWIN-P5")
 _CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
@@ -110,9 +112,36 @@ def run_inner(sweep, out, inputs_hash):
     return {"tuned": tuned, "results": results}
 
 
+def admit_draws(n):
+    """The draw count ``n`` when it is the protocol N (FAKE_DRAWS, read at call time) as a plain int; anything else is refused."""
+    if type(n) is int and n == FAKE_DRAWS:
+        return n
+    raise Refusal(_CONFLICT, "tuning C draw count is not the protocol N", {"reason": "fake_draws_not_protocol", "n": n})
+
+
+def _finite_real(x):
+    """True for a finite int or float that is not a bool (a bool is not a number here)."""
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(x))
+    except OverflowError:
+        return False
+
+
+def _fake_model_ok(model):
+    """True when ``model`` is a dict whose L, b, s and mean_log_y are finite real numbers, s >= 0, and n an int >= MIN_EVENTS."""
+    if not isinstance(model, dict):
+        return False
+    if not all(_finite_real(model.get(key)) for key in ("L", "b", "s", "mean_log_y")):
+        return False
+    return model["s"] >= 0 and type(model.get("n")) is int and model["n"] >= MIN_EVENTS
+
+
 def _valid(arm, receipt):
     """True when ``receipt`` is EXP-189 arm ``arm`` on the inner window with a dict body; A, B, C and D bodies hold exactly the units
-    of ``arm``, each with its members and a grid k (a bool is not a k)."""
+    of ``arm``, each with its members and a grid k (a bool is not a k). An arm C receipt also needs a calibrated fake with the
+    protocol N, the seed tag, and a valid fake model."""
     body = receipt.get("body")
     if not (receipt.get("experiment") == "EXP-189" and receipt.get("arm") == arm and receipt.get("window") == "2023H2-2024"
             and isinstance(body, dict)):
@@ -124,7 +153,11 @@ def _valid(arm, receipt):
         cal = fake.get("calibration") if isinstance(fake, dict) else None
         if not (isinstance(cal, dict) and cal.get("ok") is True):
             return False
-        if not (type(fake.get("N")) is int and fake["N"] == FAKE_DRAWS):
+        try:
+            admit_draws(fake.get("N"))
+        except Refusal:
+            return False
+        if fake.get("seed_tag") != FAKE_SEED_TAG or not _fake_model_ok(fake.get("model")):
             return False
     try:
         return set(body) == set(units(arm)) and all(

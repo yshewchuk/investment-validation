@@ -18,7 +18,7 @@ from experiments.size_width_sweep import INNER, Sweep, in_window
 from experiments import size_width_tuning as tuning
 from experiments.size_width_tuning import MIN_TRADES, choose, unit_score
 
-N_DRAWS, SEED_TAG = tuning.FAKE_DRAWS, "exp189-v1"
+N_DRAWS, SEED_TAG = tuning.FAKE_DRAWS, tuning.FAKE_SEED_TAG
 
 
 def _say(msg):
@@ -103,17 +103,11 @@ def calibration(model, table, labels, n=N_DRAWS):
     return errmodel.calibrate(model, inner["pred_move"].to_numpy(dtype=float), label, z_matrix(ids, n))
 
 
-def _refuse_draws(n):
-    return Refusal("EXPERIMENT_IDENTITY_CONFLICT", "tuning C refused: the draw count is not the protocol N",
-                   {"reason": "fake_draws_not_protocol", "n": n})
-
-
 def write_tuning_c(out, body, inputs_hash, model, cal, n):
     if cal.get("ok") is not True:
         raise Refusal("EXPERIMENT_IDENTITY_CONFLICT", "tuning C refused: the fake forecast is not calibrated to M0",
                       {"reason": "fake_not_calibrated"})
-    if n != tuning.FAKE_DRAWS:
-        raise _refuse_draws(n)
+    n = tuning.admit_draws(n)
     return receipts.write_receipt(Path(out) / "receipts" / "tuning_C.json", {
         "experiment": "EXP-189", "arm": "C", "inputs_hash": inputs_hash, "window": "2023H2-2024", "body": body,
         "fake": {"N": n, "seed_tag": SEED_TAG, "model": model, "calibration": cal}})
@@ -122,8 +116,7 @@ def write_tuning_c(out, body, inputs_hash, model, cal, n):
 def run_fake(months, table, labels, model, sessions, out, inputs_hash, *, n=N_DRAWS, draws=DRAWS):
     """Calibrate the fake, else run draws 0..n-1 and write the tuning_C receipt. Returns {"status": "ok", "body", "calibration", "pooled"}
     or {"status": "fake_not_calibrated", "calibration"} (no draws, no receipt)."""
-    if n != tuning.FAKE_DRAWS:
-        raise _refuse_draws(n)
+    n = tuning.admit_draws(n)
     started = time.time()
     _say(f"stage start n={n} draws={draws} rss={_rss():.0f}MiB")
     cal = calibration(model, table, labels, n)
