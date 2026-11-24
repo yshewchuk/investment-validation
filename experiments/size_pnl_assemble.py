@@ -15,7 +15,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from experiments import size_pnl_decisions as decisions, size_pnl_receipts as receipts, size_pnl_report as report, size_pnl_contrast as contrast
-from experiments import size_pnl_account, size_pnl_driver, size_pnl_ladder
+from experiments import size_pnl_account, size_pnl_driver, size_pnl_gate_agreement, size_pnl_ladder
 from experiments import size_pnl_synthetic_eval as synthetic_eval
 from experiments import size_pnl_gprod_report as gprod_report
 from experiments import size_pnl_breakeven as breakeven
@@ -218,7 +218,7 @@ def _load_decisions(out, receipt, name="decisions.parquet"):
             raise _refuse("report_decisions_invalid", f"{name} decodes to more than MAX_DECODED_BYTES")
         # Optional columns, read only when the schema has them. "reason": population() exempts short-vol non-trades (published
         # decisions always carry it). "pnl_dollars_mid": the Amendment 1 sensitivity marks.
-        optional = [c for c in ("reason", "pnl_dollars_mid", "pnl_dollars_a0", "pnl_dollars_a1") if c in parquet.schema_arrow.names]  # a0/a1: Amendment 6b breakeven endpoints
+        optional = [c for c in ("reason", "pnl_dollars_mid", "pnl_dollars_a0", "pnl_dollars_a1", "gate_score") if c in parquet.schema_arrow.names]  # a0/a1: Amendment 6b breakeven endpoints; gate_score: the G_PROD M0 agreement
         account = [c for c in ACCOUNT_COLS if c in parquet.schema_arrow.names]  # Amendment 2 account columns, when the run stored them
         frame = parquet.read(columns=COLUMNS + optional + account).to_pandas()
     if frame.empty:
@@ -321,7 +321,7 @@ def _check_valuation_columns(*frames):
         raise _refuse("report_decisions_columns", "the outer, inner and gate decisions carry different optional valuation columns (pnl_dollars_mid, pnl_dollars_a0, pnl_dollars_a1); every window must be produced by the same run")
 
 
-def _sections(out, outer, inputs, inner, tickers, stored_gate=None, board_ledger=None):
+def _sections(out, outer, inputs, inner, tickers, stored_gate=None, accepted_gap=None, ladder=None, board_ledger=None):
     """The report's sections in order. Reads receipt fields throughout; the caller maps a missing or mistyped field to a refusal.
     Returns (sections, inner row count)."""
     raw = _load_decisions(out, outer)
@@ -457,7 +457,7 @@ def _sections(out, outer, inputs, inner, tickers, stored_gate=None, board_ledger
     sections += [breakeven.section(breakeven_frame)]
     if not gate_raw.empty:  # Amendment 3: the G_PROD sections, after the Amendment 1 ones and before the accounts
         sections += gprod_report.sections(gate_raw, frame[frame["book"] == "straddle"], label_of=label_of, role_model=role_model, roster=roster, outer_models=outer_models,
-                                          quarter_of=ctx_o["quarter_of"], tick=tick, stored_gate=stored_gate)
+                                          quarter_of=ctx_o["quarter_of"], tick=tick, stored_gate=stored_gate, accepted_gap=accepted_gap, ladder=ladder)
     m0 = raw[(raw["model_id"] == role_model.get("M0")) & (raw["book"] == "short_vol") & (raw["arm_or_rule"] == "as_is")][["event_id", "structure", "event_date"]]
     sections.append(board_match.section(board_ledger, m0, None))  # Amendment 6: the board-match check, research-only
     every = pd.concat([raw, gate_raw])  # Amendment 2 accounts read every row, G_PROD included
@@ -467,10 +467,11 @@ def _sections(out, outer, inputs, inner, tickers, stored_gate=None, board_ledger
     return sections, inner_rows
 
 
-def assemble(out_dir, plan, *, admitted, expected=None, spec_hash=None, snapshot=None, stored_gate=None, board_ledger=None):
+def assemble(out_dir, plan, *, admitted, expected=None, spec_hash=None, snapshot=None, stored_gate=None, accepted_gap=None, ladder=None, board_ledger=None):
     """Write ``out_dir/REPORT.md`` from the outer receipts and decisions.parquet; returns a JSON-safe summary.
     Each of expected, spec_hash and snapshot that is given must equal the matching field of inputs_outer.json.
-    ``stored_gate`` is optional {'scored': ids, 'selected': ids} from production's stored walk-forward 2025 gate decisions; None reports the M0 agreement as not_available.
+    ``stored_gate`` is {'selected': {event_id: ret_mid}} from production's stored walk-forward 2025 gate decisions; required when the run has G_PROD rows (None refuses stored_gate_required in the M0 agreement section).
+    ``accepted_gap`` is an optional non-empty note that accepts an agreement below the bar; ``ladder`` is an optional {label: {event_id: score}} of decomposition steps.
     ``plan`` is the plan frame (sources.plan_frame) and ``admitted`` the sources' admitted events; the shared plan
     admission (size_pnl_ladder.check_plan) runs here, so every caller gets the same refusals as the scoring path.
     The ticker map and the plan binding (the receipted plan hash that a full run must match) are both derived from
@@ -480,7 +481,11 @@ def assemble(out_dir, plan, *, admitted, expected=None, spec_hash=None, snapshot
     if board_ledger is not None and (not isinstance(board_ledger, (str, os.PathLike)) or not os.fspath(board_ledger).strip()):  # blank path refuses too, as in size_pnl_sources._config
         raise _refuse("report_board_ledger_invalid", "board_ledger must be a non-blank path or None")
     if stored_gate is not None and not gprod_report.stored_gate_valid(stored_gate):
-        raise _refuse("report_stored_gate_invalid", "stored_gate must be {scored, selected} lists of event id strings, selected within scored")
+        raise _refuse("report_stored_gate_invalid", 'stored_gate must be {"selected": {event_id: finite ret}}')
+    if ladder is not None and not size_pnl_gate_agreement.ladder_valid(ladder):
+        raise _refuse("report_ladder_invalid", "ladder must be a dict of label -> {event_id: finite score}")
+    if accepted_gap is not None and not (isinstance(accepted_gap, str) and accepted_gap.strip()):
+        raise _refuse("report_accepted_gap_invalid", "accepted_gap must be a non-empty string")
     if not isinstance(plan, pd.DataFrame) or plan.columns.empty:
         raise _refuse("report_tickers_invalid", "plan must be a DataFrame with columns")
     try:
@@ -526,7 +531,7 @@ def assemble(out_dir, plan, *, admitted, expected=None, spec_hash=None, snapshot
         if inner_bad:
             raise _refuse("report_inputs_mismatch", "the plan's inner-window rows do not match inputs_inner.json")
     with _admit("report_receipt_malformed", "a receipt or decisions row lacks a required field"):
-        sections, inner_rows = _sections(out, outer, inputs, inner, tickers, stored_gate, board_ledger)
+        sections, inner_rows = _sections(out, outer, inputs, inner, tickers, stored_gate, accepted_gap, ladder, board_ledger)
     text = report.build_report(sections)
     path = out / "REPORT.md"
     handle = tempfile.NamedTemporaryFile("w", dir=out, delete=False, suffix=".tmp", encoding="utf-8")

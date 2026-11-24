@@ -9,70 +9,131 @@ from tests.v2.research.test_size_pnl_driver import (  # noqa: F401  (bounded is 
     OK, PLAN_FRAME, _install_sources, _run_main, bounded, sources)
 from tests.v2.research.test_size_pnl_driver_outer import _argv_for
 
+LADDER = {"band": {"E1": 0.1, "E3": -0.2}}
+
+
+def _stub_assemble(monkeypatch, calls):
+    monkeypatch.setattr(size_pnl_assemble, "assemble",
+                        lambda out_dir, plan, **kwargs: calls.append((out_dir, plan, kwargs)) or {"report": "r", "sections": 0, "rows": 0})
+
+
+def _csv(path, text):
+    path.write_text(text, encoding="utf-8")
+    return str(path)
+
 
 def test_run_py_report_stage_calls_assemble_with_the_plan_frame_and_admitted(tmp_path, monkeypatch, capsys):
     run_py = _run_main()
     monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
     calls = []
-    monkeypatch.setattr(size_pnl_assemble, "assemble",
-                        lambda out_dir, plan, **kwargs: calls.append((out_dir, plan, kwargs)) or {"report": "r", "sections": 0, "rows": 0})
+    _stub_assemble(monkeypatch, calls)
     src = sources()
     _install_sources(monkeypatch, src)
     assert run_py.main(_argv_for(tmp_path, "report")) == 0
     out_dir, plan, kwargs = calls[0]
     pd.testing.assert_frame_equal(plan, PLAN_FRAME)  # the plan frame itself: assemble derives the tickers and the binding from it
     assert kwargs.pop("admitted") is src.admitted  # check_plan runs inside assemble, on the sources' admitted events
-    assert kwargs == {"expected": src.expected, "spec_hash": "SPEC", "snapshot": "snap-1", "stored_gate": None, "board_ledger": None}  # the requested identity; no tickers or binding; no stored gate or board ledger given
+    assert kwargs == {"expected": src.expected, "spec_hash": "SPEC", "snapshot": "snap-1", "stored_gate": None,
+                      "accepted_gap": None, "ladder": None, "board_ledger": None}  # the requested identity; no tickers or binding; no stored gate, gap, ladder or board ledger given
     assert json.loads(capsys.readouterr().out)["sections"] == 0
 
 
-def test_run_py_report_stage_passes_a_valid_stored_gate_to_assemble(tmp_path, monkeypatch, capsys):
+def test_run_py_report_stage_passes_a_valid_stored_gate_csv_to_assemble(tmp_path, monkeypatch, capsys):
     run_py = _run_main()
     monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
-    stored = {"scored": ["E1", "E2", "E3"], "selected": ["E1", "E3"]}
-    path = tmp_path / "stored.json"
-    path.write_text(json.dumps(stored), encoding="utf-8")
+    path = _csv(tmp_path / "transactions.csv", "event_id,ret,other\nE1,0.1,x\nE3,-0.2,y\n")
     calls = []
-    monkeypatch.setattr(size_pnl_assemble, "assemble",
-                        lambda out_dir, plan, **kwargs: calls.append((out_dir, plan, kwargs)) or {"report": "r", "sections": 0, "rows": 0})
+    _stub_assemble(monkeypatch, calls)
     _install_sources(monkeypatch, sources())
-    assert run_py.main(_argv_for(tmp_path, "report", "--stored-gate", str(path))) == 0
-    assert calls[0][2]["stored_gate"] == stored
+    assert run_py.main(_argv_for(tmp_path, "report", "--stored-gate", path)) == 0
+    assert calls[0][2]["stored_gate"] == {"selected": {"E1": 0.1, "E3": -0.2}}
     assert json.loads(capsys.readouterr().out)["sections"] == 0
 
 
-def test_run_py_report_stage_refuses_a_stored_gate_with_selected_outside_scored(tmp_path, monkeypatch, capsys):
+def test_run_py_report_stage_refuses_a_stored_gate_csv_missing_a_column(tmp_path, monkeypatch, capsys):
     run_py = _run_main()
     monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
-    path = tmp_path / "stored.json"
-    path.write_text(json.dumps({"scored": ["E1"], "selected": ["E2"]}), encoding="utf-8")
+    path = _csv(tmp_path / "transactions.csv", "event_id,pnl\nE1,0.1\n")
     calls = []
-    monkeypatch.setattr(size_pnl_assemble, "assemble", lambda *args, **kwargs: calls.append(args) or {"report": "r", "sections": 0, "rows": 0})
+    _stub_assemble(monkeypatch, calls)
     _install_sources(monkeypatch, sources())
-    assert run_py.main(_argv_for(tmp_path, "report", "--stored-gate", str(path))) == 2
+    assert run_py.main(_argv_for(tmp_path, "report", "--stored-gate", path)) == 2
+    assert json.loads(capsys.readouterr().out)["reason"] == "stored_gate_columns"
+    assert calls == []
+
+
+def test_run_py_report_stage_refuses_a_stored_gate_csv_with_a_nan_ret_before_assemble(tmp_path, monkeypatch, capsys):
+    run_py = _run_main()
+    monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
+    path = _csv(tmp_path / "transactions.csv", "event_id,ret\nE1,0.1\nE2,\n")
+    calls = []
+    _stub_assemble(monkeypatch, calls)
+    _install_sources(monkeypatch, sources())
+    assert run_py.main(_argv_for(tmp_path, "report", "--stored-gate", path)) == 2
     assert json.loads(capsys.readouterr().out)["reason"] == "stored_gate_invalid"
     assert calls == []
 
 
-def test_run_py_report_stage_refuses_a_stored_gate_file_holding_json_null_before_assemble(tmp_path, monkeypatch, capsys):
+def test_run_py_report_stage_refuses_an_empty_stored_gate_file_as_unreadable_before_assemble(tmp_path, monkeypatch, capsys):
     run_py = _run_main()
     monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
-    path = tmp_path / "stored.json"
-    path.write_text("null", encoding="utf-8")
+    path = _csv(tmp_path / "stored.csv", "")
     calls = []
-    monkeypatch.setattr(size_pnl_assemble, "assemble", lambda *args, **kwargs: calls.append(args) or {"report": "r", "sections": 0, "rows": 0})
+    _stub_assemble(monkeypatch, calls)
     _install_sources(monkeypatch, sources())
-    assert run_py.main(_argv_for(tmp_path, "report", "--stored-gate", str(path))) == 2
-    assert json.loads(capsys.readouterr().out)["reason"] == "stored_gate_invalid"
+    assert run_py.main(_argv_for(tmp_path, "report", "--stored-gate", path)) == 2
+    assert json.loads(capsys.readouterr().out)["reason"] == "stored_gate_unreadable"
     assert calls == []
+
+
+def test_run_py_report_stage_passes_accept_gate_gap_and_gate_ladder_to_assemble(tmp_path, monkeypatch, capsys):
+    run_py = _run_main()
+    monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
+    ladder = tmp_path / "ladder.json"
+    ladder.write_text(json.dumps(LADDER), encoding="utf-8")
+    calls = []
+    _stub_assemble(monkeypatch, calls)
+    _install_sources(monkeypatch, sources())
+    assert run_py.main(_argv_for(tmp_path, "report", "--accept-gate-gap", "named gap", "--gate-ladder", str(ladder))) == 0
+    assert calls[0][2]["accepted_gap"] == "named gap"
+    assert calls[0][2]["ladder"] == LADDER
+    assert json.loads(capsys.readouterr().out)["sections"] == 0
+
+
+def test_run_py_report_stage_refuses_a_gate_ladder_holding_null_before_assemble(tmp_path, monkeypatch, capsys):
+    run_py = _run_main()
+    monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
+    ladder = tmp_path / "ladder.json"
+    ladder.write_text("null", encoding="utf-8")
+    calls = []
+    _stub_assemble(monkeypatch, calls)
+    _install_sources(monkeypatch, sources())
+    assert run_py.main(_argv_for(tmp_path, "report", "--gate-ladder", str(ladder))) == 2
+    assert json.loads(capsys.readouterr().out)["reason"] == "gate_ladder_invalid"
+    assert calls == []
+
+
+def test_run_py_refuses_accept_gate_gap_on_the_outer_stage_before_importing_sources(tmp_path, monkeypatch, capsys):
+    run_py = _run_main()
+    monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
+    assert run_py.main(_argv_for(tmp_path, "outer", "--accept-gate-gap", "named gap")) == 2
+    assert json.loads(capsys.readouterr().out)["reason"] == "accept_gate_gap_not_supported"
+
+
+def test_run_py_refuses_gate_ladder_on_the_outer_stage_before_importing_sources(tmp_path, monkeypatch, capsys):
+    run_py = _run_main()
+    monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
+    ladder = tmp_path / "ladder.json"
+    ladder.write_text(json.dumps(LADDER), encoding="utf-8")
+    assert run_py.main(_argv_for(tmp_path, "outer", "--gate-ladder", str(ladder))) == 2
+    assert json.loads(capsys.readouterr().out)["reason"] == "gate_ladder_not_supported"
 
 
 def test_run_py_refuses_a_stored_gate_on_the_outer_stage_before_importing_sources(tmp_path, monkeypatch, capsys):
     run_py = _run_main()
     monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
-    path = tmp_path / "stored.json"
-    path.write_text(json.dumps({"scored": ["E1"], "selected": ["E1"]}), encoding="utf-8")
-    assert run_py.main(_argv_for(tmp_path, "outer", "--stored-gate", str(path))) == 2
+    path = _csv(tmp_path / "stored.csv", "event_id,ret\nE1,0.1\n")
+    assert run_py.main(_argv_for(tmp_path, "outer", "--stored-gate", path)) == 2
     assert json.loads(capsys.readouterr().out)["reason"] == "stored_gate_not_supported"
 
 

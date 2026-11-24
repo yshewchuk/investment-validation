@@ -3,35 +3,21 @@
 import numpy as np
 import pandas as pd
 
-from experiments import size_pnl_contrast as contrast, size_pnl_report as report
+from engine.v2.ops.errors import fail
+from experiments import size_pnl_contrast as contrast, size_pnl_gate_agreement, size_pnl_report as report
 from experiments.size_pnl_inputs import PAIRS
 
-
-def stored_gate_valid(value) -> bool:
-    """True when ``value`` is {"scored": [ids], "selected": [ids]} with non-empty string ids and every selected id scored."""
-    if not (isinstance(value, dict) and set(value) == {"scored", "selected"}):
-        return False
-    if not all(isinstance(v, list) and all(isinstance(e, str) and e for e in v) for v in value.values()):
-        return False
-    return set(value["selected"]) <= set(value["scored"])
-
-
+_INVALID = "INVALID_EXPERIMENT_SPEC"
+stored_gate_valid = size_pnl_gate_agreement.valid
 LABEL =("Sensitivity (Amendment 3): production gate refit once through 2024, not refit per model "
          "(favours M0 forecast scale); not the pre-registered verdict")
 MARKS = (("mid", "pnl_dollars"), ("harsh", "pnl_dollars_harsh"))  # the headline arm (mid) first, then the stored primary as harsh fills
 MARKS_PRIMARY = (("primary", "pnl_dollars"),)  # no mid column in the decisions: the stored primary marks are the only arm
-NOT_AVAILABLE = ("not_available: production's stored walk-forward gate decisions (EXP-187 arm B, gitignored champion/results/transactions_*.csv) "
-                 "were not supplied: pass --stored-gate to run.py --stage report (a JSON object with the event ids production scored and selected)")
 COVERAGE_NOTE = ("covered = events with a determined G_PROD decision (taken or not_taken) in E; undetermined (a missing or NaN gate input, "
                  "a thin residual pool) is never counted as no. P&L per covered event counts untaken rows as 0. Contrasts below use the "
                  "covered subset of each pair: the events both members have a determined decision on.")
 CONTRAST_NOTE = ("d = median-type minus mean-type for the H2 pairs; M0 minus the named model for the M0 rows. arm mid = marks_mid (the headline basis); "
                  "arm harsh = harsh fills, reported only; arm primary = stored primary marks when no mid column exists.")
-AGREEMENT_NOTE = ("Events are M0's determined 2025 G_PROD events in E that production also scored (the stored `scored` set); an M0 event "
-                  "production never scored is outside the rate, and production_scored_outside_m0 counts events in E that production scored and M0 has "
-                  "no determined 2025 decision for. selected is the stored EXP-187 arm B selected "
-                  "set (served gate, threshold refit per walk-forward fold, on v2-snapshot trades); the fold CLI refits on the legacy store's "
-                  "trades (known difference). A low rate is a finding, never a reason to tune.")
 
 
 def _title(text):
@@ -63,33 +49,35 @@ def _total(series_by_label, label):
     return float(series_by_label[label].sum()) if label in series_by_label else 0.0
 
 
-def _agreement(det, role_model, label_of, outer_models, in_e, stored_gate):
+def _agreement(det, role_model, label_of, outer_models, in_e, stored_gate, accepted_gap=None, ladder=None):
     """M0's agreement with production's stored 2025 gate decisions, as a Markdown section (titled by the caller)."""
-    heading = "### G_PROD M0 agreement with production's stored 2025 gate decisions"
     m0_raw = role_model.get("M0")
     m0 = label_of.get(m0_raw)
     if m0 is None or m0_raw not in outer_models:
-        return f"{heading}\n\nnot_available: M0_not_in_run"
+        return f"{size_pnl_gate_agreement.HEADING}\n\nnot_available: M0_not_in_run"
     if stored_gate is None:
-        return f"{heading}\n\n{NOT_AVAILABLE}"
-    scored = {str(e) for e in stored_gate["scored"]}
-    sel = {str(e) for e in stored_gate["selected"]} & scored
-    rows = det[(det["model_id"] == m0) & (det["event_date"].dt.year == 2025)]
-    all_m0 = set(rows["event_id"])
-    events = all_m0 & scored
-    taken = set(rows.loc[rows["status"] == "taken", "event_id"]) & events
-    both, m0_only = taken & sel, taken - sel
-    prod_only, neither = (events & sel) - taken, events - taken - sel
-    n = len(events)
-    rate = (len(both) + len(neither)) / n if n else None
-    headers = ["events", "both_taken", "m0_only", "production_only", "neither", "agreement_rate", "production_scored_outside_m0"]
-    table = report.md_table(headers, [[n, len(both), len(m0_only), len(prod_only), len(neither), rate, len((scored & in_e) - all_m0)]])
-    return f"{heading}\n\n{AGREEMENT_NOTE}\n\n{table}"
+        raise fail(_INVALID, "the run has G_PROD rows: pass --stored-gate (EXP-187's transactions CSV) to run.py --stage report", details={"reason": "stored_gate_required"})
+    if "gate_score" not in det.columns:
+        raise fail(_INVALID, "the decisions predate the gate_score column: rerun the outer stage", details={"reason": "gate_score_missing"})
+    if "reason" not in det.columns:
+        raise fail(_INVALID, "the decisions lack the reason column", details={"reason": "gate_score_missing"})
+    rows = det[(det["model_id"] == m0) & (det["event_date"].dt.year == 2025) & det["event_id"].isin(in_e) & det["status"].isin(("taken", "not_taken"))]
+    m0_frame = rows.drop_duplicates("event_id")
+    # month_decider fills gate_score for every event with finite inputs; blank the rows the gate never decided
+    # (universe_filter, bad_quote) so the ladder step and score distribution cover only scored events. Covered still includes them.
+    m0_frame = m0_frame.assign(gate_score=m0_frame["gate_score"].where((m0_frame["status"] == "taken") | (m0_frame["reason"] == "below_gate_threshold")))
+    return size_pnl_gate_agreement.section(m0_frame, stored_gate["selected"], accepted_gap=accepted_gap, ladder=ladder)
 
 
-def sections(gate_raw, frame, *, label_of, role_model, roster, outer_models, quarter_of, tick, stored_gate=None):
+def sections(gate_raw, frame, *, label_of, role_model, roster, outer_models, quarter_of, tick, stored_gate=None, accepted_gap=None, ladder=None):
     """The G_PROD sections over the events of E (``frame``): per-model coverage and P&L, the covered-subset contrasts, and M0's
     agreement with production's stored 2025 decisions. [] when there are no gate rows."""
+    if accepted_gap is not None and not (isinstance(accepted_gap, str) and accepted_gap.strip()):  # direct callers are admitted here whatever the population
+        raise fail(_INVALID, "accepted_gap must be a non-empty string", details={"reason": "accepted_gap_invalid"})
+    if ladder is not None and not size_pnl_gate_agreement.ladder_valid(ladder):
+        raise fail(_INVALID, "ladder must be a dict of label -> {event_id: finite score}", details={"reason": "ladder_invalid"})
+    if stored_gate is not None and not stored_gate_valid(stored_gate):
+        raise fail(_INVALID, 'stored_gate must be {"selected": {event_id: finite ret}}', details={"reason": "stored_gate_invalid"})
     if gate_raw.empty:
         return []
     swapped = "pnl_dollars_mid" in gate_raw.columns
@@ -144,5 +132,5 @@ def sections(gate_raw, frame, *, label_of, role_model, roster, outer_models, qua
     contrast_text = report.t7_contrasts(shown).replace("### T7 Contrasts", "### G_PROD contrasts (covered subset)", 1)
     contrast_text += "\n\n" + CONTRAST_NOTE
 
-    agreement = _agreement(det, role_model, label_of, outer_models, in_e, stored_gate)
+    agreement = _agreement(det, role_model, label_of, outer_models, in_e, stored_gate, accepted_gap, ladder)
     return [_title(table1), _title(contrast_text), _title(agreement)]

@@ -333,6 +333,16 @@ def test_invalid_stored_gate_refuses_before_any_read(tmp_path):
     assert not (out / "REPORT.md").exists()
 
 
+@pytest.mark.parametrize("accepted_gap", ["", "  ", 1, ["named gap"]], ids=["empty", "blank", "int", "list"])
+def test_invalid_accepted_gap_refuses_before_any_read(tmp_path, accepted_gap):
+    out = tmp_path / "x"  # no receipts and no G_PROD rows: the check runs on every path, before any file is read
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, plan_frame(), admitted=None, accepted_gap=accepted_gap)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "report_accepted_gap_invalid"
+    assert not (out / "REPORT.md").exists()
+
+
 def test_unknown_decision_status_refuses_as_decisions_invalid(tmp_path):
     out = build(tmp_path, rows_fn=lambda rows: [{**rows[0], "status": "weird"}, *rows[1:]])
     with pytest.raises(Refusal) as caught:

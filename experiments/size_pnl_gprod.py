@@ -200,6 +200,7 @@ def month_decider(gate, table, labels, start_m):
                 return "undetermined", reason
             return ("taken", None) if ret >= gate.threshold else ("not_taken", "below_gate_threshold")
 
-        return straddle.decide(events, pd.DataFrame({"event_date": [], "edge": []}), RULE, chunk, gate=verdict)
+        dec = straddle.decide(events, pd.DataFrame({"event_date": [], "edge": []}), RULE, chunk, gate=verdict)
+        return dec.assign(gate_score=dec["event_id"].astype(str).map(lambda e: scores[e][0]))
 
     return decide
