@@ -241,10 +241,11 @@ Stated so nobody has to rediscover them.
 
 ---
 
-## 9. Pricing contract: chain index and Resolution (design; lands with slices S2-S4)
+## 9. Pricing contract: chain index and Resolution (design; twin module)
 
 Design: `guides/price_structure_index_design.md`.
 
 - `price_structure` keeps its signature and outputs bit for bit, including exception types and messages.
-- `ChainSnapshot.rows` is immutable once priced.
-- `resolve_structure` and `price_resolution` compose to `price_structure`'s result; callers adopt them directly, or `price_structure` delegates (optional slice S5).
+- A twin module `engine/chain_index.py` provides `resolve_structure`, `price_resolution` and `price_structure_indexed`, bit-identical to `price_structure`. `engine/structures.py` and `engine/fills.py` are not modified and nothing in the v14 closure imports the twin.
+- `ChainSnapshot.rows` is immutable once priced through the twin.
+- Retirement trigger: the v14-bound experiments end; then `price_structure` wraps the twin.
