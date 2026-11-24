@@ -1377,12 +1377,20 @@ def test_verify_mode_raises_on_strike_or_right_mutation(mutation):
 
 
 def test_strike_or_right_mutation_not_checked_with_verify_disabled(monkeypatch):
+    """With verify off, a strike edit made after the index is built is not checksummed.
+
+    Scope, stated honestly: this test checks only that the call does not raise
+    ChainSnapshotMutated and does not surface an AssertionError. It does not assert
+    that the priced result equals legacy. The edited row (row 0) is not one the
+    straddle selects, so the outcome is not expected to depend on the edit.
+    """
     monkeypatch.setenv("ENGINE_CHAIN_INDEX_VERIFY", "0")
     priced = snap(make_chain(rights="CP", delta=True), "AMC")
     assert price_structure_indexed(straddle_through(), priced, MID).legs
     priced.rows.loc[priced.rows.index[0], "strike"] += 1.0
     out = outcome(lambda: price_structure_indexed(straddle_through(), priced, MID))
-    assert not (out[0] == "err" and out[1] is ChainSnapshotMutated)
+    assert out[0] == "ok" or out[1] is not ChainSnapshotMutated
+    assert out[1] is not AssertionError
 
 
 def test_ask_edit_is_read_live_and_priced_as_legacy():
@@ -1452,3 +1460,159 @@ def test_planted_lookup_none_detected(monkeypatch):
     monkeypatch.setattr(ci._StrikeData, "lookup", lambda self, e, right, strike: None)
     with pytest.raises(AssertionError):
         assert_same(straddle_through(), lambda: snap(make_chain(rights="CP", delta=True), "AMC"), MID)
+
+
+# --------------------------------------------------------------------------
+# 15. non-finite spot and selector fields; live dte reads; call/put strike sets
+# --------------------------------------------------------------------------
+
+_NAN = float("nan")
+_INF = float("inf")
+
+
+def _cp_snapshot():
+    return snap(make_chain(rights="CP", delta=True), "AMC")
+
+
+def _pair_with_strike(strike):
+    return _struct(_leg("c", strike=strike, right=CALL), _leg("p", strike=strike, right=PUT))
+
+
+def _whole_to_legacy(make_structure, make_snapshot, fill=MID):
+    """Legacy and twin each build their own structure and snapshot inside ``outcome``.
+
+    A refusal at any construction or pricing step is compared as a whole: status,
+    exception type and message. Successful outcomes are compared with ``_same``,
+    cold and warm.
+    """
+    legacy = outcome(lambda: price_structure(make_structure(), make_snapshot(), fill))
+    built = outcome(lambda: (make_structure(), make_snapshot()))
+    if built[0] == "err":
+        _same(legacy, built)
+        return legacy
+    structure, snapshot = built[1]
+    cold = outcome(lambda: price_structure_indexed(structure, snapshot, fill))
+    _same(legacy, cold)
+    warm = outcome(lambda: price_structure_indexed(structure, snapshot, fill))
+    _same(legacy, warm)
+    return legacy
+
+
+NONFINITE_CASES = [
+    pytest.param(straddle_through,
+                 lambda: snap(make_chain(rights="CP", delta=True), "AMC", spot=_NAN),
+                 id="spot-nan"),
+    pytest.param(straddle_through,
+                 lambda: snap(make_chain(rights="CP", delta=True), "AMC", spot=_INF),
+                 id="spot-inf"),
+    pytest.param(straddle_through,
+                 lambda: ChainSnapshot(ticker="T", obs_date=OBS, event_date=EVENT,
+                                       rows=make_chain(rights="CP", delta=True).drop(columns="spot"),
+                                       spot=None, session="AMC"),
+                 id="spot-missing"),
+    pytest.param(lambda: _pair_with_strike(_S("moneyness", moneyness=_NAN)), _cp_snapshot,
+                 id="moneyness-nan"),
+    pytest.param(lambda: _pair_with_strike(_S("delta", target_delta=_INF)), _cp_snapshot,
+                 id="target-delta-inf"),
+    pytest.param(lambda: _struct(
+                     _leg("a", strike=ATM, right=PUT),
+                     _leg("b", strike=_S("grid_step", ref="a", steps=2.5), right=CALL)),
+                 _cp_snapshot, id="grid-step-steps-2.5"),
+    pytest.param(lambda: _pair_with_strike(_S("fixed", strike=_NAN)), _cp_snapshot,
+                 id="fixed-strike-nan"),
+]
+
+
+@pytest.mark.parametrize("make_structure,make_snapshot", NONFINITE_CASES)
+def test_nonfinite_spot_and_selector_fields_go_whole_to_legacy(make_structure, make_snapshot):
+    """Non-finite or missing spot, and non-finite or non-integral selector fields.
+
+    Each case must end in the same outcome on both paths: the same values, or the
+    same exception type and message.
+    """
+    _whole_to_legacy(make_structure, make_snapshot)
+
+
+def test_dte_edit_is_read_live_with_verify_off(monkeypatch):
+    monkeypatch.setenv("ENGINE_CHAIN_INDEX_VERIFY", "0")
+    # Fixed selection on the last expiry (dte 36), so the dte edit cannot move the expiry choice.
+    structure = _straddle_on(_fixed(date(2026, 4, 14)))
+    priced = snap(make_chain(rights="CP", delta=True), "AMC")
+    first = price_structure_indexed(structure, priced, MID)
+    leg = first.legs[0]
+    sel = _selected_rows(priced, leg)
+    assert len(sel) == 1, f"expected one row for leg {leg.name}, got {len(sel)}"
+    i = sel.index[0]
+    before = int(priced.rows.loc[i, "dte"])
+    priced.rows.loc[i, "dte"] += 100  # one row of the selected contract only
+    second = price_structure_indexed(structure, priced, MID)  # no ChainSnapshotMutated
+    assert second.leg(leg.name).dte == before + 100
+    assert second.to_dict() == price_structure(structure, priced, MID).to_dict()
+
+
+def _call_put_chain():
+    """Calls list 90..110 step 5; puts list 92..112 step 4. One expiry; 11 rows."""
+    calls = make_chain(expiries=((B_DAY, 8),), strikes=np.arange(90.0, 111.0, 5.0),
+                       rights="C", delta=True)
+    puts = make_chain(expiries=((B_DAY, 8),), strikes=np.arange(92.0, 113.0, 4.0),
+                      rights="P", delta=True)
+    return _concat(calls, puts)
+
+
+CALL_PUT_CASES = [
+    ("atm-call", lambda: _struct(_leg("a", strike=ATM, right=CALL))),
+    ("atm-put", lambda: _struct(_leg("a", strike=ATM, right=PUT))),
+    ("bracket-below-put", lambda: _struct(_leg("a", strike=_S("bracket", side="below"), right=PUT))),
+    ("bracket-above-call", lambda: _struct(_leg("a", strike=_S("bracket", side="above"), right=CALL))),
+    ("grid-step-call-from-put", lambda: _struct(
+        _leg("a", strike=ATM, right=PUT),
+        _leg("b", strike=_S("grid_step", ref="a", steps=1), right=CALL))),
+    ("grid-step-put-from-call", lambda: _struct(
+        _leg("a", strike=ATM, right=CALL),
+        _leg("b", strike=_S("grid_step", ref="a", steps=1), right=PUT))),
+    ("offset-call-from-put", lambda: _struct(
+        _leg("a", strike=ATM, right=PUT),
+        _leg("b", strike=_S("offset_from", ref="a", moneyness=0.03), right=CALL))),
+    ("offset-put-from-call", lambda: _struct(
+        _leg("a", strike=ATM, right=CALL),
+        _leg("b", strike=_S("offset_from", ref="a", moneyness=-0.03), right=PUT))),
+    ("mirror-put", lambda: _struct(
+        _leg("a", strike=_S("fixed", strike=96.0), right=PUT),
+        _leg("b", strike=_S("fixed", strike=104.0), right=PUT),
+        _leg("c", strike=_S("mirror", ref="a", about="b"), right=PUT))),
+    ("mirror-call", lambda: _struct(
+        _leg("a", strike=_S("fixed", strike=90.0), right=CALL),
+        _leg("b", strike=_S("fixed", strike=100.0), right=CALL),
+        _leg("c", strike=_S("mirror", ref="a", about="b"), right=CALL))),
+    ("same-as-call-of-put", lambda: _struct(
+        _leg("a", strike=ATM, right=PUT),
+        _leg("b", strike=_S("same_as", ref="a"), right=CALL))),
+    ("same-as-put-of-call", lambda: _struct(
+        _leg("a", strike=ATM, right=CALL),
+        _leg("b", strike=_S("same_as", ref="a"), right=PUT))),
+    ("same-as-put-absent-on-calls", lambda: _struct(
+        _leg("a", strike=_S("fixed", strike=92.0), right=PUT),
+        _leg("b", strike=_S("same_as", ref="a"), right=CALL))),
+    ("fixed-call-only", lambda: _struct(_leg("a", strike=_S("fixed", strike=90.0), right=CALL))),
+    ("fixed-put-only", lambda: _struct(_leg("a", strike=_S("fixed", strike=92.0), right=PUT))),
+    ("delta-call", lambda: _struct(_leg("a", strike=_S("delta", target_delta=0.25), right=CALL))),
+    ("delta-put", lambda: _struct(_leg("a", strike=_S("delta", target_delta=0.25), right=PUT))),
+    ("all-kinds-valid-on-both-rights", lambda: _struct(
+        _leg("a", strike=ATM, right=CALL),
+        _leg("b", strike=ATM, right=PUT),
+        _leg("c", strike=_S("grid_step", ref="a", steps=1), right=CALL),
+        _leg("d", strike=_S("grid_step", ref="b", steps=1), right=PUT),
+        _leg("e", strike=_S("offset_from", ref="a", moneyness=0.03), right=CALL),
+        _leg("f", strike=_S("offset_from", ref="b", moneyness=-0.03), right=PUT),
+        _leg("g", strike=_S("same_as", ref="b"), right=CALL),
+        _leg("h", strike=_S("same_as", ref="a"), right=PUT),
+        _leg("i", strike=_S("delta", target_delta=0.25), right=CALL),
+        _leg("j", strike=_S("delta", target_delta=0.25), right=PUT))),
+]
+
+
+@pytest.mark.parametrize("fill_name", ["MID", "WORST"])
+@pytest.mark.parametrize("label,build", CALL_PUT_CASES, ids=[case[0] for case in CALL_PUT_CASES])
+def test_call_and_put_strike_sets_differ(label, build, fill_name):
+    rows = _call_put_chain()
+    assert_same(build(), lambda: snap(rows.copy(), "AMC"), FILLS[fill_name])
