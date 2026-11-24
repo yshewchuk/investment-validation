@@ -121,7 +121,9 @@ def assert_identical(label, legacy, twin):
 
 
 def run_case(n_strikes, n_expiries, rights, names, alphas, reps, log_every=None):
-    rows = make_chain(n_strikes, n_expiries, rights, case_seed(n_strikes, n_expiries, rights))
+    if reps < 1:
+        raise ValueError(f"reps must be >= 1, got {reps}")
+    rows =make_chain(n_strikes, n_expiries, rights, case_seed(n_strikes, n_expiries, rights))
     out = []
     combos = list(itertools.product(names, alphas))
     case_label = f"{rights} {n_strikes}x{n_expiries}"

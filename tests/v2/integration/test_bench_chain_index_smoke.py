@@ -42,10 +42,29 @@ def test_bench_case_row_and_identity_control():
     out = bench.run_case(40, 1, "CP", ["STR-THRU"], (0.0,), 1)
     assert len(out) == 1
     assert out[0]["ok"] is True
-    assert out[0]["speedup"] > 0
+    assert out[0]["speedup"] == pytest.approx(out[0]["legacy_ms"] / out[0]["warm_ms"])
 
     # (ii) control: a numerically altered result must be caught by assert_identical.
     a = reference[1]
     b = dataclasses.replace(a, spot=a.spot + 1.0)
     with pytest.raises(AssertionError):
         bench.assert_identical("x", ("ok", a), ("ok", b))
+
+
+def test_run_case_refuses_zero_reps():
+    with pytest.raises(ValueError):
+        bench.run_case(40, 1, "CP", ["STR-THRU"], (0.0,), 0)
+
+
+def test_assert_identical_error_branches():
+    # (a) ok vs err status mismatch
+    with pytest.raises(AssertionError):
+        bench.assert_identical("x", ("ok", 1), ("err", ValueError, "m"))
+    # (b) same type, different message
+    with pytest.raises(AssertionError):
+        bench.assert_identical("x", ("err", ValueError, "m"), ("err", ValueError, "other"))
+    # (c) same message, different type
+    with pytest.raises(AssertionError):
+        bench.assert_identical("x", ("err", ValueError, "m"), ("err", KeyError, "m"))
+    # (d) identical errors do not raise
+    bench.assert_identical("x", ("err", ValueError, "m"), ("err", ValueError, "m"))
