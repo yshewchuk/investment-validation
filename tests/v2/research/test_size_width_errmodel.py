@@ -252,7 +252,7 @@ def test_fake_forecast_refuses_nonfinite_draws():
     y = np.array([1.0, 2.0, 3.0])
     for bad in (np.nan, np.inf):
         z = np.array([0.0, bad, 0.0])
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="finite"):
             fake_forecast(model, y, z)
 
 
@@ -294,3 +294,12 @@ def test_calibrate_boundary_at_tolerance():
     assert cal["ok"] is False
     assert cal["reason"] == "fake_not_calibrated"
     assert cal["rmse_rel"] == pytest.approx(-0.07)
+
+
+def test_calibrate_rejects_zero_draws():
+    model = {"L": 0.3, "b": 0.7, "s": 0.2, "mean_log_y": 0.2}
+    rng = np.random.default_rng(6)
+    y = np.exp(rng.normal(size=50))
+    f = fake_forecast(model, y, rng.normal(size=50))
+    with pytest.raises(ValueError):
+        calibrate(model, f, y, np.zeros((0, 50)))

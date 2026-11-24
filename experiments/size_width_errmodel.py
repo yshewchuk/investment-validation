@@ -79,10 +79,12 @@ def _rel(value, base):
 
 
 def calibrate(model, forecast, label, z):
-    """Compare M0 and the mean over draws of fake forecasts on the same kept rows.
+    """Compare M0's RMSE/MAE (of forecast minus label) with the mean over draws of the fake forecast's
+    per-draw RMSE/MAE, on the same kept rows.
 
     Returns ok when |rmse_rel| and |mae_rel| are each at most TOLERANCE (inclusive); never raises
-    for the gate. Raises ValueError only for malformed or non-finite ``z``.
+    for the 5% gate. Raises ValueError for any malformed input: mismatched forecast/label shapes,
+    non-finite or wrongly shaped ``z`` (must be (N, len(forecast)) with N >= 1), or N = 0.
     """
     f = np.asarray(forecast, dtype=float)
     y = np.asarray(label, dtype=float)
