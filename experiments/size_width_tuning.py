@@ -118,6 +118,11 @@ def _valid(arm, receipt):
         return False
     if arm not in ("A", "B", "C", "D"):
         return True
+    if arm == "C":
+        fake = receipt.get("fake")
+        cal = fake.get("calibration") if isinstance(fake, dict) else None
+        if not (isinstance(cal, dict) and cal.get("ok") is True):
+            return False
     try:
         return set(body) == set(units(arm)) and all(
             isinstance(body[u], dict) and body[u].get("members") == list(m) and admit_k(body[u].get("k")) is not None

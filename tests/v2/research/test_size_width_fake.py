@@ -9,6 +9,7 @@ import pytest
 from experiments import size_pnl_shortvol as sv
 from experiments import size_width_account as account
 from experiments import size_width_errmodel as errmodel
+from experiments import size_pnl_receipts as receipts
 from experiments import size_width_fake as fake
 from experiments import size_width_tuning as tuning
 from experiments.size_pnl_pool import build_pool, pool_history
@@ -280,7 +281,29 @@ def test_t4_markdown_renders_300_trades_and_marks_299_n_a():
 def test_units_c_is_b_and_valid_checks_the_arm_c_shape():
     assert tuning.units("C") == tuning.units("B")
     body = {n: {"k": 1.0, "flags": [], "members": [n], "scores": {}} for n in NAMES}
-    receipt = {"experiment": "EXP-189", "arm": "C", "window": "2023H2-2024", "body": body}
+    receipt = {"experiment": "EXP-189", "arm": "C", "window": "2023H2-2024", "body": body,
+               "fake": {"calibration": {"ok": True}}}
     assert tuning._valid("C", receipt)
+    assert not tuning._valid("C", {**receipt, "fake": {"calibration": {"ok": False}}})
+    assert not tuning._valid("C", {k: v for k, v in receipt.items() if k != "fake"})
+    assert not tuning._valid("C", {**receipt, "fake": {}})
     missing = {n: v for n, v in body.items() if n != NAMES[0]}
     assert not tuning._valid("C", {**receipt, "body": missing})
+
+
+def test_write_tuning_c_refuses_an_uncalibrated_fake_and_writes_nothing(tmp_path):
+    with pytest.raises(Refusal) as caught:
+        fake.write_tuning_c(tmp_path, {}, "h", MODEL, {"ok": False, "reason": "fake_not_calibrated"}, 2)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.details["reason"] == "fake_not_calibrated"
+    assert not (tmp_path / "receipts" / "tuning_C.json").exists()
+
+
+def test_frozen_refuses_a_stored_arm_c_receipt_whose_calibration_failed(tmp_path):
+    body = {n: {"k": 1.0, "flags": [], "members": [n], "scores": {}} for n in NAMES}
+    receipts.write_receipt(tmp_path / "receipts" / "tuning_C.json", {
+        "experiment": "EXP-189", "arm": "C", "inputs_hash": "h", "window": "2023H2-2024", "body": body,
+        "fake": {"N": 2, "seed_tag": "exp189-v1", "model": MODEL, "calibration": {"ok": False}}})
+    with pytest.raises(Refusal) as caught:
+        tuning.frozen(tmp_path, "C", "h")
+    assert caught.value.details["reason"] == "tuning_receipt_changed"

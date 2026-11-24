@@ -13,7 +13,7 @@ from engine.pnl_sim import DRAWS
 from experiments import size_pnl_receipts as receipts
 from experiments import size_width_errmodel as errmodel
 from experiments.size_pnl_pool import build_pool
-from experiments.size_pnl_shortvol import NAMES
+from experiments.size_pnl_shortvol import NAMES, Refusal
 from experiments.size_width_sweep import INNER, Sweep, in_window
 from experiments.size_width_tuning import MIN_TRADES, choose, unit_score
 
@@ -103,13 +103,17 @@ def calibration(model, table, labels, n=N_DRAWS):
 
 
 def write_tuning_c(out, body, inputs_hash, model, cal, n):
+    if cal.get("ok") is not True:
+        raise Refusal("EXPERIMENT_IDENTITY_CONFLICT", "tuning C refused: the fake forecast is not calibrated to M0",
+                      {"reason": "fake_not_calibrated"})
     return receipts.write_receipt(Path(out) / "receipts" / "tuning_C.json", {
         "experiment": "EXP-189", "arm": "C", "inputs_hash": inputs_hash, "window": "2023H2-2024", "body": body,
         "fake": {"N": n, "seed_tag": SEED_TAG, "model": model, "calibration": cal}})
 
 
 def run_fake(months, table, labels, model, sessions, out, inputs_hash, *, n=N_DRAWS, draws=DRAWS):
-    """Calibrate the fake (omit C when it fails), else run draws 0..n-1, write the tuning_C receipt and return its body."""
+    """Calibrate the fake, else run draws 0..n-1 and write the tuning_C receipt. Returns {"status": "ok", "body", "calibration", "pooled"}
+    or {"status": "fake_not_calibrated", "calibration"} (no draws, no receipt)."""
     started = time.time()
     _say(f"stage start n={n} draws={draws}")
     cal = calibration(model, table, labels, n)
