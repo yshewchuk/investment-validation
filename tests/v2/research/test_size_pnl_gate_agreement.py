@@ -227,6 +227,19 @@ def test_section_without_a_ladder_renders_the_no_ladder_note():
     assert agreement.NO_LADDER in text
 
 
+def test_section_refuses_a_boolean_selected_as_stored_gate_invalid():
+    with pytest.raises(OpsError) as caught:
+        agreement.section(M0, True, accepted_gap="test gap")
+    assert _reason(caught) == "stored_gate_invalid"
+
+
+def test_section_refuses_a_ladder_keyed_by_the_as_run_label_as_ladder_invalid():
+    ladder = {agreement.AS_RUN: {"E1": 0.1}}
+    with pytest.raises(OpsError) as caught:
+        agreement.section(M0, SELECTED, accepted_gap="test gap", ladder=ladder)
+    assert _reason(caught) == "ladder_invalid"
+
+
 # ---- ladder_valid ------------------------------------------------------------
 
 @pytest.mark.parametrize("value", [{}, {"band": {"E1": 0.1}}, {"band": {}}])

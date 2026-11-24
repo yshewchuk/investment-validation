@@ -152,6 +152,10 @@ def check(st, accepted_gap):
 def section(m0, selected, *, accepted_gap=None, ladder=None):
     """The M0 agreement section (markdown). ``m0``: M0's determined 2025 G_PROD rows in E, one per event; ``selected``: {id: ret_mid}.
     check runs first, so a failing bar raises before anything is rendered."""
+    if not valid({"selected": selected}):
+        raise _refuse("stored_gate_invalid", "selected must map non-empty event ids to finite returns")
+    if ladder is not None and not ladder_valid(ladder):
+        raise _refuse("ladder_invalid", "ladder must map labels (not the as-run label) to {event_id: finite score}")
     st = stats(m0, selected)
     label = check(st, accepted_gap)
     covered, gprod, prod = _sets(m0, selected)
