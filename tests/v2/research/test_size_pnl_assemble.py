@@ -148,7 +148,7 @@ def test_happy_path_writes_every_section_in_order(tmp_path):
     out = build(tmp_path)
     summary = assemble_mod.assemble(out, plan_frame(), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
-    assert summary["report"] == str(out / "REPORT.md") and summary["sections"] == 17 and summary["rows"] > 0  # 10 + two not_testable sensitivity notes (Amendment 1 and 2) + the Amendment 6 board-match section + the three G_PROD sections + the Amendment 6 production-audit section
+    assert summary["report"] == str(out / "REPORT.md") and summary["sections"] == 19 and summary["rows"] > 0  # 10 + marks basis + breakeven note + harsh note (Amendment 1) + accounts (Amendment 2) + the Amendment 6 board-match section + the three G_PROD sections + the Amendment 6 production-audit section
     assert text.startswith("# EXP-188 REPORT")
     assert "independent books" in text and "### Production audit" in text
     heads = ["### T1", "### T2", "### T3", "### T4", "### T6", "### T7", "### T8", "### T9", "### T10"]
@@ -674,53 +674,62 @@ def test_real_check_plan_admits_the_fixture_plan_and_the_report_is_written(tmp_p
     assert (out / "REPORT.md").exists()
 
 
-# ---- Amendment 1 sensitivity: pnl_dollars_mid, after the primary verdicts ----
+# ---- Amendment 7: pnl_dollars_mid is the headline basis; the stored primary P&L is the harsh-fills section ----
+
+HARSH = "### Harsh fills, reported only, not a verdict basis: "
+HARSH_ACCOUNT = HARSH + "cash-secured $200,000 accounts (Amendment 2)"  # the accounts' primary marks (no mid column)
+MID_ACCOUNT = "### Headline marks (mid, alpha 0.5; post-hoc revision by the user, 2026-11-24): cash-secured $200,000 accounts (Amendment 2)"
+
 
 def _with_mid(rows, *, delta=0.0):
     """The rows with a ``pnl_dollars_mid`` column: each primary P&L plus ``delta``."""
     return [{**row, "pnl_dollars_mid": row["pnl_dollars"] + delta} for row in rows]
 
 
-def test_mid_column_adds_the_sensitivity_sections_after_the_primary_verdicts(tmp_path):
+def test_mid_column_adds_the_harsh_sections_after_the_headline_verdicts(tmp_path):
     out = build(tmp_path, rows_fn=_with_mid)
     summary = assemble_mod.assemble(out, plan_frame(), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
-    sens = [line for line in _sections(text) if "not the pre-registered verdict" in line]
-    assert summary["sections"] == 20  # the 10 primary sections, 4 sensitivity sections, the Amendment 2 not_testable note, the Amendment 6 board-match section, the three G_PROD sections and the Amendment 6 production-audit section
-    assert [line.rsplit(": ", 1)[1] for line in sens] == ["T4 Short-vol, as is", "T6 Straddle buy rules",
-                                                          "T7 Contrasts", "T10 Verdicts"]
-    assert all(line.startswith("### Sensitivity (Amendment 1), not the pre-registered verdict: ") for line in sens)
-    assert text.index(sens[0]) > text.index("### T10 Verdicts")
-    mid_verdicts = [_cells(line) for line in _section_lines(text, sens[-1]) if line.startswith("| H")]
-    assert mid_verdicts == [["H1", "+1", "clear"], ["H2", "-1", "reversed"], ["H3", "+1", "no_difference"]]
+    harsh = [line for line in _sections(text) if line.startswith(HARSH)]
+    # the 10 headline sections, 4 harsh sections, the marks basis, the breakeven note (no endpoints here), the accounts, the board-match section, the three G_PROD sections and the Amendment 6 production-audit section
+    assert summary["sections"] == 22
+    assert [line.rsplit(": ", 1)[1] for line in harsh] == ["T4 Short-vol, as is", "T6 Straddle buy rules",
+                                                            "T7 Contrasts", "T10 Verdicts"]
+    assert text.index(harsh[0]) > text.index("### T10 Verdicts")
+    harsh_verdicts = [_cells(line) for line in _section_lines(text, harsh[-1]) if line.startswith("| H")]
+    assert harsh_verdicts == [["H1", "+1", "clear"], ["H2", "-1", "reversed"], ["H3", "+1", "no_difference"]]
+    assert "### Marks basis (post-hoc revision by the user, 2026-11-24)" in text
+    assert "### Breakeven alpha per model and book\n\nnot_testable: breakeven_endpoints_not_in_decisions" in text
 
 
-def test_primary_sections_do_not_depend_on_the_mid_column(tmp_path):
+def test_headline_sections_depend_on_the_mid_column_and_harsh_sections_do_not(tmp_path):
     texts = {}
     for name, rows_fn in (("plain", None), ("mid", _with_mid), ("shifted", lambda rows: _with_mid(rows, delta=500.0))):
         (tmp_path / name).mkdir()
         out = build(tmp_path / name, rows_fn=rows_fn)
         assemble_mod.assemble(out, plan_frame(), admitted=None)
         texts[name] = (out / "REPORT.md").read_text(encoding="utf-8")
-    for title in ("### T4", "### T10"):
-        assert _section_lines(texts["plain"], title) == _section_lines(texts["mid"], title) == _section_lines(texts["shifted"], title)
-    sens = "### Sensitivity (Amendment 1), not the pre-registered verdict: T4 Short-vol, as is"
-    assert _section_lines(texts["mid"], sens) != _section_lines(texts["shifted"], sens)  # the sensitivity reads the mid marks
+    harsh = HARSH + "T4 Short-vol, as is"
+    # A uniform per-trade shift cancels in a paired contrast when both models of a pair take the same number of trades per event
+    # (this fixture has equal counts), so the headline T10 is unchanged; the headline T4 is a per-trade total and moves.
+    # The T10 comparison is on the table rows only: the plain run has no mid column, so its basis note line differs.
+    t10_rows = lambda text: [line for line in _section_lines(text, "### T10") if line.startswith("|")]
+    assert t10_rows(texts["plain"]) == t10_rows(texts["mid"]) == t10_rows(texts["shifted"])
+    assert _section_lines(texts["plain"], "### T4") == _section_lines(texts["mid"], "### T4") != _section_lines(texts["shifted"], "### T4")
+    assert _section_lines(texts["mid"], harsh) == _section_lines(texts["shifted"], harsh)  # the harsh sections read the stored primary P&L
     # Rendered values. H-sq (no median role, so no bump) takes four as-is trades of 10, 20, 30, 40: total 100.00 over
-    # 4 events = 25 per event, hit rate 1. The shifted run adds 500 to every taken row, so the sensitivity total is
-    # 100 + 4 * 500 = 2100.00 and the per-event value is 2100 / 4 = 525.
+    # 4 events = 25 per event, hit rate 1. The shifted run adds 500 to every taken row, so the headline total is
+    # 100 + 4 * 500 = 2100.00 and the per-event value is 2100 / 4 = 525; the harsh row stays at 100.00 and 25.
     plain_row = next(line for line in _section_lines(texts["plain"], "### T4") if line.startswith("| H-sq |"))
     assert plain_row == "| H-sq | 4 | 100.00 | 25 | 1 |"
-    shifted_row = next(line for line in _section_lines(texts["shifted"], sens) if line.startswith("| H-sq |"))
+    shifted_row = next(line for line in _section_lines(texts["shifted"], "### T4") if line.startswith("| H-sq |"))
     assert shifted_row == "| H-sq | 4 | 2100.00 | 525 | 1 |"
-    # No verdict flip is asserted here. A uniform per-trade shift cancels in a paired contrast only when both models of the
-    # pair take the same number of trades per event (the shift then enters both legs equally and subtracts out). This
-    # fixture has equal counts (every model takes every row), so the uniform shift leaves the sensitivity verdicts unchanged;
-    # the test after this one uses a non-uniform mid column that does change them.
+    harsh_row = next(line for line in _section_lines(texts["shifted"], harsh) if line.startswith("| H-sq |"))
+    assert harsh_row == "| H-sq | 4 | 100.00 | 25 | 1 |"
 
 
-SENS_T7 = "### Sensitivity (Amendment 1), not the pre-registered verdict: T7 Contrasts"
-SENS_T10 = "### Sensitivity (Amendment 1), not the pre-registered verdict: T10 Verdicts"
+SENS_T7 = HARSH + "T7 Contrasts"
+SENS_T10 = HARSH + "T10 Verdicts"
 
 
 def _negate_median_mid(rows):
@@ -728,7 +737,7 @@ def _negate_median_mid(rows):
     return [{**row, "pnl_dollars_mid": -row["pnl_dollars"] if row["model_id"] == "m-habs" else row["pnl_dollars"]} for row in rows]
 
 
-def test_non_uniform_mid_changes_the_sensitivity_verdicts_and_not_the_primary(tmp_path):
+def test_non_uniform_mid_changes_the_headline_sections_and_not_the_harsh_ones(tmp_path):
     texts = {}
     for name, rows_fn in (("plain", None), ("mid", _negate_median_mid)):
         (tmp_path / name).mkdir()
@@ -736,32 +745,56 @@ def test_non_uniform_mid_changes_the_sensitivity_verdicts_and_not_the_primary(tm
         assemble_mod.assemble(out, plan_frame(), admitted=None)
         texts[name] = (out / "REPORT.md").read_text(encoding="utf-8")
     plain, mid = texts["plain"], texts["mid"]
-    # Primary T10 is byte-for-byte the plain run's, and still the pinned literals.
-    assert _section_lines(mid, "### T10 Verdicts") == _section_lines(plain, "### T10 Verdicts")
-    primary = [_cells(line) for line in _section_lines(mid, "### T10 Verdicts") if line.startswith("| H")]
-    assert primary == [["H1", "+1", "clear"], ["H2", "-1", "reversed"], ["H3", "+1", "no_difference"]]
+    # The harsh T7 rows are the plain run's T7 rows: the stored primary P&L is untouched by the mid column.
+    rows = lambda lines: [line for line in lines if line.startswith("|")]
+    assert rows(_section_lines(mid, SENS_T7)) == rows(_section_lines(plain, "### T7 Contrasts"))
     # Pair H's mid contrast per event is -(10k + 1) - 10k = -21, -41, -61, -81 on the short-vol and straddle legs alike.
-    # H1 (short-vol, +1): pair H is clearly opposite, which blocks clear and directional -> no_difference.
+    # The headline T7 differs from the plain T7. Pair H, H1, as_is: d = -21, -41, -61, -81, so mean -51, quarters 0/4/0.
+    assert _section_lines(mid, "### T7 Contrasts") != _section_lines(plain, "### T7 Contrasts")
+    headline_h1 = _cells(next(line for line in _section_lines(mid, "### T7 Contrasts") if line.startswith("| H1 | H | as_is |")))
+    assert headline_h1[:4] == ["H1", "H", "as_is", "ok"] and headline_h1[4] == "4"
+    assert float(headline_h1[5]) == -51 and headline_h1[6] == "0/4/0" and float(headline_h1[7]) == 0 and headline_h1[8] == "2024:- 2025:-"
+    harsh_h1 = _cells(next(line for line in _section_lines(mid, SENS_T7) if line.startswith("| H1 | H | as_is |")))
+    assert harsh_h1[:4] == ["H1", "H", "as_is", "ok"] and harsh_h1[4] == "4"
+    assert float(harsh_h1[5]) == 1 and harsh_h1[6] == "4/0/0" and harsh_h1[8] == "2024:+ 2025:+"
+    # Headline T10 verdicts on the mid marks: H1 (short-vol, +1) pair H is clearly opposite, which blocks clear and directional -> no_difference.
     # H2 (straddle, -1): pairs E and N are clearly opposite to -1, pair H is clearly opposite to +1 -> no_difference.
     # H3 (short-vol minus G_PROD): the two legs cancel per event for every pair, so d = 0 -> no_difference.
-    sens = [_cells(line) for line in _section_lines(mid, SENS_T10) if line.startswith("| H")]
-    assert sens == [["H1", "+1", "no_difference"], ["H2", "-1", "no_difference"], ["H3", "+1", "no_difference"]]
-    # The sensitivity T7 differs from the primary T7. Pair H, H1, as_is: d = -21, -41, -61, -81, so mean -51, quarters 0/4/0.
-    assert _section_lines(mid, SENS_T7) != _section_lines(mid, "### T7 Contrasts")
-    sens_h1 = _cells(next(line for line in _section_lines(mid, SENS_T7) if line.startswith("| H1 | H | as_is |")))
-    assert sens_h1[:4] == ["H1", "H", "as_is", "ok"] and sens_h1[4] == "4"
-    assert float(sens_h1[5]) == -51 and sens_h1[6] == "0/4/0" and float(sens_h1[7]) == 0 and sens_h1[8] == "2024:- 2025:-"
-    primary_h1 = _cells(next(line for line in _section_lines(mid, "### T7 Contrasts") if line.startswith("| H1 | H | as_is |")))
-    assert primary_h1[:4] == ["H1", "H", "as_is", "ok"] and primary_h1[4] == "4"
-    assert float(primary_h1[5]) == 1 and primary_h1[6] == "4/0/0" and primary_h1[8] == "2024:+ 2025:+"
+    verdicts = [_cells(line) for line in _section_lines(mid, "### T10") if line.startswith("| H")]
+    assert verdicts == [["H1", "+1", "no_difference"], ["H2", "-1", "no_difference"], ["H3", "+1", "no_difference"]]
 
 
-def test_decisions_without_the_mid_column_get_a_not_testable_sensitivity_note(tmp_path):
+def test_mid_is_the_t10_verdict_basis(tmp_path):
+    """The mid marks flip pair H's sign (the median leg's P&L is negated): the headline T10 shows the mid-derived signs, the harsh
+    T10 shows the primary-derived signs, and the marks basis section names the harsh fills."""
+    out = build(tmp_path, rows_fn=_negate_median_mid)
+    assemble_mod.assemble(out, plan_frame(), admitted=None)
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    headline = [_cells(line) for line in _section_lines(text, "### T10 Verdicts") if line.startswith("| H")]
+    assert headline == [["H1", "+1", "no_difference"], ["H2", "-1", "no_difference"], ["H3", "+1", "no_difference"]]
+    harsh = [_cells(line) for line in _section_lines(text, SENS_T10) if line.startswith("| H")]
+    assert harsh == [["H1", "+1", "clear"], ["H2", "-1", "reversed"], ["H3", "+1", "no_difference"]]
+    marks = _section_lines(text, "### Marks basis (post-hoc revision by the user, 2026-11-24)")
+    assert any("harsh" in line for line in marks)
+
+
+def test_decisions_without_the_mid_column_get_a_not_testable_harsh_note(tmp_path):
     out = build(tmp_path)
     assemble_mod.assemble(out, plan_frame(), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
-    assert "### Sensitivity (Amendment 1)\n\nnot_testable: pnl_dollars_mid_not_in_decisions" in text
-    assert "not the pre-registered verdict" not in text
+    assert "### Harsh fills (reported only)\n\nnot_testable: pnl_dollars_mid_not_in_decisions" in text
+    assert HARSH + "T4" not in text  # no harsh table without the mid column: the headline is the stored primary marks
+
+
+def test_no_mid_column_marks_basis_note_says_fallback(tmp_path):
+    out = build(tmp_path)
+    assemble_mod.assemble(out, plan_frame(), admitted=None)
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    marks = "\n".join(_section_lines(text, "### Marks basis"))
+    assert "The decisions carry no marks_mid columns, so the headline fell back to the stored primary marks" in marks
+    assert "the report is not on the mid basis" in marks
+    assert "T10 reads the stored primary marks (no marks_mid columns in the decisions)." in "\n".join(_section_lines(text, "### T10"))
+    assert "T10 reads the mid marks" not in text
 
 
 def test_non_finite_mid_pnl_on_a_taken_row_refuses(tmp_path):
@@ -774,6 +807,29 @@ def test_non_finite_mid_pnl_on_a_taken_row_refuses(tmp_path):
         assemble_mod.assemble(out, plan_frame(), admitted=None)
     assert caught.value.details["reason"] == "report_nonfinite_pnl"
     assert not (out / "REPORT.md").exists()
+
+
+def test_nonfinite_breakeven_endpoint_on_a_taken_row_refuses(tmp_path):
+    def make(rows):
+        ends = _with_endpoints(rows)
+        return [{**ends[0], "pnl_dollars_a0": float("nan")}, *ends[1:]]
+
+    out = build(tmp_path, rows_fn=make)
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, plan_frame(), admitted=None)
+    assert caught.value.details["reason"] == "report_nonfinite_pnl"
+    assert not (out / "REPORT.md").exists()
+
+
+def test_nonfinite_breakeven_endpoint_on_a_non_taken_row_does_not_refuse(tmp_path):
+    def make(rows):
+        ends = _with_endpoints(rows)
+        # Row 0 becomes a declined row; its endpoint is NaN, which the taken-row check must ignore.
+        return [{**ends[0], "status": "not_taken", "reason": "width_declined", "pnl_dollars": 0.0, "pnl_dollars_a0": float("nan")}, *ends[1:]]
+
+    out = build(tmp_path, rows_fn=make)
+    assemble_mod.assemble(out, plan_frame(), admitted=None)
+    assert (out / "REPORT.md").exists()
 
 
 def test_non_numeric_mid_pnl_on_a_non_taken_row_refuses_as_decisions_invalid(tmp_path):
@@ -796,7 +852,7 @@ def test_non_numeric_mid_pnl_on_a_non_taken_row_refuses_as_decisions_invalid(tmp
 
 def _with_account(rows):
     """Every row carries the account columns: entry the day before its event, exit the day after, debit 0.5, exit 0.6,
-    and 9,500 secured per contract (so each short-vol trade funds one contract on a $100,000 account)."""
+    and 9,500 secured per contract (each short-vol trade is sized on a $200,000 account: 3 contracts at 0.25 x 132,000 / 9,500)."""
     out = []
     for row in rows:
         day = pd.Timestamp(EVENT_DATES[row["event_id"]])
@@ -811,7 +867,7 @@ def test_account_wanted_counts_a_taken_row_of_an_event_removed_from_e(tmp_path):
     assemble_mod.assemble(out, plan_frame(), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
     assert "| H1 | H | as_is | ok | 3 | 1 |" in text  # the T7 population is still three events
-    account = _section_lines(text, "### Sensitivity (Amendment 2)")
+    account = _section_lines(text, HARSH_ACCOUNT)
     wanted = _cells(next(line for line in account if line.startswith("| book | E-raw | as_is |")))[3]
     assert wanted == "4"  # four taken short-vol as_is rows for E-raw: E01 included, not the three events of E
 
@@ -833,18 +889,18 @@ def test_straddle_only_run_is_testable_for_the_account(tmp_path):
     assemble_mod.assemble(out, plan_frame(), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
     assert "not_testable: account_columns_not_in_decisions" not in text  # the Amendment 2 table is produced, not the note
-    account = _section_lines(text, "### Sensitivity (Amendment 2)")
-    assert account[0].startswith("### Sensitivity (Amendment 2), not the pre-registered verdict")
+    account = _section_lines(text, HARSH_ACCOUNT)
+    assert account[0] == HARSH_ACCOUNT
     # Hand-derived from this fixture: debit 0.5 restated to secured 50 (debit x 100); four non-overlapping events, each
-    # funded at floor(0.25 * 0.66 * equity / 50) contracts: 330, 340, 352, 363 as equity goes 100000, 103300, 106700,
-    # 110220. Each contract nets (0.6 - 0.5) x 100 = 10, so final = 100000 + 10 * 1385 = 113850; drawdown 0 (equity only
+    # funded at floor(0.25 * 0.66 * equity / 50) contracts: 660, 681, 704, 727 as equity goes 200000, 206600, 213410,
+    # 220450. Each contract nets (0.6 - 0.5) x 100 = 10, so final = 200000 + 10 * (660 + 681 + 704 + 727) = 227720; drawdown 0 (equity only
     # rises); one position open at a time. The first straddle row in sorted order is E-log (m-elog) with rule G_PROD.
-    assert "| straddle | E-log | G_PROD | 4 | 4 | 113850.00 | 0.1385 | 0 | 1 |" in account
+    assert "| straddle | E-log | G_PROD | 4 | 4 | 227720.00 | 0.1386 | 0 | 1 |" in account
 
 
 def test_empty_taken_frame_with_the_column_reports_zero_trade_accounts(tmp_path):
     # One model, every row not_taken: the taken frame is empty but keeps secured_per_contract, so the account table
-    # (zero-trade accounts at $100,000) is produced and the not_testable note is not.
+    # (zero-trade accounts at $200,000) is produced and the not_testable note is not.
     rows = [_row("m-hsq", "short_vol", "as_is", NAMES[0], "E01", "2024-02-15", 2, 0.0)]
     rows += [_row("m-hsq", "straddle", GATE_RULE, "straddle", "E01", "2024-02-15", 1, 0.0)]
     universe = pd.DataFrame(_with_account([{**row, "status": "not_taken", "reason": "below_cutoff"} for row in rows]))
@@ -852,7 +908,7 @@ def test_empty_taken_frame_with_the_column_reports_zero_trade_accounts(tmp_path)
     assert taken.empty and "secured_per_contract" in taken.columns
     sections = assemble_mod._account_sections(taken, {"H-sq": "m-hsq"}, {"m-hsq": "H-sq"}, universe)
     text = "\n".join(sections)
-    assert any("| 0 | 0 | 100000.00 |" in line for line in text.splitlines())
+    assert any("| 0 | 0 | 200000.00 |" in line for line in text.splitlines())
     assert "not_testable" not in text
 
 
@@ -899,6 +955,10 @@ def test_undetermined_g_prod_row_drops_its_event_from_e_str_but_not_from_e(tmp_p
     assemble_mod.assemble(gated, plan_frame(), admitted=None)
     plain_text = (plain / "REPORT.md").read_text(encoding="utf-8")
     gated_text = (gated / "REPORT.md").read_text(encoding="utf-8")
+    plain_t2, gated_t2 = _section_lines(plain_text, "### T2"), _section_lines(gated_text, "### T2")
+    assert len(plain_t2) == len(gated_t2)
+    assert [i for i, (p, g) in enumerate(zip(plain_t2, gated_t2)) if p != g] == [2]  # G_PROD does not change E: only the note differs
+    assert "exclude events from E_str: 0" in plain_t2[2] and "exclude events from E_str: 1" in gated_t2[2]  # the note's E_str count drops E01
     assert _cells(next(line for line in _section_lines(gated_text, "### T2") if line.startswith("| total |")))[1] == "4"  # E keeps E01
     assert "undetermined_events_excluded: 0" in gated_text
     assert "undetermined_straddle_events_excluded: 1" in gated_text
@@ -908,12 +968,52 @@ def test_undetermined_g_prod_row_drops_its_event_from_e_str_but_not_from_e(tmp_p
     assert _cells(next(line for line in t7_gated if line.startswith("| H2 | H | G_PROD |")))[4] == "3"  # E_str loses E01
     assert any("G_PROD" in line for line in _section_lines(plain_text, "### T6"))  # the G_PROD rows are the straddle book in T6
     assert any("G_PROD" in line for line in _section_lines(gated_text, "### T6"))
-    account = "### Sensitivity (Amendment 2)"
+    gated_account = _section_lines(gated_text, HARSH_ACCOUNT)
+    assert any(line.startswith("| straddle | E-log | G_PROD |") for line in gated_account)
     # Hand-derived: G_PROD has three taken events (E02, E03, E04; E01 is undetermined). Debit 0.5 restates to secured 50 per
-    # contract; contracts funded floor(0.25 * 0.66 * equity / 50) = 330 at 100000, 340 at 103300, 352 at 106700. Each contract
-    # nets (0.6 - 0.5) x 100 = 10, so final = 100000 + 3300 + 3400 + 3520 = 110220.
-    assert "| straddle | E-log | G_PROD | 3 | 3 | 110220.00 | 0.1022 | 0 | 1 |" in _section_lines(gated_text, account)
-    assert "| straddle | E-log | G_PROD | 4 | 4 | 113850.00 | 0.1385 | 0 | 1 |" in _section_lines(plain_text, account)  # four events, as in the straddle-only test
+    # contract; contracts funded floor(0.25 * 0.66 * equity / 50) = 660 at 200000, 681 at 206600, 704 at 213410. Each contract
+    # nets (0.6 - 0.5) x 100 = 10, so final = 200000 + 6600 + 6810 + 7040 = 220450 (the total-return cell is not pinned: 0.10225 sits on a rounding edge).
+    assert any(line.startswith("| straddle | E-log | G_PROD | 3 | 3 | 220450.00 |") for line in gated_account)
+    assert "| straddle | E-log | G_PROD | 4 | 4 | 227720.00 | 0.1386 | 0 | 1 |" in _section_lines(plain_text, HARSH_ACCOUNT)  # four events, as in the straddle-only test
+
+
+def _with_endpoints(rows):
+    """Every row carries the breakeven endpoints: alpha 0 is the primary P&L less 1, alpha 1 is the primary P&L plus 1."""
+    return [{**row, "pnl_dollars_a0": row["pnl_dollars"] - 1.0, "pnl_dollars_a1": row["pnl_dollars"] + 1.0} for row in rows]
+
+
+def test_breakeven_section_includes_gprod_rows(tmp_path):
+    out = build(tmp_path, rows_fn=_with_endpoints)  # the fixture's straddle book is G_PROD only, so every straddle row is a G_PROD row
+    assemble_mod.assemble(out, plan_frame(), admitted=None)
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    breakeven = [_cells(line) for line in _section_lines(text, "### Breakeven alpha per model and book") if line.startswith("| ")]
+    gprod = [cells for cells in breakeven if cells[2] == "G_PROD"]
+    assert gprod, "the breakeven table has no G_PROD rows"
+    # E-log's G_PROD taken rows, one each for E01-E04 (E-log is a median-type role, so pnl = 10 * (i + 1) + 1: E01 11, E02 21, E03 31, E04 41).
+    # Alpha 0 is pnl - 1 per row, alpha 1 is pnl + 1. 2024: E01, E02 -> a0 10 + 20 = 30, a1 12 + 22 = 34. 2025: E03, E04 -> a0 70, a1 74.
+    # Each trade is counted once (the breakeven table is not joined to the G_PROD rows a second time).
+    assert ["E-log", "straddle", "G_PROD", "2024", "2", "30.00", "34.00"] in [c[:7] for c in gprod]
+    assert ["E-log", "straddle", "G_PROD", "2025", "2", "70.00", "74.00"] in [c[:7] for c in gprod]
+
+
+def _e04_outside_e_str_with_gprod(rows):
+    """E04's G_PROD row is undetermined (a thin pool), so E04 leaves E_str and contributes no taken row to the breakeven table;
+    every row carries the endpoints. E03 keeps its taken G_PROD row."""
+    undetermined = [{**row, "status": "undetermined", "reason": "thin_pool", "pnl_dollars": 0.0}
+                    if row["book"] == "straddle" and row["event_id"] == "E04" else row for row in rows]
+    return _with_endpoints(undetermined)
+
+
+def test_breakeven_gprod_rows_are_restricted_to_e_str(tmp_path):
+    out = build(tmp_path, rows_fn=_e04_outside_e_str_with_gprod)
+    assemble_mod.assemble(out, plan_frame(), admitted=None)
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    breakeven = [_cells(line) for line in _section_lines(text, "### Breakeven alpha per model and book") if line.startswith("| ")]
+    gprod = [cells[:7] for cells in breakeven if cells[2] == "G_PROD"]
+    # E04's taken G_PROD row is outside the straddle evaluated population, so the 2025 row keeps only E03 (pnl 31: a0 30, a1 32)
+    assert ["E-log", "straddle", "G_PROD", "2025", "1", "30.00", "32.00"] in gprod
+    assert ["E-log", "straddle", "G_PROD", "2025", "2", "70.00", "74.00"] not in gprod
+    assert not any(cells[3] == "2025" and cells[4] == "2" for cells in gprod)
 
 
 def test_g_prod_rows_enter_e_str_t6_and_h2(tmp_path):

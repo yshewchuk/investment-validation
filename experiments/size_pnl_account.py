@@ -1,4 +1,4 @@
-"""EXP-188 Amendment 2: cash-secured $100,000 account sensitivity (guides/size_decision_pnl_design.md section 16).
+"""EXP-188 Amendment 2: cash-secured $200,000 account sensitivity (guides/size_decision_pnl_design.md section 16).
 
 Research-only and report-only: it reads the taken rows of decisions.parquet and produces sensitivity tables. It is
 not the pre-registered verdict, it computes no interval, and it never changes a decision. The margin rule is EXP-134's
@@ -29,9 +29,9 @@ def _load(name, path):
 
 margin = _load("exp188_margin", _MARGIN)
 
-START_EQUITY = 100_000.0
-POLICY = dict(start_equity=100_000.0, cap=0.66, target_share=0.25, expensive_first=True)
-NOTE = ("Policy: start $100,000, secured cap 66% of marked equity, target share 25% of headroom, expensive-first on entry-date ties; "
+START_EQUITY = 200_000.0
+POLICY = dict(start_equity=200_000.0, cap=0.66, target_share=0.25, expensive_first=True)
+NOTE = ("Policy: start $200,000 (the user's real account size), secured cap 66% of marked equity, target share 25% of headroom, expensive-first on entry-date ties; "
         "returns are quoted on the debit (EXP-134 margin rule, long puts secure nothing). No interval is computed, and no contrast is a verdict.")
 _ACCOUNT_HEADERS = ["kind", "model", "key", "wanted", "funded", "final_equity", "total_return", "max_drawdown", "peak_open"]
 
@@ -120,11 +120,13 @@ def differences(results, pairs, labels):
 def tables(results, diffs):
     """Markdown sections, one per mark present: the account table and the differences table."""
     out = []
-    for mark in ("primary", "mid"):
+    titles = {"mid": "### Headline marks (mid, alpha 0.5; post-hoc revision by the user, 2026-11-24): cash-secured $200,000 accounts (Amendment 2)",
+              "primary": "### Harsh fills, reported only, not a verdict basis: cash-secured $200,000 accounts (Amendment 2)"}
+    for mark in ("mid", "primary"):
         rows = [r for r in results if r["mark"] == mark]
         if not rows:
             continue
-        title = f"### Sensitivity (Amendment 2), not the pre-registered verdict: cash-secured $100,000 accounts, {mark} marks"
+        title = titles[mark]
         # Dollar values are pre-formatted with cents: _cell would render a float at 4 significant digits (100049.0 -> "1e+05").
         account = md_table(_ACCOUNT_HEADERS, [[f"{r[h]:.2f}" if h == "final_equity" else r[h] for h in _ACCOUNT_HEADERS] for r in rows])
         diff_rows = [[f"{d[h]:.2f}" if h == "diff" else d[h] for h in ("mark", "kind", "key", "contrast", "diff")] for d in diffs if d["mark"] == mark]

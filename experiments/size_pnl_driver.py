@@ -19,6 +19,7 @@ from experiments import size_pnl_readers as readers, size_pnl_shortvol as shortv
 from experiments.size_pnl_pool import TOLERANCE, build_pool
 from experiments.size_pnl_shortvol import Refusal
 from experiments import size_pnl_report as report, size_pnl_synthetic as synthetic, size_pnl_synthetic_eval as synthetic_eval
+from experiments import size_pnl_breakeven as breakeven
 
 INNER = ("2023-01-01", "2025-01-01")
 OUTER = ("2025-01-01", "2026-01-01")
@@ -384,19 +385,26 @@ def _model_state():
     return {"scored": {"as_is": []}}
 
 
-def _rows(mid, book, arm, dec, taken, events, taken_mid=None, secured=None, sessions=None):
+def _ends(flag, score_at):
+    """The breakeven endpoints (alpha 0, alpha 1) of one book's taken rows, or None when ``flag`` is False (no endpoints stored)."""
+    return (score_at(0.0), score_at(1.0)) if flag else None
+
+
+def _rows(mid, book, arm, dec, taken, events, taken_mid=None, secured=None, sessions=None, ends=None):
     """Decision rows of one (model, book, arm), with the marks of the taken rows, the Amendment 1 sensitivity marks (``exit_value_mid``,
     ``pnl_dollars_mid``: NaN when ``taken_mid`` is None) and the model's forecast (pred_move, pred_crush) merged on event_id.
     Amendment 2 account columns (entry_date, exit_date, secured_per_contract) are added only when ``sessions`` is not None: entry_date
     and exit_date (ISO, from ``sessions``) and secured_per_contract (from ``secured``; 0.0 for the straddle, which
     size_pnl_account.straddle_rows later restates as debit x 100, and NaN for short vol without ``secured``), filled on taken rows only.
-    With ``sessions`` None the frame has exactly the pre-Amendment 2 columns, so the synthetic run's decisions carry no account columns."""
+    With ``sessions`` None the frame has exactly the pre-Amendment 2 columns, so the synthetic run's decisions carry no account columns.
+    ``ends`` (Amendment 7) is None or (taken_a0, taken_a1), the breakeven endpoint scores; when given, the pnl_dollars_a0/_a1 columns are added."""
     take = [c for c in [*_MARKS, "entry_cost", "pnl_per_share"] if c not in dec.columns]
     fc = events[["event_id", "pred_move", "pred_crush"]].assign(event_id=events["event_id"].astype(str))
     frame = dec.merge(taken[["event_id", *take]], on="event_id", how="left").merge(fc, on="event_id", how="left")
     if taken_mid is None: frame = frame.assign(exit_value_mid=np.nan, pnl_dollars_mid=np.nan)
     else: frame = frame.merge(taken_mid[["event_id", "exit_value", "pnl_dollars"]].rename(columns={"exit_value": "exit_value_mid", "pnl_dollars": "pnl_dollars_mid"}), on="event_id", how="left")
     if "structure" not in frame.columns: frame = frame.assign(structure=None)
+    if ends is not None: frame = breakeven.with_endpoints(frame, *ends)
     if sessions is None: return frame.assign(model_id=mid, book=book, arm_or_rule=arm)
     if secured is None: frame = frame.assign(secured_per_contract=np.nan)
     else: frame = frame.merge(secured[["event_id", "secured_per_contract"]], on="event_id", how="left")
@@ -422,15 +430,17 @@ def _kept(frame, bad):
     return frame[~frame["event_id"].astype(str).isin(bad)]
 
 
-def _month(mid, events, scored, bad, chunk, start_m, st, *, emit_from=None, sessions=None, gate=None):
+def _month(mid, events, scored, bad, chunk, start_m, st, *, emit_from=None, sessions=None, gate=None, endpoints=None):
     """Pass B for one model and calendar month: drop the ``bad`` ids from the events and the scored frames, then steps 7a-7d
     on Pass A's frames. Warm-up months (before OUTER[0]) apply the same mask (they feed history) but only add history and emit
     no rows. ``sessions`` (the Amendment 2 account dates) is None in the synthetic run: then the secured-cash lookup is not
     called and the rows carry no account columns; a dict (possibly empty) keeps them.
     The straddle book is G_PROD only (Amendment 6). ``gate`` is a per-model month decider from size_pnl_gprod.month_decider; the
     inner and synthetic stages run without it (the fold is trained through 2024, so it cannot score 2023-2024 honestly), so they
-    emit no straddle rows. ``st`` carries only the short-vol scored frames."""
+    emit no straddle rows. ``st`` carries only the short-vol scored frames.
+    ``endpoints`` (Amendment 7) stores the breakeven endpoints; None means ``sessions is not None``, so only the inner pass sets it explicitly."""
     output = start_m >= (pd.Timestamp(OUTER[0]) if emit_from is None else emit_from)
+    flag = (sessions is not None) if endpoints is None else endpoints
     events = _kept(events, bad)
     ids, frames = set(events["event_id"].astype(str)), []
     for name in shortvol.NAMES:  # short vol is as-is only (Amendment 6)
@@ -440,12 +450,14 @@ def _month(mid, events, scored, bad, chunk, start_m, st, *, emit_from=None, sess
         mine = decided[decided["event_id"].astype(str).isin(ids) & (decided["structure"] == name)]
         taken_mid = shortvol.score(chunk, events, mine, name, ALPHA, mid_marks=True)  # Amendment 1 sensitivity marks
         secured = None if sessions is None else shortvol.secured(chunk, events, mine, name)
+        sv_ends = _ends(flag, lambda a: shortvol.score(chunk, events, mine, name, a, mid_marks=True, repriced=True))
         frames.append(_rows(mid, "short_vol", "as_is", mine, shortvol.score(chunk, events, mine, name, ALPHA), events, taken_mid=taken_mid,
-                            secured=secured, sessions=sessions))
+                            secured=secured, sessions=sessions, ends=sv_ends))
     if gate is not None and output:
         dec = gate(events, chunk)
         frames.append(_rows(mid, "straddle", straddle.GATE_RULE, dec, straddle.score(chunk, events, dec, ALPHA),
-                            events, taken_mid=straddle.score(chunk, events, dec, ALPHA, mid_marks=True), sessions=sessions))
+                            events, taken_mid=straddle.score(chunk, events, dec, ALPHA, mid_marks=True), sessions=sessions,
+                            ends=_ends(flag, lambda a: straddle.score(chunk, events, dec, a, mid_marks=True))))
     return frames
 
 
@@ -511,7 +523,7 @@ def _inner_decisions(src, out, ready, plan, facts_all, labels, inputs_hash, scop
             bad = set().union(*(m for _s, m in scored.values()))  # one shared population for all models, as in _outer
             dropped |= bad
             for mid in ready:
-                month_frames += _month(mid, at[mid], scored[mid][0], bad, chunk, start_m, state[mid], emit_from=INNER_EMIT_FROM)
+                month_frames += _month(mid, at[mid], scored[mid][0], bad, chunk, start_m, state[mid], emit_from=INNER_EMIT_FROM, endpoints=True)
             frames += month_frames
             done += 1
             rate = done / max(time.monotonic() - started, 1e-9)

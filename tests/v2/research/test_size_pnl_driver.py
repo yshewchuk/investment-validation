@@ -118,7 +118,7 @@ def stubs(monkeypatch):
     monkeypatch.setattr(driver.shortvol, "simulate", SIMS)
     monkeypatch.setattr(driver.shortvol, "score_events", fake_scored)
     monkeypatch.setattr(driver.shortvol, "decide", lambda scored: scored.assign(cutoff=np.nan))
-    monkeypatch.setattr(driver.shortvol, "score", lambda chunk_, events, decisions, name, alpha, *, drop_unquoted=False, mid_marks=False: pd.DataFrame(columns=EMPTY_MARKS))
+    monkeypatch.setattr(driver.shortvol, "score", lambda chunk_, events, decisions, name, alpha, *, drop_unquoted=False, mid_marks=False, repriced=False: pd.DataFrame(columns=EMPTY_MARKS))
     monkeypatch.setattr(driver.straddle, "decide", fake_straddle)
     monkeypatch.setattr(driver.straddle, "score", lambda chunk_, events, dec, alpha, **kw: pd.DataFrame(columns=EMPTY_MARKS))
     return log

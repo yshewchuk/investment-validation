@@ -75,7 +75,7 @@ def outer_stubs(stubs, monkeypatch):
 
     monkeypatch.setattr(driver.shortvol, "score_events", fake_scored)
     monkeypatch.setattr(driver.shortvol, "decide", lambda scored: scored.assign(cutoff=np.nan))
-    monkeypatch.setattr(driver.shortvol, "score", lambda chunk_, events, decisions, name, alpha, *, drop_unquoted=False, mid_marks=False: pd.DataFrame(columns=EMPTY_MARKS))
+    monkeypatch.setattr(driver.shortvol, "score", lambda chunk_, events, decisions, name, alpha, *, drop_unquoted=False, mid_marks=False, repriced=False: pd.DataFrame(columns=EMPTY_MARKS))
     monkeypatch.setattr(driver.gprod, "month_decider", fake_gate)
     monkeypatch.setattr(driver.straddle, "score", lambda chunk_, events, dec, alpha, **kw: pd.DataFrame(columns=EMPTY_MARKS))
     return stubs
@@ -267,7 +267,7 @@ def test_oracle_one_taken_2025_event_carries_its_literal_marks(tmp_path, outer_s
     marks = {"event_id": ["E3"], "exit_value": [101.5], "rung": [2], "lots": [3], "pnl_dollars": [-42.25], "entry_cost": [10.0], "pnl_per_share": [-0.5]}
     mid_marks_values = {**marks, "exit_value": [105.0], "pnl_dollars": [-10.5]}  # the sensitivity arm: other columns as the primary
     monkeypatch.setattr(driver.shortvol, "decide", decide_e3_only)
-    monkeypatch.setattr(driver.shortvol, "score", lambda chunk_, events, decisions, name, alpha, *, drop_unquoted=False, mid_marks=False:
+    monkeypatch.setattr(driver.shortvol, "score", lambda chunk_, events, decisions, name, alpha, *, drop_unquoted=False, mid_marks=False, repriced=False:
                         pd.DataFrame(mid_marks_values if mid_marks else marks))
     monkeypatch.setattr(driver.shortvol, "secured", lambda chunk_, events, decisions, name: pd.DataFrame({"event_id": ["E3"], "secured_per_contract": [9500.0]}))
     _run_both(tmp_path, monkeypatch)
@@ -943,7 +943,7 @@ def test_outer_rows_carry_literal_marks_and_forecasts(tmp_path, outer_stubs, mon
         return pd.DataFrame({"event_id": events["event_id"].astype(str).to_numpy(), "event_date": events["event_date"].to_numpy(),
                              "structure": name, "status": "scored", "reason": "scored"})
 
-    def short_marks(chunk_, events, decisions, name, alpha, *, drop_unquoted=False, mid_marks=False):
+    def short_marks(chunk_, events, decisions, name, alpha, *, drop_unquoted=False, mid_marks=False, repriced=False):
         ids = decisions["event_id"].astype(str).to_numpy()
         return pd.DataFrame({"event_id": ids, "exit_value": marks["exit_value"], "rung": marks["rung"], "lots": marks["lots"],
                              "entry_cost": 10.0, "pnl_per_share": -0.5, "pnl_dollars": 100.0})

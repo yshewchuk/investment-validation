@@ -368,6 +368,36 @@ def test_register_planned_refuses_the_new_hash_without_the_old_row(tmp_path):
     assert size_pnl_prereg._planned_hashes(ledger) == [new]
 
 
+def test_one_more_amendment_than_the_ledger_rows_registers_and_appends_the_spec_hash(tmp_path):
+    # Two PLANNED rows (the spec with 0 amendments, then with 1); the spec now declares 2, one more than the rows held.
+    before = _digest(_write_spec(tmp_path))
+    middle = _digest(_write_spec(tmp_path, amendments=[AMENDMENT]))
+    ledger = _write_ledger(tmp_path / "LEDGER.csv",
+                           [_planned_row(before), _planned_row(middle, date="2026-11-22")])
+    spec = _write_spec(tmp_path, amendments=[AMENDMENT, "Amendment 2 (2026-11-24): second test amendment"])
+    digest = _digest(spec)
+    assert digest not in (before, middle)
+    assert size_pnl_prereg.register_planned(spec_path=spec, ledger_path=ledger,
+                                            today="2026-11-24") is True
+    hashes = size_pnl_prereg._planned_hashes(ledger)
+    assert hashes[-1] == digest
+    assert hashes == [before, middle, digest]
+    assert len(hashes) == len(size_pnl_prereg.load_spec(spec)[0]["amendments"]) + 1
+    assert _check(tmp_path, spec, ledger)["spec_hash"] == digest
+
+
+def test_changed_spec_with_the_same_amendment_count_is_refused(tmp_path):
+    old, amended, _spec = _old_and_amended(tmp_path)  # one amendment, two PLANNED rows
+    ledger = _write_ledger(tmp_path / "LEDGER.csv",
+                           [_planned_row(old), _planned_row(amended, date="2026-11-22")])
+    changed = _write_spec(tmp_path, amendments=[AMENDMENT], hypothesis="edited with the same amendment count")
+    assert _digest(changed) not in (old, amended)
+    assert refusal(lambda: _check(tmp_path, changed, ledger)) == "spec_hash_mismatch"
+    assert refusal(lambda: size_pnl_prereg.register_planned(
+        spec_path=changed, ledger_path=ledger, today="2026-11-24")) == "planned_row_conflict"
+    assert size_pnl_prereg._planned_hashes(ledger) == [old, amended]  # nothing appended
+
+
 def test_malformed_amendments_is_spec_unreadable(tmp_path):
     spec = _write_spec(tmp_path, amendments="Amendment 1")
     assert refusal(lambda: _check(tmp_path, spec, tmp_path / "LEDGER.csv")) == "spec_unreadable"

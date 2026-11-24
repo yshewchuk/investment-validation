@@ -37,7 +37,7 @@ ROWS = (
     ("16", "Straddle legs and entry quotes", "STR-THRU ATM via price_structure",
      "fixed; resolve through price_structure; zero-bid and locked quotes priced, crossed or non-finite undetermined"),
     ("17", "Marks and exits", "engine/replay.py price_structure(closing=True), structure_return",
-     "kept by user decision; marks_mid is the production rule, primary is the pre-registered conservative one"),
+     "kept by user decision; marks_mid (production's rule) is the headline since Amendment 7, the pre-registered conservative marks are the harsh sensitivity"),
     ("18", "DYN-SV chooser", "engine/score.py chooser",
      "out of scope; seven independent books, stated in the report"),
 )

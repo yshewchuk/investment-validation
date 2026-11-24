@@ -24,7 +24,7 @@ def _one_trade(**overrides):
 
 def test_policy_is_the_base_policy_with_a_200k_start():
     assert size_width_account.POLICY == {**size_pnl_account.POLICY, "start_equity": 200000.0}
-    assert size_pnl_account.POLICY["start_equity"] == 100000.0
+    assert size_pnl_account.POLICY["start_equity"] == 200000.0
 
 
 def test_empty_rows_return_the_untouched_account():
@@ -86,3 +86,44 @@ def test_secured_per_contract_counts_short_puts_at_strike_times_100():
         {"side": "buy", "qty": 1, "strike": 40.0},
     ]
     assert size_width_account.secured_per_contract(legs) == 5000.0
+
+
+def test_quarter_returns_one_trade_pays_in_its_exit_quarter():
+    quarters = pd.period_range("2024-01-01", periods=2, freq="Q")
+    rows = _one_trade()  # exits 2024-02-02, so 2024Q1
+    final = size_width_account.simulate_account(rows, "mid")["final_equity"]
+    pnl = final - 200000.0
+    assert pnl == pytest.approx(600.0)  # 6 contracts x (2.0 - 1.0) x 100
+    got = size_width_account.quarter_returns(rows, quarters)
+    assert got == pytest.approx([pnl / 200000.0, 0.0])
+
+
+def test_quarter_returns_of_no_rows_are_all_zero():
+    quarters = pd.period_range("2024-01-01", periods=2, freq="Q")
+    assert size_width_account.quarter_returns(pd.DataFrame(columns=COLUMNS), quarters) == [0.0, 0.0]
+
+
+def test_quarter_returns_leave_out_an_exit_outside_the_quarters():
+    quarters = pd.period_range("2024-01-01", periods=2, freq="Q")
+    rows = _one_trade(entry_date="2024-07-02", exit_date="2024-08-02")  # exits in 2024Q3, outside the two given quarters
+    got = size_width_account.quarter_returns(rows, quarters)
+    assert len(got) == len(quarters)
+    assert got == [0.0, 0.0]
+
+
+def test_quarter_returns_compound_on_the_equity_at_each_quarter_start():
+    rows = pd.DataFrame([
+        {"entry_date": "2024-01-02", "exit_date": "2024-02-02", "entry_cost": 1.0, "exit_value": 1.5,
+         "exit_value_mid": 2.0, "secured_per_contract": 5000.0},
+        {"entry_date": "2024-03-04", "exit_date": "2024-05-03", "entry_cost": 1.0, "exit_value": 1.5,
+         "exit_value_mid": 2.0, "secured_per_contract": 5000.0},
+    ], columns=COLUMNS)
+    quarters = pd.period_range("2024-01-01", periods=3, freq="Q")
+    # trade 1 exits in Q1 (2024-02-02) before trade 2 is entered, so trade 2 is sized on the equity left after trade 1:
+    # its gain is the account's final equity with both trades less the account's final equity with trade 1 alone.
+    gain_1 = size_width_account.simulate_account(rows.iloc[[0]], "mid")["final_equity"] - 200000.0
+    gain_2 = size_width_account.simulate_account(rows, "mid")["final_equity"] - (200000.0 + gain_1)
+    got = size_width_account.quarter_returns(rows, quarters)  # trade 1 exits in Q1, trade 2 in Q2
+    assert got == pytest.approx([gain_1 / 200000.0, gain_2 / (200000.0 + gain_1), 0.0])
+
+
