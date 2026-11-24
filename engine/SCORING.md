@@ -238,3 +238,14 @@ Stated so nobody has to rediscover them.
   predicted-run-up decile is Phase 2 backlog item 3; `implied_t1` pools decision
   days with `days_before_print` as a feature specifically so that experiment has
   a model to work with.
+
+---
+
+## 9. Pricing contract: chain index and Resolution (design; twin module)
+
+Design: `guides/price_structure_index_design.md`.
+
+- `price_structure` keeps its signature and outputs bit for bit, including exception types and messages.
+- Planned, not yet implemented: a twin module `engine/chain_index.py` will provide `resolve_structure`, `price_resolution` and `price_structure_indexed`, bit-identical to `price_structure`. `engine/structures.py` and `engine/fills.py` stay unmodified and nothing in the v14 closure may import the twin.
+- Planned: `ChainSnapshot.rows` must be immutable once priced through the twin.
+- Retirement trigger: the v14-bound experiments end; then `price_structure` wraps the twin.
