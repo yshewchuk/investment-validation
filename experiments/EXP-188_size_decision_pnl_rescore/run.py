@@ -91,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
                     stored = _read_json(args.stored_gate)
                     if not size_pnl_gprod_report.stored_gate_valid(stored):
                         raise fail(_INVALID, "--stored-gate must be {scored, selected} lists of event id strings, selected within scored", details={"reason": "stored_gate_invalid"})
-                summary = size_pnl_assemble.assemble(args.out_dir, sources.plan_frame, admitted=sources.admitted, expected=sources.expected, spec_hash=receipt["spec_hash"], snapshot=sources.snapshot_id, stored_gate=stored)
+                summary = size_pnl_assemble.assemble(args.out_dir, sources.plan_frame, admitted=sources.admitted, expected=sources.expected, spec_hash=receipt["spec_hash"], snapshot=sources.snapshot_id, stored_gate=stored, board_ledger=sources.board_ledger)
             elif args.stage == "synthetic": summary = size_pnl_driver.run_synthetic(sources, args.out_dir, event_ids=event_ids, replay=args.replay, prereg=lambda: receipt)
             else: summary = size_pnl_driver.run(sources, args.stage, args.out_dir, event_ids=event_ids, prereg=lambda: receipt)
     except (OpsError, Refusal, DataError) as exc:
