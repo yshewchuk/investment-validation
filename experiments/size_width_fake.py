@@ -115,19 +115,21 @@ def run_fake(months, table, labels, model, sessions, out, inputs_hash, *, n=N_DR
     """Calibrate the fake, else run draws 0..n-1 and write the tuning_C receipt. Returns {"status": "ok", "body", "calibration", "pooled"}
     or {"status": "fake_not_calibrated", "calibration"} (no draws, no receipt)."""
     started = time.time()
-    _say(f"stage start n={n} draws={draws}")
+    _say(f"stage start n={n} draws={draws} rss={_rss():.0f}MiB")
     cal = calibration(model, table, labels, n)
+    _say(f"calibration ok={cal['ok']} rmse_rel={cal.get('rmse_rel', float('nan')):+.3f} mae_rel={cal.get('mae_rel', float('nan')):+.3f}")
     if not cal["ok"]:
-        _say(f"stage end elapsed={time.time() - started:.1f}s status=fake_not_calibrated")
+        _say(f"stage end elapsed={time.time() - started:.1f}s status=fake_not_calibrated rss={_rss():.0f}MiB")
         return {"status": "fake_not_calibrated", "calibration": cal}
     per_draw = []
     for d in range(n):
         per_draw.append(run_draw(months, table, labels, model, d, sessions, draws=draws))
         elapsed = time.time() - started
-        _say(f"draw {d + 1}/{n} elapsed={elapsed:.1f}s eta={elapsed / (d + 1) * (n - d - 1):.1f}s rss={_rss():.0f}MiB")
+        _say(f"draw {d + 1}/{n} elapsed={elapsed:.1f}s eta={elapsed / (d + 1) * (n - d - 1):.1f}s "
+             f"rate={(d + 1) / max(elapsed, 1e-9) * 60:.1f}draws/min rss={_rss():.0f}MiB")
     body = tune_c(per_draw)
     write_tuning_c(out, body, inputs_hash, model, cal, n)
-    _say(f"stage end elapsed={time.time() - started:.1f}s status=ok")
+    _say(f"stage end elapsed={time.time() - started:.1f}s status=ok rss={_rss():.0f}MiB")
     return {"status": "ok", "body": body, "calibration": cal, "pooled": pool_draws(per_draw)}
 
 
