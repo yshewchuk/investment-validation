@@ -64,9 +64,9 @@ def _config(path):
     if path is None:
         raise _refuse("sources_config_invalid", "--sources-config is required")
     doc = _read_json(path, "sources_config_invalid")
-    if not (isinstance(doc, dict) and set(_KEYS) <= set(doc) <= set(_KEYS) | set(_GATE_KEYS)
-            and all(isinstance(doc[k], str) and doc[k].strip() for k in _KEYS)):
-        raise _refuse("sources_config_invalid", "sources config must map the required keys to non-blank strings; gate_fold and gate_inputs are optional {path, sha256} objects, given together")
+    if not (isinstance(doc, dict) and set(_KEYS) <= set(doc) <= set(_KEYS) | set(_GATE_KEYS) | {"board_ledger"}
+            and all(isinstance(doc[k], str) and doc[k].strip() for k in doc if k in _KEYS or k == "board_ledger")):
+        raise _refuse("sources_config_invalid", "sources config must map the required keys to non-blank strings; gate_fold and gate_inputs are optional {path, sha256} objects, given together; board_ledger is an optional non-blank string")
     return doc
 
 
@@ -248,14 +248,14 @@ def _derived(derive, plan):
 
 
 def assemble(*, plan, read, selection, expected, panel_id, admit, admitted, snapshot_id, load_index, tables, production_hash,
-             crush_table_hash, gate=None):
+             crush_table_hash, gate=None, board_ledger=None):
     pair_candidates, blend_ids = _derived(derive_roster_inputs, plan)
     return size_pnl_driver.Sources(
         plan=plan, read=read, selection=selection, pair_candidates=pair_candidates, blend_ids=blend_ids,
         expected=expected, panel_id=panel_id, admit=admit, admitted=admitted, fetch=tables.fetch,
         production_hash=production_hash, production_table_hash=tables.table_hash, plan_frame=tables.plan_frame,
         load_index=load_index, facts=tables.facts, snapshot_id=snapshot_id, crush_table_hash=crush_table_hash,
-        exclusions=tables.exclusions, gate=gate)
+        exclusions=tables.exclusions, gate=gate, board_ledger=board_ledger)
 
 
 def build_sources(args):
@@ -299,7 +299,7 @@ def build_sources(args):
         sources = assemble(plan=plan, read=read, selection=selection, expected=expected, panel_id=panel_id,
                            admit=admit, admitted=admitted, snapshot_id=cfg["snapshot_id"], load_index=load_index,
                            tables=tables, production_hash=cfg["production_hash"],
-                           crush_table_hash=tables.crush_table_hash, gate=gate)
+                           crush_table_hash=tables.crush_table_hash, gate=gate, board_ledger=cfg.get("board_ledger"))
     except sqlite3.Error:
         conn.close()
         raise fail("RESOURCE_UNAVAILABLE", "catalog unavailable", details={"reason": "catalog_unavailable"}) from None

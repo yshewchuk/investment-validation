@@ -34,7 +34,7 @@ def test_run_py_report_stage_calls_assemble_with_the_plan_frame_and_admitted(tmp
     pd.testing.assert_frame_equal(plan, PLAN_FRAME)  # the plan frame itself: assemble derives the tickers and the binding from it
     assert kwargs.pop("admitted") is src.admitted  # check_plan runs inside assemble, on the sources' admitted events
     assert kwargs == {"expected": src.expected, "spec_hash": "SPEC", "snapshot": "snap-1", "stored_gate": None,
-                      "accepted_gap": None, "ladder": None}  # the requested identity; no tickers or binding; no stored gate, gap or ladder given
+                      "accepted_gap": None, "ladder": None, "board_ledger": None}  # the requested identity; no tickers or binding; no stored gate, gap, ladder or board ledger given
     assert json.loads(capsys.readouterr().out)["sections"] == 0
 
 
@@ -98,6 +98,19 @@ def test_run_py_report_stage_passes_accept_gate_gap_and_gate_ladder_to_assemble(
     assert calls[0][2]["accepted_gap"] == "named gap"
     assert calls[0][2]["ladder"] == LADDER
     assert json.loads(capsys.readouterr().out)["sections"] == 0
+
+
+def test_run_py_report_stage_refuses_a_gate_ladder_holding_null_before_assemble(tmp_path, monkeypatch, capsys):
+    run_py = _run_main()
+    monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
+    ladder = tmp_path / "ladder.json"
+    ladder.write_text("null", encoding="utf-8")
+    calls = []
+    _stub_assemble(monkeypatch, calls)
+    _install_sources(monkeypatch, sources())
+    assert run_py.main(_argv_for(tmp_path, "report", "--gate-ladder", str(ladder))) == 2
+    assert json.loads(capsys.readouterr().out)["reason"] == "gate_ladder_invalid"
+    assert calls == []
 
 
 def test_run_py_refuses_accept_gate_gap_on_the_outer_stage_before_importing_sources(tmp_path, monkeypatch, capsys):

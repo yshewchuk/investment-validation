@@ -92,7 +92,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.stage == "report":
                 stored = size_pnl_gate_agreement.read_stored(args.stored_gate) if args.stored_gate is not None else None
                 ladder = _read_json(args.gate_ladder) if args.gate_ladder is not None else None
-                summary = size_pnl_assemble.assemble(args.out_dir, sources.plan_frame, admitted=sources.admitted, expected=sources.expected, spec_hash=receipt["spec_hash"], snapshot=sources.snapshot_id, stored_gate=stored, accepted_gap=args.accept_gate_gap, ladder=ladder)
+                if args.gate_ladder is not None and ladder is None: raise fail(_INVALID, "--gate-ladder must be a JSON object", details={"reason": "gate_ladder_invalid"})
+                summary = size_pnl_assemble.assemble(args.out_dir, sources.plan_frame, admitted=sources.admitted, expected=sources.expected, spec_hash=receipt["spec_hash"], snapshot=sources.snapshot_id, stored_gate=stored, accepted_gap=args.accept_gate_gap, ladder=ladder, board_ledger=sources.board_ledger)
             elif args.stage == "synthetic": summary = size_pnl_driver.run_synthetic(sources, args.out_dir, event_ids=event_ids, replay=args.replay, prereg=lambda: receipt)
             else: summary = size_pnl_driver.run(sources, args.stage, args.out_dir, event_ids=event_ids, prereg=lambda: receipt)
     except (OpsError, Refusal, DataError) as exc:

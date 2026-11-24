@@ -70,6 +70,12 @@ def _agreement(det, role_model, label_of, outer_models, in_e, stored_gate, accep
 def sections(gate_raw, frame, *, label_of, role_model, roster, outer_models, quarter_of, tick, stored_gate=None, accepted_gap=None, ladder=None):
     """The G_PROD sections over the events of E (``frame``): per-model coverage and P&L, the covered-subset contrasts, and M0's
     agreement with production's stored 2025 decisions. [] when there are no gate rows."""
+    if accepted_gap is not None and not (isinstance(accepted_gap, str) and accepted_gap.strip()):  # direct callers are admitted here whatever the population
+        raise fail(_INVALID, "accepted_gap must be a non-empty string", details={"reason": "accepted_gap_invalid"})
+    if ladder is not None and not size_pnl_gate_agreement.ladder_valid(ladder):
+        raise fail(_INVALID, "ladder must be a dict of label -> {event_id: finite score}", details={"reason": "ladder_invalid"})
+    if stored_gate is not None and not stored_gate_valid(stored_gate):
+        raise fail(_INVALID, 'stored_gate must be {"selected": {event_id: finite ret}}', details={"reason": "stored_gate_invalid"})
     if gate_raw.empty:
         return []
     in_e = set(frame["event_id"])

@@ -166,6 +166,18 @@ def test_events_outside_e_never_count():
     assert (m0["E_events"], m0["covered"], m0["total_pnl"]) == ("8", "8", "8")
 
 
+def test_direct_sections_refuses_a_blank_accepted_gap_on_an_empty_gate_frame():
+    with pytest.raises(OpsError) as caught:
+        _run(_gate(_cells()).iloc[0:0], accepted_gap="")
+    assert caught.value.problem.details["reason"] == "accepted_gap_invalid"
+
+
+def test_direct_sections_refuses_a_boolean_stored_return():
+    with pytest.raises(OpsError) as caught:
+        _run(_gate(_cells()), stored={"selected": {"E1": True}})
+    assert caught.value.problem.details["reason"] == "stored_gate_invalid"
+
+
 def test_missing_stored_gate_raises_stored_gate_required():
     with pytest.raises(OpsError) as caught:
         _run(_gate(_cells()), stored=None)
