@@ -15,7 +15,7 @@ from experiments import size_pnl_ladder as ladder
 from experiments import size_pnl_readers as readers
 from experiments import size_pnl_receipts as tuning
 from experiments.size_pnl_shortvol import NAMES, Refusal
-from experiments.size_pnl_straddle import RULES
+from experiments.size_pnl_straddle import GATE_RULE
 
 CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
 EVENT_DATES = {"E01": "2024-02-15", "E02": "2024-05-15", "E03": "2025-02-15", "E04": "2025-05-15"}
@@ -67,8 +67,7 @@ def _rows(dates):
         for i, (eid, day) in enumerate(dates.items()):
             pnl = 10.0 * (i + 1) + bump  # the mean-type partner pays 10 * (i + 1)
             rows.append(_row(mid, "short_vol", "as_is", NAMES[0], eid, day, 2, pnl))  # short vol is as-is only (Amendment 6)
-            for rule in RULES:
-                rows.append(_row(mid, "straddle", rule, "straddle", eid, day, 1, pnl))
+            rows.append(_row(mid, "straddle", GATE_RULE, "straddle", eid, day, 1, pnl))  # the straddle book is G_PROD only (Amendment 6)
     return rows
 
 
@@ -149,7 +148,7 @@ def test_happy_path_writes_every_section_in_order(tmp_path):
     out = build(tmp_path)
     summary = assemble_mod.assemble(out, plan_frame(), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
-    assert summary["report"] == str(out / "REPORT.md") and summary["sections"] == 13 and summary["rows"] > 0  # 10 + two not_testable sensitivity notes (Amendment 1 and 2) + the Amendment 6 board-match section
+    assert summary["report"] == str(out / "REPORT.md") and summary["sections"] == 16 and summary["rows"] > 0  # 10 + two not_testable sensitivity notes (Amendment 1 and 2) + the Amendment 6 board-match section + the three G_PROD sections
     assert text.startswith("# EXP-188 REPORT")
     heads = ["### T1", "### T2", "### T3", "### T4", "### T6", "### T7", "### T8", "### T9", "### T10"]
     positions = [next(i for i, line in enumerate(_sections(text)) if line.startswith(h)) for h in heads]
@@ -176,7 +175,7 @@ def test_contrast_is_called_with_the_shared_statistics(tmp_path, monkeypatch):
 
     monkeypatch.setattr(contrast, "contrast", recorder)
     assemble_mod.assemble(build(tmp_path), plan_frame(), admitted=None)
-    assert len(calls) == 12  # three pairs; H1 and H3 each one arm (as_is), H2 the two straddle rules
+    assert len(calls) == 12  # three pairs: H1, H2 (G_PROD) and H3 once each (9), then the G_PROD sections' H2 contrasts (3)
     d, quarters, tickers = calls[0]  # H1, pair H, as_is
     assert np.allclose(d, 1.0)
     assert quarters == ["2024Q1", "2024Q2", "2025Q1", "2025Q2"]
@@ -231,11 +230,11 @@ def test_t8_exact_rung_shares_for_the_fixture(tmp_path):
     out = build(tmp_path)
     assemble_mod.assemble(out, plan_frame(), admitted=None)
     lines = _section_lines((out / "REPORT.md").read_text(encoding="utf-8"), "### T8")
-    # Per model: short_vol rung 2 on 1 arm (as_is) x N events; straddle rung 1 on len(RULES) x N events.
+    # Per model: short_vol rung 2 on 1 arm (as_is) x N events; straddle rung 1 on the one G_PROD rule x N events.
     n = len(EVENT_DATES)
-    short, long = 1 * n, len(RULES) * n
+    short, long = 1 * n, 1 * n
     share_rung1, share_rung2 = f"{long / (short + long):.4g}", f"{short / (short + long):.4g}"
-    assert (share_rung1, share_rung2) == ("0.6667", "0.3333")
+    assert (share_rung1, share_rung2) == ("0.5", "0.5")
     header = _cells(next(line for line in lines if line.startswith("| model_id")))
     assert header == ["model_id", "1", "2", "exit_unquoted_worst_case"]
     for label in ROLES.values():
@@ -289,6 +288,7 @@ def test_t10_section_discloses_amendment_5(tmp_path):
     assemble_mod.assemble(out, plan_frame(), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
     assert "Amendment 5 (2026-11-23): the straddle universe" in "\n".join(_section_lines(text, "### T10"))
+    assert "Amendment 6 (2026-11-24, post-hoc revision by the user): the straddle rule is production's STR-THRU gate G_PROD only" in "\n".join(_section_lines(text, "### T10"))
 
 
 def test_same_plan_frame_as_the_receipt_succeeds(tmp_path):
@@ -495,10 +495,11 @@ def test_event_undetermined_under_one_model_is_excluded_from_e(tmp_path):
     # Short-vol E and H3 (E intersect E_str, where E_str still holds E01) match the clean run: the same events and P&L.
     assert [line for line in t7 if line.startswith(("| H1 |", "| H3 |"))] == [line for line in clean_t7 if line.startswith(("| H1 |", "| H3 |"))]
     # H2 reads E_str, which keeps E01: its short-vol row removed E01 from E only (Amendment 5).
-    assert _cells(next(line for line in t7 if line.startswith("| H2 | H | R_L |")))[4] == "4"
+    assert _cells(next(line for line in t7 if line.startswith("| H2 | H | G_PROD |")))[4] == "4"
     assert "undetermined_events_excluded: 1" in text
     assert "undetermined_straddle_events_excluded: 0" in text
-    assert "short-vol undetermined rows exclude events from E: 1; straddle undetermined rows exclude events from E_str" in text
+    assert ("short-vol undetermined rows exclude events from E: 1; straddle undetermined rows (G_PROD over E_str: H2, H3, T6, "
+            "straddle T7) exclude events from E_str: 0") in text
     assert "short-vol non-trades (e.g. width_declined) stay in E at P&L 0" in text
 
 
@@ -684,7 +685,7 @@ def test_mid_column_adds_the_sensitivity_sections_after_the_primary_verdicts(tmp
     summary = assemble_mod.assemble(out, plan_frame(), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
     sens = [line for line in _sections(text) if "not the pre-registered verdict" in line]
-    assert summary["sections"] == 16  # the 10 primary sections, 4 sensitivity sections, the Amendment 2 not_testable note and the Amendment 6 board-match section
+    assert summary["sections"] == 19  # the 10 primary sections, 4 sensitivity sections, the Amendment 2 not_testable note, the Amendment 6 board-match section and the three G_PROD sections
     assert [line.rsplit(": ", 1)[1] for line in sens] == ["T4 Short-vol, as is", "T6 Straddle buy rules",
                                                           "T7 Contrasts", "T10 Verdicts"]
     assert all(line.startswith("### Sensitivity (Amendment 1), not the pre-registered verdict: ") for line in sens)
@@ -741,7 +742,7 @@ def test_non_uniform_mid_changes_the_sensitivity_verdicts_and_not_the_primary(tm
     # Pair H's mid contrast per event is -(10k + 1) - 10k = -21, -41, -61, -81 on the short-vol and straddle legs alike.
     # H1 (short-vol, +1): pair H is clearly opposite, which blocks clear and directional -> no_difference.
     # H2 (straddle, -1): pairs E and N are clearly opposite to -1, pair H is clearly opposite to +1 -> no_difference.
-    # H3 (short-vol minus R_L): the two legs cancel per event for every pair, so d = 0 -> no_difference.
+    # H3 (short-vol minus G_PROD): the two legs cancel per event for every pair, so d = 0 -> no_difference.
     sens = [_cells(line) for line in _section_lines(mid, SENS_T10) if line.startswith("| H")]
     assert sens == [["H1", "+1", "no_difference"], ["H2", "-1", "no_difference"], ["H3", "+1", "no_difference"]]
     # The sensitivity T7 differs from the primary T7. Pair H, H1, as_is: d = -21, -41, -61, -81, so mean -51, quarters 0/4/0.
@@ -836,15 +837,15 @@ def test_straddle_only_run_is_testable_for_the_account(tmp_path):
     # Hand-derived from this fixture: debit 0.5 restated to secured 50 (debit x 100); four non-overlapping events, each
     # funded at floor(0.25 * 0.66 * equity / 50) contracts: 330, 340, 352, 363 as equity goes 100000, 103300, 106700,
     # 110220. Each contract nets (0.6 - 0.5) x 100 = 10, so final = 100000 + 10 * 1385 = 113850; drawdown 0 (equity only
-    # rises); one position open at a time. The first straddle row in sorted order is E-log (m-elog) with rule R_L.
-    assert "| straddle | E-log | R_L | 4 | 4 | 113850.00 | 0.1385 | 0 | 1 |" in account
+    # rises); one position open at a time. The first straddle row in sorted order is E-log (m-elog) with rule G_PROD.
+    assert "| straddle | E-log | G_PROD | 4 | 4 | 113850.00 | 0.1385 | 0 | 1 |" in account
 
 
 def test_empty_taken_frame_with_the_column_reports_zero_trade_accounts(tmp_path):
     # One model, every row not_taken: the taken frame is empty but keeps secured_per_contract, so the account table
     # (zero-trade accounts at $100,000) is produced and the not_testable note is not.
     rows = [_row("m-hsq", "short_vol", "as_is", NAMES[0], "E01", "2024-02-15", 2, 0.0)]
-    rows += [_row("m-hsq", "straddle", rule, "straddle", "E01", "2024-02-15", 1, 0.0) for rule in RULES]
+    rows += [_row("m-hsq", "straddle", GATE_RULE, "straddle", "E01", "2024-02-15", 1, 0.0)]
     universe = pd.DataFrame(_with_account([{**row, "status": "not_taken", "reason": "below_cutoff"} for row in rows]))
     taken = universe[universe["status"] == "taken"]
     assert taken.empty and "secured_per_contract" in taken.columns
@@ -879,44 +880,63 @@ def test_secured_column_without_exit_date_refuses_as_decisions_columns(tmp_path)
     assert not (out / "REPORT.md").exists()
 
 
-# ---- Amendment 3: G_PROD rows (the gate arm) reach the accounts only ----
+# ---- Amendment 3 and 6: G_PROD is the straddle book; an undetermined G_PROD row drops its event from E_str only ----
 
 
-def _with_gate_rows(rows):
-    """The account rows plus the G_PROD rows: a copy of every straddle R_L row under G_PROD (funded at 0.0), and, for the
-    first event id (sorted) under every model, an undetermined G_PROD row with P&L 0.0 (it would drop the event from E
-    if it were a pre-registered row)."""
-    out = _with_account(rows)
-    first = sorted({row["event_id"] for row in out})[0]
-    for row in list(out):
-        if row["book"] == "straddle" and row["arm_or_rule"] == "R_L":
-            copy = {**row, "arm_or_rule": "G_PROD", "secured_per_contract": 0.0}
-            if row["event_id"] == first:
-                copy.update(status="undetermined", reason="thin_pool", pnl_dollars=0.0)
-            out.append(copy)
-    return out
+def _with_gate_undetermined(rows):
+    """E01's G_PROD rows are undetermined under every model (a thin pool): E01 leaves E_str and stays in short-vol E."""
+    return [{**row, "status": "undetermined", "reason": "thin_pool", "pnl_dollars": 0.0}
+            if row["book"] == "straddle" and row["event_id"] == "E01" else row for row in _with_account(rows)]
 
 
-def test_g_prod_rows_never_enter_e_or_the_primary_tables_but_reach_the_accounts(tmp_path):
+def test_undetermined_g_prod_row_drops_its_event_from_e_str_but_not_from_e(tmp_path):
     (tmp_path / "a").mkdir()
     (tmp_path / "b").mkdir()
     plain = build(tmp_path / "a", rows_fn=_with_account)
-    gated = build(tmp_path / "b", rows_fn=_with_gate_rows)
+    gated = build(tmp_path / "b", rows_fn=_with_gate_undetermined)
     assemble_mod.assemble(plain, plan_frame(), admitted=None)
     assemble_mod.assemble(gated, plan_frame(), admitted=None)
     plain_text = (plain / "REPORT.md").read_text(encoding="utf-8")
     gated_text = (gated / "REPORT.md").read_text(encoding="utf-8")
-    for title in ("### T2", "### T6", "### T7"):
-        assert _section_lines(plain_text, title) == _section_lines(gated_text, title)  # G_PROD does not change E or the tables
-    assert "G_PROD" not in "\n".join(_section_lines(gated_text, "### T6"))
+    assert _cells(next(line for line in _section_lines(gated_text, "### T2") if line.startswith("| total |")))[1] == "4"  # E keeps E01
+    assert "undetermined_events_excluded: 0" in gated_text
+    assert "undetermined_straddle_events_excluded: 1" in gated_text
+    t7_plain, t7_gated = _section_lines(plain_text, "### T7"), _section_lines(gated_text, "### T7")
+    assert [line for line in t7_gated if line.startswith("| H1 |")] == [line for line in t7_plain if line.startswith("| H1 |")]  # short-vol is unchanged
+    assert _cells(next(line for line in t7_plain if line.startswith("| H2 | H | G_PROD |")))[4] == "4"
+    assert _cells(next(line for line in t7_gated if line.startswith("| H2 | H | G_PROD |")))[4] == "3"  # E_str loses E01
+    assert any("G_PROD" in line for line in _section_lines(plain_text, "### T6"))  # the G_PROD rows are the straddle book in T6
+    assert any("G_PROD" in line for line in _section_lines(gated_text, "### T6"))
     account = "### Sensitivity (Amendment 2)"
-    gated_account = _section_lines(gated_text, account)
-    assert any(line.startswith("| straddle | E-log | G_PROD |") for line in gated_account)
     # Hand-derived: G_PROD has three taken events (E02, E03, E04; E01 is undetermined). Debit 0.5 restates to secured 50 per
     # contract; contracts funded floor(0.25 * 0.66 * equity / 50) = 330 at 100000, 340 at 103300, 352 at 106700. Each contract
     # nets (0.6 - 0.5) x 100 = 10, so final = 100000 + 3300 + 3400 + 3520 = 110220.
-    assert "| straddle | E-log | G_PROD | 3 | 3 | 110220.00 | 0.1022 | 0 | 1 |" in gated_account
-    assert not any(line.startswith("| straddle | E-log | G_PROD |") for line in _section_lines(plain_text, account))
+    assert "| straddle | E-log | G_PROD | 3 | 3 | 110220.00 | 0.1022 | 0 | 1 |" in _section_lines(gated_text, account)
+    assert "| straddle | E-log | G_PROD | 4 | 4 | 113850.00 | 0.1385 | 0 | 1 |" in _section_lines(plain_text, account)  # four events, as in the straddle-only test
+
+
+def test_g_prod_rows_enter_e_str_t6_and_h2(tmp_path):
+    out = build(tmp_path)  # every straddle row is a G_PROD row, for every pair model
+    assemble_mod.assemble(out, plan_frame(), admitted=None)
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    h2 = _cells(next(line for line in _section_lines(text, "### T7") if line.startswith("| H2 | H | G_PROD |")))
+    assert h2[3:5] == ["ok", "4"]  # a contrast over E_str on the G_PROD rows, not a missing-row reason
+    assert "no_gate_rows" not in text
+    assert any("G_PROD" in line for line in _section_lines(text, "### T6"))
+    assert "undetermined_straddle_events_excluded: 0" in text
+
+
+def test_no_g_prod_rows_renders_with_an_empty_straddle_book(tmp_path):
+    out = build(tmp_path, rows_fn=lambda rows: [row for row in rows if row["book"] == "short_vol"])  # no gate configured
+    assemble_mod.assemble(out, plan_frame(), admitted=None)
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    t7 = _section_lines(text, "### T7")
+    assert _cells(next(line for line in t7 if line.startswith("| H2 | H | G_PROD |")))[3] == "not_testable: too_few_quarters_or_tickers"
+    assert _cells(next(line for line in t7 if line.startswith("| H3 | H | as_is |")))[3] == "not_testable: too_few_quarters_or_tickers"
+    assert not any("G_PROD" in line for line in _section_lines(text, "### T6"))  # T6 is empty
+    verdicts = [_cells(line) for line in _section_lines(text, "### T10") if line.startswith("| H")]
+    assert verdicts == [["H1", "+1", "clear"], ["H2", "-1", "not_testable"], ["H3", "+1", "not_testable"]]
+    assert not any(line.startswith("### G_PROD") for line in text.split("\n"))  # no G_PROD section without G_PROD rows
 
 
 # ---- Amendment 5: short-vol E and straddle E_str are separate populations ----
@@ -940,7 +960,7 @@ def test_straddle_undetermined_row_keeps_its_event_in_e_and_drops_it_from_e_str(
     t7 = _section_lines(text, "### T7")
     assert _cells(next(line for line in t7 if line.startswith("| H1 | H | as_is |")))[3:5] == ["ok", "2"]
     # E_str is {E02} alone, so the straddle contrast and the H3 intersection (E intersect E_str = {E02}) are not testable.
-    assert _cells(next(line for line in t7 if line.startswith("| H2 | H | R_L |")))[3] == "not_testable: too_few_quarters_or_tickers"
+    assert _cells(next(line for line in t7 if line.startswith("| H2 | H | G_PROD |")))[3] == "not_testable: too_few_quarters_or_tickers"
     assert _cells(next(line for line in t7 if line.startswith("| H3 | H | as_is |")))[3] == "not_testable: too_few_quarters_or_tickers"
 
 
@@ -952,7 +972,7 @@ def test_short_vol_undetermined_row_drops_its_event_from_e_but_not_from_e_str(tm
     assert "undetermined_straddle_events_excluded: 0" in text
     assert _cells(next(line for line in _section_lines(text, "### T2") if line.startswith("| total |")))[1] == "1"  # E is {E02}
     t7 = _section_lines(text, "### T7")
-    assert _cells(next(line for line in t7 if line.startswith("| H2 | H | R_L |")))[3:5] == ["ok", "2"]  # E_str keeps E01
+    assert _cells(next(line for line in t7 if line.startswith("| H2 | H | G_PROD |")))[3:5] == ["ok", "2"]  # E_str keeps E01
     assert _cells(next(line for line in t7 if line.startswith("| H1 | H | as_is |")))[3] == "not_testable: too_few_quarters_or_tickers"
     assert _cells(next(line for line in t7 if line.startswith("| H3 | H | as_is |")))[3] == "not_testable: too_few_quarters_or_tickers"
 
@@ -960,11 +980,11 @@ def test_short_vol_undetermined_row_drops_its_event_from_e_but_not_from_e_str(tm
 def test_h3_contrast_pairs_the_intersection_of_the_two_books():
     frame = pd.DataFrame([{"model_id": m, "book": b, "arm_or_rule": v, "event_id": e, "taken": True, "pnl_dollars": p}
                           for m, p in (("m-habs", 11.0), ("m-hsq", 10.0)) for e in ("E01", "E02")
-                          for b, v in (("short_vol", "as_is"), ("straddle", "R_L"))])
+                          for b, v in (("short_vol", "as_is"), ("straddle", "G_PROD"))])
     events = {("m-habs", "short_vol"): ["E01", "E02"], ("m-hsq", "short_vol"): ["E01", "E02"],
               ("m-habs", "straddle"): ["E02"], ("m-hsq", "straddle"): ["E02"]}  # E_str holds E02 only
     quarter_of, tick = {"E01": "2024Q1", "E02": "2024Q2"}, {"E01": "AAA", "E02": "BBB"}
     pair = ("m-habs", "m-hsq")  # (median, mean)
     assert isinstance(assemble_mod._contrast_cell(frame, events, pair, [("short_vol", "as_is", 1)], quarter_of, tick), dict)  # E alone: testable
-    h3 = assemble_mod._contrast_cell(frame, events, pair, [("short_vol", "as_is", 1), ("straddle", "R_L", -1)], quarter_of, tick)
+    h3 = assemble_mod._contrast_cell(frame, events, pair, [("short_vol", "as_is", 1), ("straddle", "G_PROD", -1)], quarter_of, tick)
     assert h3 == "too_few_quarters_or_tickers"  # E intersect E_str = {E02}: one quarter

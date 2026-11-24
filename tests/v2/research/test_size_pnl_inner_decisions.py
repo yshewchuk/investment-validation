@@ -35,9 +35,8 @@ def test_inner_publishes_decisions_for_the_scored_window_only(tmp_path, outer_st
     assert (dates >= pd.Timestamp("2023-07-01")).all() and (dates < pd.Timestamp("2025-01-01")).all()
     assert list(frame.columns[:len(FRONT)]) == FRONT
     assert summary["inner_decisions_rows"] == len(frame)
-    assert set(frame["book"]) == {"short_vol", "straddle"}
+    assert set(frame["book"]) == {"short_vol"}  # no gate bound: the inner stage emits no straddle rows (Amendment 6)
     assert set(frame.loc[frame["book"] == "short_vol", "arm_or_rule"]) == {"as_is"}
-    assert set(frame.loc[frame["book"] == "straddle", "arm_or_rule"]) == set(driver.straddle.RULES)
 
 
 def test_inner_decisions_carry_no_in_sample_or_c_columns(tmp_path, outer_stubs, monkeypatch):
@@ -143,27 +142,17 @@ def test_inner_decisions_carry_the_scored_pnl_and_taken_rows(tmp_path, stubs, mo
         return pd.DataFrame({"event_id": events["event_id"].astype(str).to_numpy(), "event_date": events["event_date"].to_numpy(),
                              "structure": name, "status": "scored", "reason": "scored"})
 
-    def taken_straddle(events, history, rule, chunk_):
-        ids = events["event_id"].astype(str).to_numpy()
-        edge = events["pred_abs_move"].to_numpy(dtype=float) - events["implied_move"].to_numpy(dtype=float)
-        return pd.DataFrame({"event_id": ids, "event_date": events["event_date"].to_numpy(), "edge": edge, "cutoff": np.nan,
-                             "rel_spread": np.nan, "status": "taken", "reason": "taken"})
-
     monkeypatch.setattr(driver.shortvol, "score_events", scored_rows)
     monkeypatch.setattr(driver.shortvol, "decide", lambda scored: scored.assign(cutoff=np.nan, status="taken", reason="taken"))
     monkeypatch.setattr(driver.shortvol, "score", lambda chunk_, events, mine, name, alpha, *, drop_unquoted=False, mid_marks=False:
                         _marks(mine["event_id"].astype(str).to_numpy(), (7.0, 9.0), mid_marks))
-    monkeypatch.setattr(driver.straddle, "decide", taken_straddle)
-    monkeypatch.setattr(driver.straddle, "score", lambda chunk_, events, dec, alpha, mid_marks=False, **kw:
-                        _marks(dec["event_id"].astype(str).to_numpy(), (5.0, 6.0), mid_marks))
     _inner(tmp_path, monkeypatch)
     frame = _frame(tmp_path)
     models = frame["model_id"].nunique()
     assert models >= 1
     assert set(frame["event_id"].astype(str)) == {"E2"}  # E1 is burn-in: no rows
-    short, long = frame[frame["book"] == "short_vol"], frame[frame["book"] == "straddle"]
-    assert not short.empty and not long.empty
+    short = frame[frame["book"] == "short_vol"]
+    assert not short.empty and (frame["book"] == "short_vol").all()  # the inner stage runs without a gate: no straddle rows
     assert (short["status"] == "taken").all() and (short["pnl_dollars"] == 7.0).all()
     assert (short["pnl_dollars_mid"] == 9.0).all() and (short["rung"] == 2).all()
-    assert (long["pnl_dollars"] == 5.0).all() and (long["pnl_dollars_mid"] == 6.0).all()
-    assert len(frame) == models * (len(driver.shortvol.NAMES) + len(driver.straddle.RULES))
+    assert len(frame) == models * len(driver.shortvol.NAMES)

@@ -192,7 +192,7 @@ def evaluate(decisions, meta, tickers, arm, *, replay_equal=None, resamples=cont
                 else: x.append(["X6", unit, "pass" if var <= 1e-12 else "fail", f"pred_var={var:.3g} taken={taken}"])
     short = [n for n, u in units.items() if u["book"] == SHORT]
     rung3, sums3 = _rung_rows("X3", units, meta, short, 1, arm, resamples, seed)
-    rung4, sums4 = _rung_rows("X4", units, meta, [n for n in ("R_L", "R_L2") if n in units], -1, arm, resamples, seed)
+    rung4, sums4 = _rung_rows("X4", units, meta, [n for n, u in units.items() if u["book"] == STRADDLE], -1, arm, resamples, seed)
     x += rung3 + rung4
     x.append(["X7", "replay", "not_run" if replay_equal is None else ("pass" if replay_equal else "fail"), f"replay_equal={replay_equal}"])
     stop = [f"{r[0]} {r[1]}" for r in x if r[0] in STOP_IDS and r[2] in ("fail", "Failed")]

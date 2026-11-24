@@ -1,6 +1,6 @@
 id: EXP-188
 title: "SIZE decision-level P&L re-score: do median-type forecasts suit short vol and mean-type forecasts suit long vol?"
-hypothesis: "H1 (short vol): for each matched pair, d = P&L(median-type) - P&L(mean-type) > 0 on the seven put-side short-vol structures. H2 (long vol, rule R_L): d < 0 on the straddle. H3 (secondary interaction): d_short - d_long > 0 in return per candidate event. Reads stored SIZE predictions, scores the trading decisions they produce, selects nothing for SIZE, feeds nothing back."
+hypothesis: "H1 (short vol): for each matched pair, d = P&L(median-type) - P&L(mean-type) > 0 on the seven put-side short-vol structures. H2 (long vol, production gate G_PROD over E_str; Amendment 6): d < 0 on the straddle. H3 (secondary interaction): d_short - d_long > 0 in return per candidate event. Reads stored SIZE predictions, scores the trading decisions they produce, selects nothing for SIZE, feeds nothing back."
 type: decision_rescore
 strategy: "*"
 price_source: "ORATS chains (bid/ask) on the SIZE panel's pinned v2 snapshot; marks only from engine.fills FillModel alpha ladder"
@@ -60,9 +60,8 @@ short_vol:
     as_is: "production's divisors and bounds at k=1 (forecast_params(name, pred)); the only arm (Amendment 6)"
 long_vol:
   structure: "straddle_through (STR-THRU factory, called only; not registered)"
-  R_L: "primary: buy when edge = pred_abs_move_m - implied_move is at or above the top-20% trailing cutoff of the model's own edge over the prior six months (at least 100 scores, strictly before the month), within production's STR-THRU universe (market cap at or above engine.score GATE_MCAP_FLOOR, no spread term, but production's BAD_QUOTE ceiling of 30% of spot at the mid entry cost; Amendment 5), the cutoff computed over the model's edges in that universe"
-  R_L2: "secondary: fixed edge >= 0, no cutoff"
-  undetermined: "missing implied move or legs, or a crossed, locked or zero-bid entry quote, is undetermined, not no"
+  G_PROD: "the only straddle rule (Amendment 6): buy when production's STR-THRU gate, refit once through 2024 (registered threshold 0.0508851760203979, no refit, no threshold change), predicts ret at or above the threshold, within production's STR-THRU universe (market cap at or above engine.score GATE_MCAP_FLOOR, no spread term, production's BAD_QUOTE ceiling of 30% of spot at the mid entry cost; Amendment 5); legs and entry quotes through engine.structures.price_structure"
+  undetermined: "missing implied move or legs, or a crossed, negative or non-finite entry quote, is undetermined, not no; a zero-bid or locked entry quote is priced, as price_structure prices it"
 marks:
   - "1 valid non-wide non-zero-bid quote: alpha mark"
   - "2 zero-bid or wide: alpha 0 for that leg"
@@ -73,24 +72,24 @@ marks_mid_sensitivity:
   rule: "identical decisions; exit valuation only: rung-2 legs marked at the run's alpha like rung 1; rung 3 unchanged; both short-vol books and the straddle"
   stored: "decisions.parquet exit_value_mid, pnl_dollars_mid"
   t10: "the pre-registered T10 verdict uses the primary marks only"
-g_prod_sensitivity:
+g_prod:
   amendment: "Amendment 3 (2026-11-23), guides/size_decision_pnl_design.md section 'Amendment 3'"
-  label: "sensitivity (Amendment 3), production gate refit once through 2024, not refit per model (favours M0's forecast scale), not the pre-registered verdict"
-  rule: "buy the 2025 straddle when the frozen through-2024 production gate (gate_midfill_str_thru_forecast_analog, one refit, registered threshold 0.0508851760203979, no refit, no threshold change) predicts ret at or above the threshold; the 5 model-dependent inputs (pred_abs_move, its p10/p90/sd, forecast_edge) come from each model's own forecast and per-model residual pool, the other 45 from production; same universe filters, sizing, marks and exit as R_L"
-  bound_by: "--sources-config gate_fold and gate_inputs, each path plus expected sha256; a missing file or a mismatch refuses, there is no fallback to R_L"
+  label: "G_PROD (Amendment 6, post-hoc revision by the user, 2026-11-24): production gate refit once through 2024, not refit per model (favours M0's forecast scale); registered threshold chosen on all-year walk-forward predictions (look-ahead)"
+  rule: "buy the 2025 straddle when the frozen through-2024 production gate (gate_midfill_str_thru_forecast_analog, one refit, registered threshold 0.0508851760203979, no refit, no threshold change) predicts ret at or above the threshold; the 5 model-dependent inputs (pred_abs_move, its p10/p90/sd, forecast_edge) come from each model's own forecast and per-model residual pool, the other 45 from production; production's STR-THRU universe, sizing, marks and exit"
+  bound_by: "--sources-config gate_fold and gate_inputs, each path plus expected sha256; a missing file or a mismatch refuses, there is no fallback rule"
   stored: "decisions.parquet rows with arm_or_rule G_PROD (book straddle); outer receipt key gate"
-  t10: "G_PROD is never in H1-H3, T1-T10 or the verdicts"
+  t10: "G_PROD is the straddle rule of H2, H3 and T10 over E_str (Amendment 6)"
 amendments:
   - "Amendment 1 (2026-11-22): marks_mid sensitivity arm, guides/size_decision_pnl_design.md section 14"
   - "Amendment 4 (2026-11-23): wider retuned c grid, guides/size_decision_pnl_design.md section 15 (superseded by Amendment 6)"
   - "Amendment 2 (2026-11-22): cash-secured $100,000 account sensitivity, guides/size_decision_pnl_design.md section 16"
   - "Amendment 3 (2026-11-23): G_PROD production-gate STR-THRU sensitivity arm, guides/size_decision_pnl_design.md section 'Amendment 3'"
   - "Amendment 5 (2026-11-23): straddle book uses production's STR-THRU universe (GATE_MCAP_FLOOR, no spread term) and its own paired population E_str, guides/size_decision_pnl_design.md section 17"
-  - "Amendment 6 (2026-11-24): production-exact; short vol as-is only, re-tuned arm, c, size_pnl_tuning and T5 removed (post-hoc revision by the user), guides/size_decision_pnl_design.md section 18"
+  - "Amendment 6 (2026-11-24): production-exact; short vol as-is only, re-tuned arm, c, size_pnl_tuning and T5 removed (post-hoc revision by the user), guides/size_decision_pnl_design.md section 18; straddle book is G_PROD only, R_L and R_L2 removed, H2/T6/T7/T10 on G_PROD over E_str, legs and entry quotes through price_structure (slice A6-3)"
 rung3_sensitivity: "a sensitivity row drops rung 3"
 hypotheses:
   H1: "H1 (short vol): for each matched pair, d = P&L(median-type) - P&L(mean-type) > 0 on the seven put-side short-vol structures."
-  H2: "H2 (long vol, under R_L): d < 0 on the straddle."
+  H2: "H2 (long vol, production gate G_PROD over E_str): d < 0 on the straddle."
   H3: "H3 (secondary interaction, in return per candidate event): d_short - d_long > 0."
 judgement:
   units: "calendar quarters 2023Q3 to 2025Q4, and years"
@@ -100,7 +99,7 @@ judgement:
     resamples: 10000
     interval: 0.90
     seed: 188
-  clear: "predicted sign in at least 2 of 3 pairs, none clearly opposite; in each used pair predicted sign in at least 75% of quarters and every full year (2024, 2025); both intervals exclude 0; sign holds in both R_L and R_L2 (long vol)"
+  clear: "predicted sign in at least 2 of 3 pairs, none clearly opposite; in each used pair predicted sign in at least 75% of quarters and every full year (2024, 2025); both intervals exclude 0"
   directional: "same pair and year signs, quarter share at least 60%, but an interval includes 0 or the sign fails in one arm"
   no_difference: "neither, and not reversed"
   reversed: "Clear in the opposite direction"
@@ -138,13 +137,16 @@ synthetic_arm:
     X1: "oracle P&L per event at least every other predictor's, per book: quarter-bootstrap interval not entirely below 0 and sign positive in at least 60% of quarters"
     X2: "P&L non-increasing down the ladder for each noise type and book: Clear (all three steps non-positive), Directional (one inversion, negative slope), else Failed"
     X3: "short vol: median-unbiased beats mean-unbiased at every rung s >= 0.4"
-    X4: "straddle (R_L2, R_L): mean-unbiased beats median-unbiased at every rung s >= 0.4"
+    X4: "straddle (G_PROD rows): mean-unbiased beats median-unbiased at every rung s >= 0.4; the synthetic run binds no gate, so it emits no straddle rows and X4 is empty"
     X5: "sign of P&L(+10%) - P&L(-10%) equals the sign of median minus mean at s = 0.6, per book"
     X6: "null predictor (L = 1): one width per event within a calendar quarter on every short-vol book; straddle edge ranks by implied move alone"
     X7: "exact replay of every table on a 50-ticker smoke"
   stop_rule: "a Failed X1, X2, X6 or X7 stops the real run until the cause is classified in the report; X3-X5 outcomes do not stop it"
 grid: {}
 preregistered_original:
+  long_vol:
+    R_L: "primary: buy when edge = pred_abs_move_m - implied_move is at or above the top-20% trailing cutoff of the model's own edge over the prior six months (at least 100 scores, strictly before the month), within production's STR-THRU universe (market cap at or above engine.score GATE_MCAP_FLOOR, no spread term, but production's BAD_QUOTE ceiling of 30% of spot at the mid entry cost; Amendment 5), the cutoff computed over the model's edges in that universe"
+    R_L2: "secondary: fixed edge >= 0, no cutoff"
   short_vol:
     arms:
       retuned:
