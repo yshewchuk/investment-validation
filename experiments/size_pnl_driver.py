@@ -327,7 +327,8 @@ def _inner(src, out, ready, plan, facts_all, labels):
 
 
 def _equivalence_ok(entry):
-    """A model's fast-path evidence: a dict with an int ``checked`` >= 1 and a numeric ``max_abs_diff`` within TOLERANCE."""
+    """A model's fast-path evidence: a dict with an int ``checked`` >= 1 and a numeric ``max_abs_diff`` within TOLERANCE.
+    ``max_abs_diff`` is the scaled difference from check_equivalence: the return difference times min(1, entry cost)."""
     return (isinstance(entry, dict) and isinstance(entry.get("checked"), int) and not isinstance(entry.get("checked"), bool) and entry["checked"] >= 1
             and isinstance(entry.get("max_abs_diff"), (int, float)) and not isinstance(entry.get("max_abs_diff"), bool) and entry["max_abs_diff"] <= TOLERANCE)
 

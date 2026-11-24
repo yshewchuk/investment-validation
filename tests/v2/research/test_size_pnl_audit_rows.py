@@ -7,7 +7,7 @@ from engine.portfolio import build_book
 from engine.structures import STRUCTURES
 from experiments import size_pnl_shortvol as sv
 from experiments.size_pnl_straddle import lots
-from experiments.size_pnl_tables import _windows
+from experiments.size_pnl_tables import windows
 
 COSTS = [0.5, 1.37, 2.0, 25.0, 0.0]
 
@@ -43,7 +43,7 @@ CAL = TradingCalendar(pd.bdate_range("2025-01-01", "2025-03-31"))
     (BMO, "2025-01-20", "2025-01-17", "2025-01-20"),  # Monday BMO: entry is the prior Friday
 ])
 def test_print_windows_are_the_calendar_anchors(sess, day, entry, exit_):
-    got = _windows(CAL, pd.Timestamp(day), sess)
+    got = windows(CAL, pd.Timestamp(day), sess)
     assert got == (CAL.last_pre_print(day, sess), CAL.first_post_print(day, sess), None)
     assert got[0] == pd.Timestamp(entry) and got[1] == pd.Timestamp(exit_)
 

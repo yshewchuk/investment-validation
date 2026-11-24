@@ -21,7 +21,7 @@ from engine.score import _mean_relative_spread
 from engine.structures import (BUY, PUT, SELL, STRUCTURES, ChainSnapshot, LadderTooCoarse, StructureError,
                                price_structure)
 from experiments.size_pnl_account import secured_per_contract
-from experiments.size_pnl_ladder import _SELECTOR
+from experiments.size_pnl_ladder import SELECTOR
 from experiments.size_pnl_pool import put_means, structure_pnl
 from experiments.size_pnl_straddle import EXIT_UNQUOTED, lots
 
@@ -63,7 +63,7 @@ def pinned(name):
             raise Refusal(_CONFLICT, f"{name}: leg {leg.name} is a call",
                           {"reason": "call_leg_refused", "structure": name, "field": leg.name})
         # engine.structures and engine.v2.research._pricing each define an ExpirySelector, so compare the fields, not the objects.
-        if dataclasses.asdict(leg.expiry) != dataclasses.asdict(_SELECTOR):
+        if dataclasses.asdict(leg.expiry) != dataclasses.asdict(SELECTOR):
             raise Refusal(_CONFLICT, f"{name}: leg {leg.name} expiry selector differs from the ladder's",
                           {"reason": "factory_default_mismatch", "structure": name, "field": leg.name})
     return spec

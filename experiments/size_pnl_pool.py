@@ -157,7 +157,11 @@ def paired_events(undetermined, event_dates):
 
 
 def check_equivalence(pool, sample, *, tolerance=TOLERANCE, draws=DRAWS):
-    """Hold the fast path to ``expected_pnl`` on sampled structures; a mismatch refuses the run."""
+    """Hold the fast path to ``expected_pnl`` on sampled structures; a mismatch refuses the run.
+
+    max_abs_diff is the return difference scaled by min(1, entry cost), i.e. the per-share price error for a cost below
+    one; the pass bound on it is `tolerance`.
+    """
     if not (np.isfinite(tolerance) and tolerance > 0):
         raise ValueError("tolerance must be a positive finite number")
     if not sample:
@@ -187,7 +191,8 @@ def check_equivalence(pool, sample, *, tolerance=TOLERANCE, draws=DRAWS):
             raise fail(_CONFLICT, "the fast path disagrees with expected_pnl",
                        details={"reason": "fast_path_mismatch"})
         compared += 1
-        worst = max(worst, abs(fast - ref))
+        # Scaled by min(1, cost) so the reported figure is on the bound's scale: the price error per share for a cost below one.
+        worst = max(worst, abs(fast - ref) * min(1.0, item["entry_cost"]))
     if compared == 0:
         raise fail(_CONFLICT, "no sample item was simulable, so nothing was compared",
                    details={"reason": "equivalence_empty"})

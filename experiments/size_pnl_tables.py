@@ -84,7 +84,7 @@ def _flag(value):
     return False if pd.isna(value) else bool(value)
 
 
-def _windows(cal, day, sess):
+def windows(cal, day, sess):
     """(entry, exit, None) for a calendar print window, or (None, None, reason) when the calendar has no entry or exit close."""
     try:
         entry = cal.last_pre_print(day, sess)
@@ -382,7 +382,7 @@ def tables(repository, snapshot, admitted, *, crush_snapshot, max_object_bytes, 
             reasons["session_unknown"].append(eid)
             unknown[str(session)] = unknown.get(str(session), 0) + 1
         else:
-            entry, exit_, reason = _windows(cal, day, sess)
+            entry, exit_, reason = windows(cal, day, sess)
             if reason is None:
                 kept.append((eid, ticker, day, sess, entry, exit_))
             else:

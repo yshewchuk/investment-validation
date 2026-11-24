@@ -8,6 +8,7 @@ import pytest
 from engine.pnl_sim import MIN_POOL, expected_pnl
 from engine.structures import ResolvedLeg
 from engine.v2.ops.errors import OpsError
+from experiments import size_pnl_driver as driver
 from experiments import size_pnl_pool as pool_mod
 from experiments.size_pnl_pool import (build_pool, check_equivalence, event_seed, paired_events,
                                        pool_history, put_means, structure_pnl, structure_value,
@@ -356,6 +357,33 @@ def test_tiny_entry_cost_still_refuses_a_wrong_fast_path(pool, monkeypatch):
     monkeypatch.setattr(pool_mod, "put_means", shifted)
     with pytest.raises(OpsError) as caught:
         check_equivalence(pool, [_item([SINGLE], 1e-9)], draws=DRAW)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.details["reason"] == "fast_path_mismatch"
+
+
+def test_tiny_cost_reported_diff_passes_the_driver_check(pool):
+    # The reported max_abs_diff is on the bound's scale (return diff times min(1, cost)), so a 1e-9 debit reports a tiny price error.
+    got = check_equivalence(pool, [_item(SPREAD, 1e-9)], draws=DRAW)
+    assert got["max_abs_diff"] <= pool_mod.TOLERANCE
+    assert driver._equivalence_ok({"checked": 1, "max_abs_diff": got["max_abs_diff"]})
+
+
+def test_cost_at_least_one_keeps_the_absolute_bound(pool, monkeypatch):
+    # At cost 2.0 the bound is the absolute 1e-9 on the return: a 1.5e-9 return error refuses, a 0.5e-9 one passes.
+    real = pool_mod.structure_pnl
+
+    def offset(shift):
+        def patched(*args, **kwargs):
+            value = real(*args, **kwargs)
+            return None if value is None else value + shift
+        return patched
+
+    item = [_item([SINGLE], 2.0)]
+    monkeypatch.setattr(pool_mod, "structure_pnl", offset(0.5e-9))
+    assert check_equivalence(pool, item, draws=DRAW)["checked"] == 1
+    monkeypatch.setattr(pool_mod, "structure_pnl", offset(1.5e-9))
+    with pytest.raises(OpsError) as caught:
+        check_equivalence(pool, item, draws=DRAW)
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.problem.details["reason"] == "fast_path_mismatch"
 
