@@ -79,6 +79,13 @@ def test_peak_tie_goes_to_the_k_nearest_one_then_the_smaller():
     assert band(_curve({0.5: 1.0, 1.25: 1.0}), 0.9)["peak_k"] == 1.25
 
 
+def test_peak_tie_at_equal_distance_from_one_takes_the_smaller_k():
+    # 0.75 and 1.25 both sit 0.25 from 1 and tie at ret 1.0; 1.0 is lower, so the tie is between the two outer points
+    curve = _curve({0.5: 0.2, 0.75: 1.0, 1.0: 0.5, 1.25: 1.0, 2.0: 0.1})
+    assert band(curve, 0.9)["peak_k"] == 0.75
+    assert band(dict(reversed(list(curve.items()))), 0.9)["peak_k"] == 0.75  # insertion order does not matter
+
+
 # ---- build_bands and the receipt -------------------------------------------
 
 def test_build_bands_primary_and_labels():

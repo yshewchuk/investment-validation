@@ -13,6 +13,15 @@ from tests.v2.research.test_size_pnl_shortvol import _tables, chunk_of, events_f
 DRAW = 200
 NAME = "CND-PS"
 PRED = 6.0
+# Hand oracle for the coarse-ladder scene (spot 100, strikes 60..140 step 10, mid 1 + 0.01*(k-100)^2, spread 0.2,
+# every exit quote locked at (1.0, 1.0) on rung 1, alpha 0.5). At the recovered rho 2.55 the traded legs, one contract
+# each, are BUY 80 and BUY 120 (mid 5.0) and SELL 90 and SELL 110 (mid 2.0); the atm leg is a reference leg (qty 0).
+# Entry: 2 * 5.0 - 2 * 2.0 = 6.0 per share. Exit: sell the wings 2 * 1.0, buy back the inners 2 * 1.0, so 0.0.
+# ret = 0.0 / 6.0 - 1 = -1.0. pnl_dollars_mid = -6.0 * 100 * lots(6.0); lots(6.0) = floor(10_000 / 600) = floor(16.67) = 16.
+ENTRY_PER_SHARE = 6.0
+RET_RECOVERED = -1.0
+PNL_MID = -9600.0  # -6.0 * 100 * 16
+SECURED_PER_CONTRACT = 20_000.0  # two short puts at 90 and 110, strike * 100 each
 COARSE = range(60, 141, 10)  # CND-PS up1 (100 + 3 at k=1) snaps onto atm: ladder_too_coarse
 WIDE = (0.5, 3.0)
 WINDOW = (pd.Timestamp("2024-06-01"), pd.Timestamp("2024-07-01"))
@@ -187,11 +196,24 @@ def test_recovery_counts_the_recovered_trades_and_no_others(monkeypatch):
     trades = split_trades(fb, WINDOW)
     mine = trades[trades["structure"] == NAME]
     assert set(mine["recovered"]) == {True} and set(mine["tier"]) == {"ge_10B"}
+    # hand oracle (see the module constants): three taken CUR trades, each entry 6.0, exit 0.0, ret -1.0, pnl -9600.0.
+    # The gate takes 3 of the 6 CUR events (C0, C2, C4); the other three CUR events are scored but not taken by the
+    # trailing cutoff, so they never enter WINDOW's trades.
+    assert len(mine) == 3
+    assert mine["entry_cost"].tolist() == pytest.approx([ENTRY_PER_SHARE] * len(mine))
+    assert mine["ret"].tolist() == pytest.approx([RET_RECOVERED] * len(mine))
+    assert mine["pnl_dollars_mid"].tolist() == pytest.approx([PNL_MID] * len(mine))
     others = trades[trades["structure"] != NAME]  # the six other structures are taken at base, never recovered
     assert not others.empty and not others["recovered"].astype(bool).any()
+    # the other structures' taken mean, from the raw rows with no split_trades and no recovery
+    other_rows = fb.rows([(n, E_ARM) for n in sv.NAMES if n != NAME], WINDOW)
+    assert not other_rows.empty
+    raw_taken_ret = float((other_rows["exit_value_mid"] / other_rows["entry_cost"] - 1.0).mean())
+    assert pd.notna(raw_taken_ret)
     got = recovery(fb, WINDOW)
-    assert got["recovered"] == len(rows)  # no other structure contributes a recovered trade
-    assert got["recovered_ret"] == pytest.approx((rows["exit_value_mid"] / rows["entry_cost"] - 1.0).mean())
+    assert got["recovered"] == 3 == len(rows)  # no other structure contributes a recovered trade
+    assert got["recovered_ret"] == pytest.approx(RET_RECOVERED)
+    assert got["taken_ret"] == pytest.approx(raw_taken_ret)
     assert got["taken_ret"] == pytest.approx(others["ret"].mean())
 
 
@@ -214,7 +236,11 @@ def test_t9_counts_by_hand(monkeypatch):
     assert row["declined"] == 6 and row["recovered"] == 6 and row["fallback_infeasible"] == 0
     assert row["share"] == pytest.approx(1.0)
     assert row["rho"] == {"2.55": 6}
-    assert row["recovered_trades"] == len(fb.rows([(NAME, E_ARM)], WINDOW))
+    # hand counts: the gate takes 3 of the 6 CUR events (C0, C2, C4), which exit 2024-06-21, inside WINDOW; the other
+    # three CUR events are scored but not taken by the trailing cutoff; the PRIOR events exit 2024-05-25, outside it
+    assert row["recovered_trades"] == 3 == len(fb.rows([(NAME, E_ARM)], WINDOW))
+    assert row["recovered_ret"] == pytest.approx(RET_RECOVERED)
+    assert row["recovered_pnl"] == pytest.approx(PNL_MID)
     assert row["taken_trades"] == 0 and row["taken_ret"] is None
 
 
@@ -239,3 +265,24 @@ def test_accounts_base_takes_six_and_fallback_adds_the_recovered_trades(monkeypa
     recovered = {(NAME, str(e)) for e in fb.rows([(NAME, E_ARM)], WINDOW)["event_id"]}
     assert added == recovered and added
     assert not any(s == NAME for s, _ in pairs(base_rows))
+
+
+def test_accounts_hand_oracle_for_the_three_recovered_trades(monkeypatch):
+    _small_window(monkeypatch)
+    fb = _run(_fb(), _scene())
+    mine = fb.rows([(NAME, E_ARM)], WINDOW)
+    assert len(mine) == 3
+    assert (mine["entry_date"] == pd.Timestamp("2024-06-11")).all()
+    assert (mine["exit_date"] == pd.Timestamp("2024-06-21")).all()
+    assert mine["secured_per_contract"].tolist() == pytest.approx([SECURED_PER_CONTRACT] * len(mine))
+    # Hand walk of margin.simulate under POLICY (start 200,000, cap 0.66, target_share 0.25, expensive_first).
+    # Each trade: cost 6.0 * 100 = 600 per contract, value 0.0 (exit_value_mid), secured 20,000 per contract.
+    # Trade n (n = 1..3) sees equity 200,000 (cash plus cost at book), headroom 132,000 - 20,000 * (n - 1).
+    # want = max(0.25 * headroom / 20,000, 1) is 1.65, 1.4, 1.15, so each trade is funded at floor(want) = 1 contract.
+    # The cap never binds: 3 * 20,000 = 60,000 <= 132,000.
+    # The account pays 3 * -600 = -1,800 and nothing returns before 2024-06-21, so final = 200,000 - 1,800 = 198,200.
+    got = simulate_account(mine, "mid")
+    assert got["wanted"] == 3 and got["funded"] == 3 and got["peak_open"] == 3
+    assert got["final_equity"] == pytest.approx(198_200.0)
+    assert got["total_return"] == pytest.approx(-0.009)
+    assert got["max_drawdown"] == pytest.approx(-0.009)  # one exit date: curve [200,000, 198,200]
