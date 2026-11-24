@@ -110,6 +110,15 @@ def test_config_accepts_a_board_ledger_directory_and_refuses_a_blank_one(tmp_pat
     assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "sources_config_invalid")
 
 
+def test_config_refuses_a_non_string_board_ledger_and_returns_a_string_one(tmp_path):
+    for i, bad in enumerate((123, ["x"])):
+        with pytest.raises(OpsError) as exc:
+            src._config(_write(tmp_path / f"bad{i}.json", {**_cfg(tmp_path), "board_ledger": bad}))
+        assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "sources_config_invalid")
+    cfg = {**_cfg(tmp_path), "board_ledger": "/x/ledger"}
+    assert src._config(_write(tmp_path / "c.json", cfg))["board_ledger"] == "/x/ledger"
+
+
 def test_config_refuses_a_non_string_required_value_with_gate_entries(tmp_path):
     cfg = {**_cfg(tmp_path), "gate_fold": {"path": "f", "sha256": "0" * 64}, "gate_inputs": {"path": "i", "sha256": "0" * 64},
            "snapshot_id": 3}
