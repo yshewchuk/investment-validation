@@ -4,7 +4,7 @@ Design PR; no code. Slices S1–S5 (section 9) add code. Contract lines: `engine
 
 **Problem (supervisor measurement 2026-11-24).** On synthetic 300-event put chains with 5 short-vol structures, `engine.structures.price_structure` costs 12.8 ms per call against 1.8 ms for the old experiment resolver. About 54% is `ExpirySelector.select` re-run for every leg (pandas `drop_duplicates`, sort, filter), about 12% is `StrikeSelector.select` (pandas filter, grid rebuild per leg), the rest is per-leg boolean masks over the whole chain plus fill pricing; building the `ChainSnapshot` is 4%. It is repeated work on one immutable chain: `engine/replay.py` quotes every structure on one decision snapshot, and each structure has 2–7 legs.
 
-**Hard rules (user).** Outputs are bit-identical: same strikes, prices, cash flows, flags, and the SAME exception types and messages, `LadderTooCoarse` included. No experiment changes: `experiments/` is not touched, and no running experiment may be affected. No cross-structure vectorising. Never read the real store, `data/` or `/root/rebuild-logs`; no heavy jobs; CI is the evidence for code slices.
+**Hard rules (user).** Outputs are bit-identical, including the SAME exception types and messages (`LadderTooCoarse` too). `experiments/` is not touched and no running experiment may be affected. No cross-structure vectorising. No real store, `data/` or `/root/rebuild-logs` reads; no heavy jobs; CI is the evidence.
 
 ## 0. Binding check (done before any code, per the brief)
 
@@ -17,7 +17,9 @@ Computed with `engine.v2.ops.fingerprints.source_closure` (static, no data read)
 | `experiments/v2_magnitude_search.py`, `v2_prediction.py`, `v2_magnitude_search_run.py`, `magnitude_search_outer.py`, `size_search_binding.py` (the v14 SIZE plan closure: `magnitude_search_plan` defaults to the first two) | **Yes** |
 | `engine/v2/ops/experiments.py` `capability_manifest` (hashes the runner closure) | Yes, for every runner that imports them |
 
-So any byte change to `engine/structures.py` or `engine/fills.py`, or a new module they import, changes the closure the v14 sealed plan and the registered-runner manifests are bound to (`size_pnl_sources._read_plan` refuses a plan whose implementation differs from the registration's; the memory note "installed code == v14 closure" says the same). **This design PR changes no `.py` file, so nothing is rebound by it.** Per the brief, code slices stop at this finding until the supervisor decides. The split in section 9 is built so that S1–S4 are closure-neutral and only one small, optional "wire" slice (S5) edits a bound file.
+So any byte change to `engine/structures.py` or `engine/fills.py`, or a new module they import, changes the closure the v14 sealed plan and the registered-runner manifests are bound to (`size_pnl_sources.load_plan` refuses a plan whose implementation differs from the registration's; the memory note "installed code == v14 closure" says the same). **This design PR changes no `.py` file, so nothing is rebound by it.** Per the brief, code slices stop at this finding until the supervisor decides. The split in section 9 is built so that S1–S4 are closure-neutral and only one small, optional "wire" slice (S5) edits a bound file.
+
+**Out of scope: the v2 research copy.** `engine/v2/research/_pricing.py` carries its own `price_structure` (used by `engine/v2/research/replay.py`). It is a separate implementation with its own closure and is not changed or indexed here; adopting the index there would be a later design.
 
 **Closure-neutral rule for S1–S4.** `engine/structures.py` and `engine/fills.py` stay byte-identical. All new logic is in a NEW module `engine/chain_index.py` that nothing bound imports. It reads `ChainSnapshot`, `Structure`, `ResolvedLeg`, `StructurePrice` and the error classes from `engine.structures`. `engine/fills.py` is never edited: quote validation reuses the public `FillModel.mid`. A CI test (S2) asserts the git diff of the two bound files is empty for S1–S4.
 
@@ -32,7 +34,7 @@ So any byte change to `engine/structures.py` or `engine/fills.py`, or a new modu
 
 **Why original order, not sorted.** The legacy tie rules are row-order rules (`idxmin` first minimum, `hit.iloc[0]` first `isclose` row); sorting changes both on ties and duplicate quotes. Groups are small (about 100 rows), so the same numpy expressions on a group are exact and cheap; no `searchsorted`.
 
-**Lifetime.** The index lives and dies with its snapshot. No global LRU and no sharing across snapshots. Until S5 `ChainSnapshot` is not edited, so the index lives in a module dict `{id(snapshot): (weakref(snapshot), index)}` with a `weakref.finalize` that removes the entry at collection; a lookup that finds a dead or different referent rebuilds. (A weak-keyed dict cannot be used: the frozen dataclass hashes its `DataFrame` field.) The build is guarded by a lock; a racing second build would be identical, and the first stored wins. The index is never pickled: it is not an attribute of the snapshot.
+**Lifetime.** The index lives and dies with its snapshot. No global LRU and no sharing across snapshots. Until S5 `ChainSnapshot` is not edited, so the index lives in a module dict `{id(snapshot): (weakref(snapshot), index)}` with a `weakref.finalize` that removes the entry at collection; a lookup that finds a dead or different referent rebuilds. (A weak-keyed dict cannot be used: the frozen dataclass hashes its `DataFrame` field.) A lock guards the build; the index is not a snapshot attribute, so it is never pickled.
 
 **Immutability and invalidation.** `ChainSnapshot.rows` must be treated as immutable once a snapshot has been priced. Pandas offers no cheap way to enforce this for a mutable `DataFrame`, so enforcement is layered:
 1. The index copies its arrays, so it never aliases `rows`; a later in-place edit leaves the index at its build-time view, which is why mutation is a contract violation rather than a refresh.
@@ -63,7 +65,7 @@ class Resolution:
 - `price_resolution(resolution, snapshot, fill, *, closing=False) -> StructurePrice` does only the arithmetic: per leg the identical calls `fill.price`, `fill.cash_flow`, `FillModel.is_wide` on the stored bid/ask, with `side` flipped through `_OPPOSITE` when `closing`. It does not resolve. It checks that `resolution.ticker`, `obs_date`, `event_date` equal the snapshot's and raises `ValueError` otherwise; it does not re-read quotes, so passing a different chain is a caller error, not a repricing.
 - `price_structure(structure, snapshot, fill, *, pin=None, closing=False)` is `price_resolution(resolve_structure(structure, snapshot, pin=pin), snapshot, fill, closing=closing)`: same signature, same behaviour.
 - **`closing` is a pricing-time argument.** A Resolution is direction-free: its legs carry opening sides, as legacy `ResolvedLeg` entries carry them before the flip.
-- **`pin=`** keeps its meaning: a pinned leg takes `expiry` and `strike` from the pin by name, skips both selectors, and the strike enters the cross-leg `resolved` dict so later unpinned legs can still reference it. Pin entries naming no leg are ignored; a duplicate pin name keeps the last, as the legacy dict does. `pin` accepts `Sequence[ResolvedLeg]` (unchanged) and also a `Resolution` or its `.legs`, because the code reads only `.name`, `.expiry`, `.strike`.
+- **`pin=`** keeps its meaning: a pinned leg takes `expiry` and `strike` from the pin by name, skips both selectors, and the strike enters the cross-leg `resolved` dict so later unpinned legs can still reference it. Pin entries naming no leg are ignored; a duplicate pin name keeps the last, as the legacy dict does. `pin` accepts `Sequence[ResolvedLeg]` (unchanged, no identity check, as today) and also a `Resolution` or its `.legs`. A `Resolution` pin is identity-checked: if its `ticker` or `structure` differs from the snapshot's ticker or the structure being resolved, `resolve_structure` raises `ValueError` before any leg runs, so a pin resolved on ticker A can never silently price ticker B. The check applies only to the new `Resolution` form, so legacy behaviour is untouched. Bare `.legs` carry no identity and keep the legacy rule.
 - **Exit reuse.** The entry `Resolution` replaces `pin=entry_price.legs`: `exit_res = resolve_structure(structure, exit_snapshot, pin=entry_res)`, then `price_resolution(exit_res, exit_snapshot, fill, closing=True)`. The pinned path therefore still checks the entry's expiry exists on the exit chain and that the contract is listed there. A resolution never prices a chain it was not resolved on without `resolve_structure(pin=...)`, so "closing without pinning is nearly always a bug" stays enforceable.
 
 ## 3. Exact-equivalence rules
@@ -75,7 +77,7 @@ The reference is the current `price_structure`, `ExpirySelector.select` and `Str
 **Strike rules, by kind.**
 - `atm`/`moneyness`: `gap = np.abs(strike_orig - target)`, `strike_orig[gap.argmin()]`: first row at the minimum, equal to `idxmin`. Ties between two listed strikes go to whichever is listed first in the row order, NOT the lower strike.
 - `delta`: `|delta|` gap in row order, first minimum, NaN skipped (`nanargmin`); the "needs a delta column" check runs on the same-right group, as now.
-- `bracket`, `grid_step`, `offset_from`: the same numpy expressions on the cached ascending grid. For `offset_from` and `bracket` ties go to the lower grid index, which differs from `atm`; do not unify.
+- `bracket`, `grid_step`, `offset_from`: the same numpy expressions on the cached ascending grid. `offset_from` first filters the grid to strikes strictly above (`moneyness > 0`) or below the anchor, then takes `argmin(|grid - (anchor + moneyness * spot)|)`; its error is "no listed strike {above|below} {anchor}". For `offset_from` and `bracket` ties go to the lower grid index, which differs from `atm`; do not unify.
 - `same_as`, `mirror`, `fixed`: the returned value is the TARGET (`resolved[ref]`, the mirror, `self.strike`), never the matched listed strike. The contract lookup then runs `isclose` again.
 - Right restriction: the same-right group is used when it is non-empty, else the all-rights group at the expiry, exactly as the legacy `rows = same_right` fallback.
 
@@ -104,7 +106,7 @@ R3 (determinism) and R5 (identity) are the load-bearing ones; the others are mos
 
 Each case asserts equal `StructurePrice.to_dict()` and field types, or the same exception TYPE and `str`:
 - Every key of `STRUCTURES`, default parameters, on AMC, BMO and `None` sessions; width and `steps` sweeps for the five short-vol builders, including zero-quantity reference legs.
-- `pin=`: entry onto a post-print chain, `closing=True`, a pinned expiry absent on the exit chain, an unlisted pinned strike, a pin naming no leg, a duplicate pin name.
+- `pin=`: entry onto a post-print chain, `closing=True`, a pinned expiry absent on the exit chain, an unlisted pinned strike, a pin naming no leg, a duplicate pin name, a `Resolution` pin with another ticker or structure (`ValueError`).
 - Coarse ladders: the KEN and ABM geometries in `guides/coarse_ladder_collision.md`, $5 and $10 ladders, the exact `LadderTooCoarse` text.
 - Every refusal in section 4, each expiry-rule and strike-selector error, a calls-only chain for a put leg (all-rights fallback), crossed, negative and NaN quotes, a `ValueError` on leg 1 with a `StructureError` on leg 2, missing spot, missing column.
 - `isclose` edges: a target just inside and just outside tolerance, two listed strikes inside one tolerance, duplicate rows for one contract, equidistant strikes in both row orders.
@@ -125,6 +127,8 @@ For each prediction row with `strategy`, `structure_params`, a quote date and re
 
 ## 9. Slice split list (about 150 code lines each; test code excluded)
 
+Estimates per slice (code / test / doc lines): S1 0 / 350 / 0; S2 150 / 250 / 10; S3 150 / 200 / 10; S3b 250 split into two PRs of about 125 each / 120 / 15; S4 150 / 200 / 20 (updates `engine/SCORING.md`); S5 20 / 60 / 5.
+
 | Slice | Content | Binding |
 | --- | --- | --- |
 | **S1** | Oracle support module and the battery harness, run against the current code. Test code only. | Neutral |
@@ -134,7 +138,7 @@ For each prediction row with `strategy`, `structure_params`, a quote date and re
 | **S4** | `Resolution`, `ResolvedContract`, `resolve_structure`, `price_resolution`, `pin=Resolution`, all inside `chain_index.py`; `price_structure_indexed` becomes the composition. | Neutral |
 | **S5 (optional, gated)** | Edit bound `engine/structures.py` so `price_structure` delegates to the indexed path, with the legacy body kept as the fallback. Needs a supervisor decision on the closure binding of the v14 plan and runner manifests first. | **Edits bound file** |
 
-EXP-188/189 adapters adopting the split is a separate later piece of work in `experiments/` and needs the same binding decision (its adapters sit inside the bound closures regardless). It can call `engine.chain_index` directly, so S5 is not on its path.
+EXP-188/189 adapters adopting the split is separate later work in `experiments/`, under the same binding decision; it can call `engine.chain_index` directly, so S5 is not on its path.
 
 ## 10. Standard-tool check
 
