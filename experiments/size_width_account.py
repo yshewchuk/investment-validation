@@ -15,13 +15,10 @@ POLICY = {**base.POLICY, "start_equity": START_EQUITY}
 secured_per_contract = base.secured_per_contract
 
 
-def simulate_account(rows, mark):
-    """Metrics of one account over the TAKEN ``rows``; ``mark`` "mid" walks the exit_value_mid marks instead of the primary ones."""
+def walk(rows, mark):
+    """margin.simulate table of the TAKEN ``rows`` (non-empty) at the ``mark`` ("mid" or "primary"), inputs validated."""
     if mark not in ("mid", "primary"):
         raise ValueError("mark must be 'mid' or 'primary'")
-    start = POLICY["start_equity"]
-    if rows.empty:
-        return {"wanted": 0, "funded": 0, "final_equity": start, "total_return": 0.0, "max_drawdown": 0.0, "peak_open": 0}
     exit_col = "exit_value_mid" if mark == "mid" else "exit_value"
     for col in ("entry_cost", "secured_per_contract", exit_col):  # a missing or non-finite input is refused, never simulated
         if col not in rows.columns or not np.isfinite(rows[col].to_numpy(dtype=float)).all():
@@ -34,7 +31,17 @@ def simulate_account(rows, mark):
         if parsed.isna().any():
             raise ValueError("account inputs must carry valid entry_date and exit_date")
     frame = rows.drop(columns=["exit_value"]).rename(columns={"exit_value_mid": "exit_value"}) if mark == "mid" else rows
-    t = base.margin.simulate(frame[["entry_date", "exit_date", "entry_cost", "exit_value", "secured_per_contract"]], **POLICY)
+    return base.margin.simulate(frame[["entry_date", "exit_date", "entry_cost", "exit_value", "secured_per_contract"]], **POLICY)
+
+
+def simulate_account(rows, mark):
+    """Metrics of one account over the TAKEN ``rows``; ``mark`` "mid" walks the exit_value_mid marks instead of the primary ones."""
+    if mark not in ("mid", "primary"):
+        raise ValueError("mark must be 'mid' or 'primary'")
+    start = POLICY["start_equity"]
+    if rows.empty:
+        return {"wanted": 0, "funded": 0, "final_equity": start, "total_return": 0.0, "max_drawdown": 0.0, "peak_open": 0}
+    t = walk(rows, mark)
     final = float(t.attrs["final_equity"])
     done, max_dd = t[t["funded"]], 0.0
     if not done.empty:  # the realised curve at EXIT DATES: same-date P&L is summed before any peak is taken
@@ -43,3 +50,18 @@ def simulate_account(rows, mark):
         max_dd = float(np.min(curve / np.maximum.accumulate(curve) - 1.0))
     return {"wanted": len(t), "funded": int(t["funded"].sum()), "final_equity": final, "total_return": final / start - 1.0,
             "max_drawdown": max_dd, "peak_open": int(t["concurrency"].max()) if len(t) else 0}
+
+
+def quarter_returns(rows, quarters):
+    """Account return per calendar quarter (``quarters`` a PeriodIndex, freq Q): funded pnl_usd summed by EXIT quarter over the equity at the quarter's start; 0.0 for a quarter with none."""
+    pnl = {}
+    if not rows.empty:
+        done = (t := walk(rows, "mid"))[t["funded"]]
+        by = done.assign(q=pd.PeriodIndex(pd.to_datetime(done["exit_date"]), freq="Q")).groupby("q")["pnl_usd"].sum()
+        pnl = by.to_dict()
+    equity, out = START_EQUITY, []
+    for q in quarters:
+        gain = float(pnl.get(q, 0.0))
+        out.append(gain / equity)
+        equity += gain
+    return out

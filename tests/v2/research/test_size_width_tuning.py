@@ -1,0 +1,220 @@
+import json
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from experiments import size_width_account as account
+from experiments import size_width_tuning as tuning
+from experiments.size_pnl_shortvol import NAMES, Refusal
+from experiments.size_width_sweep import _TAKEN, E_ARM, INNER, Sweep
+
+TWIN = ("TWIN-P", "TWIN-P5")
+
+
+def trade(eid, structure, entry, exit_, *, cost=1.0, exit_value=1.5, mid=2.0, secured=1000.0):
+    entry, exit_ = pd.Timestamp(entry), pd.Timestamp(exit_)
+    return {"event_id": eid, "event_date": entry, "structure": structure, "k": 1.0, "entry_date": entry,
+            "exit_date": exit_, "entry_cost": cost, "exit_value": exit_value, "exit_value_mid": mid,
+            "pnl_dollars": 0.0, "pnl_dollars_mid": 0.0, "secured_per_contract": secured}
+
+
+def frame(*rows):
+    return pd.DataFrame(list(rows), columns=_TAKEN)
+
+
+def sc(ret, trades=300, se=0.0):
+    return {"ret": ret, "se": se, "trades": trades}
+
+
+def scored(eid, k, value, date="2024-01-15", name="CND-PS"):
+    return {"event_id": eid, "event_date": pd.Timestamp(date), "structure": name, "width": 0.04, "entry_cost": 3.0,
+            "rel_spread": 0.1, "mcap_usd": 20e9, "exp_pnl_sim": value, "status": "scored", "reason": None,
+            "alpha": 0.5, "k": k}
+
+
+def _cnd_trades(n=300):
+    start = pd.Timestamp("2024-01-02")
+    return [trade(f"t{i}", "CND-PS", start + pd.Timedelta(days=i), start + pd.Timedelta(days=i + 5)) for i in range(n)]
+
+
+def _sweep_cnd_at_15():
+    sw = Sweep()
+    sw.taken[("CND-PS", 1.5)] = [frame(*_cnd_trades())]
+    return sw
+
+
+def _no_constants(name):
+    raise ValueError(f"non-strict JSON constant {name}")
+
+
+# ---- unit score -----------------------------------------------------------
+
+def test_unit_score_matches_the_account_and_the_quarter_se():
+    rows = frame(trade("a", "CND-PS", "2023-08-01", "2023-08-20"),
+                 trade("b", "CND-PS", "2024-02-01", "2024-02-20"),
+                 trade("c", "CND-PS", "2024-06-03", "2024-06-20"))
+    score = tuning.unit_score(rows, INNER)
+    q = account.quarter_returns(rows, tuning._quarters(INNER))
+    assert len(q) == 6
+    assert score["ret"] == pytest.approx(account.simulate_account(rows, "mid")["total_return"])
+    assert score["se"] == pytest.approx(np.std(q, ddof=1) / np.sqrt(6))
+    assert score["trades"] == 3
+
+
+# ---- choose ---------------------------------------------------------------
+
+def test_choose_picks_a_clear_interior_winner():
+    assert tuning.choose({0.5: sc(0.01), 1.0: sc(0.02), 1.5: sc(0.09), 2.0: sc(0.03)}) == {"k": 1.5, "flags": []}
+
+
+def test_choose_ties_within_one_se_go_nearest_one_then_smaller():
+    assert tuning.choose({0.75: sc(0.10, se=0.05), 1.25: sc(0.10, se=0.05)}) == {"k": 0.75, "flags": []}
+    assert tuning.choose({1.0: sc(0.09, se=0.05), 1.5: sc(0.10, se=0.05)}) == {"k": 1.0, "flags": []}
+
+
+def test_choose_excludes_ks_under_300_trades():
+    assert tuning.choose({1.0: sc(0.05, trades=300), 2.0: sc(0.50, trades=299)}) == {"k": 1.0, "flags": []}
+    assert tuning.choose({1.0: sc(0.05, trades=300), 2.0: sc(0.50, trades=300)}) == {"k": 2.0, "flags": []}
+
+
+def test_choose_with_no_eligible_k_defaults_to_one():
+    assert tuning.choose({1.0: sc(0.05, trades=299), 1.5: sc(0.2, trades=10)}) == {"k": 1.0, "flags": ["k_defaulted"]}
+
+
+def test_choose_at_an_edge_takes_the_best_interior_k():
+    assert tuning.choose({3.0: sc(0.5), 2.0: sc(0.3), 0.5: sc(0.1)}) == {"k": 2.0, "flags": ["k_at_edge"]}
+    assert tuning.choose({0.5: sc(0.5), 1.0: sc(0.2), 2.0: sc(0.1)}) == {"k": 1.0, "flags": ["k_at_edge"]}
+
+
+def test_choose_with_only_edge_ks_scored_defaults_to_one():
+    assert tuning.choose({0.5: sc(0.5), 3.0: sc(0.3)}) == {"k": 1.0, "flags": ["k_at_edge", "k_defaulted"]}
+
+
+# ---- units and factors ----------------------------------------------------
+
+def test_units_partition_the_structures_per_arm():
+    assert tuning.units("A") == {"all": NAMES}
+    assert set(tuning.units("B")) == set(NAMES) and all(len(v) == 1 for v in tuning.units("B").values())
+    d = tuning.units("D")
+    assert d["T"] == TWIN
+    assert set(d["C"]) == set(NAMES) - set(TWIN)
+
+
+def test_factors_map_every_structure_and_arm_e_maps_to_e():
+    body = {"all": {"k": 1.5, "members": list(NAMES)}}
+    assert tuning.factors("A", body) == {n: 1.5 for n in NAMES}
+    assert tuning.factors(E_ARM, {}) == {n: E_ARM for n in NAMES}
+
+
+# ---- tune -----------------------------------------------------------------
+
+def test_tune_b_picks_the_scored_k_and_defaults_the_rest():
+    body = tuning.tune(_sweep_cnd_at_15(), "B")
+    assert body["CND-PS"]["k"] == 1.5 and body["CND-PS"]["flags"] == []
+    assert body["CND-PS"]["members"] == ["CND-PS"]
+    assert body["CND-PS"]["scores"]["1.5"]["not_scored"] is False
+    assert body["CND-PS"]["scores"]["1.0"]["not_scored"] is True
+    for n in NAMES:
+        if n != "CND-PS":
+            assert body[n]["k"] == 1.0 and body[n]["flags"] == ["k_defaulted"]
+
+
+def test_tune_a_and_d_follow_the_same_rows():
+    sw = _sweep_cnd_at_15()
+    a = tuning.tune(sw, "A")
+    assert a["all"]["k"] == 1.5 and a["all"]["members"] == list(NAMES)
+    assert a["all"]["scores"]["1.5"]["trades"] == 300
+    d = tuning.tune(sw, "D")
+    assert d["T"]["k"] == 1.0 and d["T"]["flags"] == ["k_defaulted"]
+    assert d["T"]["members"] == list(TWIN)
+    assert d["C"]["k"] == 1.5 and d["C"]["scores"]["1.5"]["not_scored"] is False
+    assert len(d["C"]["members"]) == 5
+
+
+# ---- e summary ------------------------------------------------------------
+
+def test_e_summary_same_k_at_ninety_percent_and_not_at_fifty():
+    sw = Sweep()
+    sw.scored[("CND-PS", E_ARM)] = [pd.DataFrame([scored(f"e{i}", 1.0 if i < 9 else 0.5, 1.0) for i in range(10)])]
+    summary = tuning.e_summary(sw)["CND-PS"]
+    assert summary["same_k"] is True
+    assert summary["modal_share"] == pytest.approx(0.9)
+    sw.scored[("CND-PS", E_ARM)] = [pd.DataFrame([scored(f"f{i}", 1.0 if i < 5 else 0.5, 1.0) for i in range(10)])]
+    assert tuning.e_summary(sw)["CND-PS"]["same_k"] is False
+
+
+def test_e_summary_of_no_candidates_has_zero_modal_share():
+    summary = tuning.e_summary(Sweep())["CND-PS"]
+    assert summary["modal_share"] == 0.0 and summary["same_k"] is False and summary["candidates"] == 0
+
+
+# ---- receipts -------------------------------------------------------------
+
+def test_run_inner_writes_receipts_replays_and_refuses_a_changed_body(tmp_path):
+    tuning.run_inner(Sweep(), tmp_path, "h1")
+    for arm in "ABDE":
+        assert (tmp_path / "receipts" / f"tuning_{arm}.json").exists()
+    tuning.run_inner(Sweep(), tmp_path, "h1")  # an identical body replays
+    with pytest.raises(Refusal) as exc:
+        tuning.run_inner(_sweep_cnd_at_15(), tmp_path, "h1")
+    assert exc.value.details["reason"] == "tuning_receipt_changed"
+
+
+def test_run_inner_bodies_are_strict_json_even_with_empty_curves(tmp_path):
+    tuning.run_inner(Sweep(), tmp_path, "h1")
+    for arm in "ABDE":
+        text = (tmp_path / "receipts" / f"tuning_{arm}.json").read_text()
+        json.loads(text, parse_constant=_no_constants)
+    e_body = json.loads((tmp_path / "receipts" / "tuning_E.json").read_text())["body"]
+    assert e_body["CND-PS"]["curve"]["1.0"] is None
+
+
+def test_run_outer_refuses_a_missing_receipt_before_any_evaluation(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(tuning, "evaluate", lambda *a, **k: calls.append(a) or {})
+    with pytest.raises(Refusal) as exc:
+        tuning.run_outer(Sweep(), tmp_path, ["A", "B"], "h1")
+    assert exc.value.details["reason"] == "tuning_receipt_missing"
+    assert calls == []
+
+
+def test_run_outer_refuses_receipts_bound_to_other_inputs(tmp_path):
+    tuning.run_inner(Sweep(), tmp_path, "h1")
+    with pytest.raises(Refusal) as exc:
+        tuning.run_outer(Sweep(), tmp_path, ["A"], "h2")
+    assert exc.value.details["reason"] == "tuning_receipt_changed"
+
+
+def test_run_outer_evaluates_production_and_each_arm(tmp_path):
+    sw = Sweep()
+    tuning.run_inner(sw, tmp_path, "h1")
+    out = tuning.run_outer(sw, tmp_path, ["A", "B", "D", "E"], "h1")
+    assert set(out) == {"production", "A", "B", "D", "E"}
+    for result in out.values():
+        assert {"account", "structures"} <= set(result)
+        assert set(result["structures"]) == set(NAMES)
+
+
+def test_run_outer_looks_up_arm_e_rows_under_e_arm(tmp_path):
+    sw = Sweep()
+    tuning.run_inner(sw, tmp_path, "h1")
+    d25 = pd.Timestamp("2025-03-03")
+    sw.taken[("CND-PS", E_ARM)] = [frame(trade("x", "CND-PS", d25, d25 + pd.Timedelta(days=5)))]
+    out = tuning.run_outer(sw, tmp_path, ["E"], "h1")
+    assert out["E"]["structures"]["CND-PS"]["trades"] == 1
+    assert out["production"]["structures"]["CND-PS"]["trades"] == 0
+
+
+# ---- evaluate -------------------------------------------------------------
+
+def test_evaluate_combines_the_structures_into_one_account():
+    sw = Sweep()
+    for n in ("CND-PS", "TWIN-P"):
+        sw.taken[(n, 1.0)] = [frame(trade(f"{n}-1", n, "2024-02-01", "2024-02-10"),
+                                    trade(f"{n}-2", n, "2024-03-01", "2024-03-10"))]
+    out = tuning.evaluate(sw, {n: 1.0 for n in NAMES}, INNER)
+    assert out["account"]["trades"] == 4
+    assert out["account"]["funded"] == 4
+    assert out["structures"]["CND-PS"]["funded"] == 2 and out["structures"]["CND-PS"]["trades"] == 2
+    assert out["structures"]["BFLY-P"]["trades"] == 0
