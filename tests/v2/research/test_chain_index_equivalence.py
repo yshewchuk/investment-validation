@@ -565,6 +565,48 @@ def test_first_post_event_with_expiry_on_event_date(session):
     assert legacy[1].legs[0].expiry == expected
 
 
+def _straddle_on(selector):
+    return _struct(_leg("c", selector, right=CALL), _leg("p", selector, right=PUT))
+
+
+@pytest.mark.parametrize("session", SESSIONS, ids=str)
+@pytest.mark.parametrize("selector", [
+    pytest.param(ExpirySelector(kind="first_dte_at_least", target_dte=1, min_dte=8), id="first-dte-min8"),
+    pytest.param(ExpirySelector("nearest_dte", target_dte=3, max_dte=8), id="nearest-t3-max8"),
+    pytest.param(ExpirySelector(kind="first_post_event", min_dte=10), id="post-event-min10"),
+    pytest.param(ExpirySelector(kind="first_post_event", min_dte=500), id="min500-empties"),
+])
+def test_min_max_dte_filters_match_legacy(selector, session):
+    rows = make_chain(rights="CP", delta=False)  # dtes 1, 8, 15, 36
+    assert_same(_straddle_on(selector), lambda: snap(rows.copy(), session), MID)
+
+
+@pytest.mark.parametrize("expiries,target,expected_dte", [
+    (DEFAULT_EXPIRIES, 14, 15),  # gaps 13, 6, 1, 22: an interior expiry, neither first nor last
+    (DEFAULT_EXPIRIES, 11, 8),   # gaps 10, 3, 4, 25: no tie possible at an integer target
+    (((B_DAY, 8), (date(2026, 3, 21), 14)), 11, 14),  # gaps 3 and 3: a real tie, goes long
+])
+def test_nearest_dte_is_not_first_or_last_and_ties_go_long(expiries, target, expected_dte):
+    rows = make_chain(expiries=expiries, **_PUTS)
+    structure = _struct(_leg("a", ExpirySelector(kind="nearest_dte", target_dte=target)))
+    legacy = assert_same(structure, lambda: snap(rows.copy(), "AMC"), MID)
+    assert legacy[0] == "ok"
+    dte_of = {pd.Timestamp(day): dte for day, dte in expiries}
+    assert dte_of[legacy[1].legs[0].expiry] == expected_dte
+
+
+@pytest.mark.parametrize("selector", [
+    pytest.param(ExpirySelector(kind="nearest_dte", target_dte="3"), id="target-str"),
+    pytest.param(ExpirySelector(kind="first_post_event", min_dte=float("nan")), id="min-nan"),
+    pytest.param(ExpirySelector(kind="first_post_event", max_dte="9"), id="max-str"),
+])
+def test_non_numeric_or_non_finite_bounds_fall_back_to_legacy(selector):
+    rows = make_chain(rights="CP", delta=False)
+    structure = _straddle_on(selector)
+    assert ci._call_eligible(structure, snap(rows.copy(), "AMC")) is False
+    assert_same(structure, lambda: snap(rows.copy(), "AMC"), MID)
+
+
 # --------------------------------------------------------------------------
 # 8. seeded property test
 # --------------------------------------------------------------------------
@@ -646,8 +688,9 @@ def test_verify_mode_raises_on_in_place_expiry_or_dte_mutation(column):
         priced.rows.loc[first, "expiry"] = pd.Timestamp("2026-04-15")
     else:
         priced.rows.loc[first, "dte"] += 1
-    with pytest.raises(ChainSnapshotMutated):
+    with pytest.raises(ChainSnapshotMutated) as excinfo:
         price_structure_indexed(straddle_through(), priced, MID)
+    assert str(excinfo.value) == "chain snapshot rows changed after the index was built"
 
 
 def test_verify_mode_does_not_checksum_bid():
