@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from experiments import size_pnl_tuning as tuning
+from experiments import size_pnl_receipts as receipts
 from experiments.size_pnl_shortvol import Refusal
 
 MAX_DECISIONS_BYTES = 4 << 30
@@ -57,12 +57,12 @@ def publish(out, frames, body, *, stem="decisions", receipt="outer"):
     final, tmp = out / f"{stem}.parquet", _unique_tmp(out)
     try:
         sha, rows = _write_decisions(tmp, frames)
-        try: tuning.write_receipt(out / "receipts" / f"{receipt}.json", {**body, "decisions_sha256": sha, "rows": rows})  # before the final file
+        try: receipts.write_receipt(out / "receipts" / f"{receipt}.json", {**body, "decisions_sha256": sha, "rows": rows})  # before the final file
         except Refusal as refusal:
             if refusal.details.get("reason") != "tuning_receipt_changed": raise
             raise Refusal(_CONFLICT, str(refusal), {**refusal.details, "reason": f"{receipt}_receipt_changed"}) from refusal
         if os.path.lexists(final) and _file_sha256(final) == sha: tmp.unlink()  # exact replay: keep the existing file; a dangling symlink is refused by _file_sha256
-        else: os.replace(tmp, final); tuning._fsync_dir(out)
+        else: os.replace(tmp, final); receipts._fsync_dir(out)
     finally:
         tmp.unlink(missing_ok=True)
     return rows
@@ -76,7 +76,7 @@ def freeze_month(out, period, frames):
     final, tmp = months / f"{period}.parquet", _unique_tmp(months)
     try:
         sha, _rows = _write_decisions(tmp, frames)
-        if not os.path.lexists(final): os.replace(tmp, final); tuning._fsync_dir(months)
+        if not os.path.lexists(final): os.replace(tmp, final); receipts._fsync_dir(months)
         elif _file_sha256(final) != sha: raise Refusal(_CONFLICT, f"frozen month {period} differs from this run's rows", {"reason": "month_freeze_changed"})
     finally:
         tmp.unlink(missing_ok=True)

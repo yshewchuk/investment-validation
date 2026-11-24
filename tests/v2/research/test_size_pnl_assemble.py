@@ -13,7 +13,7 @@ from experiments import size_pnl_decisions as decisions
 from experiments import size_pnl_driver
 from experiments import size_pnl_ladder as ladder
 from experiments import size_pnl_readers as readers
-from experiments import size_pnl_tuning as tuning
+from experiments import size_pnl_receipts as tuning
 from experiments.size_pnl_shortvol import NAMES, Refusal
 from experiments.size_pnl_straddle import RULES
 
@@ -66,24 +66,18 @@ def _rows(dates):
         bump = 1.0 if role in MEDIAN_ROLES else 0.0
         for i, (eid, day) in enumerate(dates.items()):
             pnl = 10.0 * (i + 1) + bump  # the mean-type partner pays 10 * (i + 1)
-            for arm in ("as_is", "retuned"):
-                rows.append(_row(mid, "short_vol", arm, NAMES[0], eid, day, 2, pnl))
+            rows.append(_row(mid, "short_vol", "as_is", NAMES[0], eid, day, 2, pnl))  # short vol is as-is only (Amendment 6)
             for rule in RULES:
                 rows.append(_row(mid, "straddle", rule, "straddle", eid, day, 1, pnl))
     return rows
 
 
 def build(tmp_path, *, rows_fn=None, pairs=None, dates=None, scope=None, plan_tickers=TICKERS):
-    """A complete outer run directory: tuning and inner receipts, inputs_outer, outer.json and decisions.parquet.
+    """A complete outer run directory: inner receipt, inputs_outer, outer.json and decisions.parquet.
     inputs_outer records the real plan binding of ``plan_frame(plan_tickers)``."""
     out = tmp_path / "out"
     rdir = out / "receipts"
-    hashes = {}
-    for mid in ROLES:
-        body = {"stage": "tuning", "model_id": mid, "alpha": 0.5, "grid": [1.0], "c": 1.0, "skipped": True,
-                "skip_reason": "few_trades", "trades": 0, "totals": {"1.0": 0.0}}
-        hashes[mid] = tuning.write_receipt(rdir / f"tuning_{mid}.json", body)["content_hash"]
-    tuning.write_receipt(rdir / "inner.json", {"stage": "inner", "models": hashes, "excluded": {}})
+    tuning.write_receipt(rdir / "inner.json", {"stage": "inner", "models": list(ROLES), "excluded": {}})
     inputs = tuning.write_receipt(rdir / "inputs_outer.json", {
         "stage": "inputs", "roster": _roster(pairs or PAIRS_OK), "models": {mid: {"status": "ready"} for mid in ROLES},
         "identity": IDENTITY, "spec_hash": SPEC_HASH, "snapshot": SNAPSHOT,
@@ -92,8 +86,8 @@ def build(tmp_path, *, rows_fn=None, pairs=None, dates=None, scope=None, plan_ti
     rows = rows_fn(rows) if rows_fn else rows
     frame = rows if isinstance(rows, pd.DataFrame) else pd.DataFrame(rows)
     decisions.publish(out, [frame], {
-        "stage": "outer", "models": list(ROLES), "scope": scope, "inputs": inputs["content_hash"], "tuning": hashes,
-        "c": {mid: 1.0 for mid in ROLES}, "labels": "x", "common_dropped": 0, "scoreability_dropped": 0,
+        "stage": "outer", "models": list(ROLES), "scope": scope, "inputs": inputs["content_hash"],
+        "labels": "x", "common_dropped": 0, "scoreability_dropped": 0,
         "ladder_skipped": {}, "ladder": "x"})
     return out
 
@@ -155,9 +149,9 @@ def test_happy_path_writes_every_section_in_order(tmp_path):
     out = build(tmp_path)
     summary = assemble_mod.assemble(out, plan_frame(), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
-    assert summary["report"] == str(out / "REPORT.md") and summary["sections"] == 13 and summary["rows"] > 0  # 11 + two not_testable sensitivity notes (Amendment 1 and 2)
+    assert summary["report"] == str(out / "REPORT.md") and summary["sections"] == 12 and summary["rows"] > 0  # 10 + two not_testable sensitivity notes (Amendment 1 and 2)
     assert text.startswith("# EXP-188 REPORT")
-    heads = ["### T1", "### T2", "### T3", "### T4", "### T5", "### T6", "### T7", "### T8", "### T9", "### T10"]
+    heads = ["### T1", "### T2", "### T3", "### T4", "### T6", "### T7", "### T8", "### T9", "### T10"]
     positions = [next(i for i, line in enumerate(_sections(text)) if line.startswith(h)) for h in heads]
     assert positions == sorted(positions) and len(set(positions)) == len(heads)
     assert "not_testable: labels_not_in_decisions" in text
@@ -182,7 +176,7 @@ def test_contrast_is_called_with_the_shared_statistics(tmp_path, monkeypatch):
 
     monkeypatch.setattr(contrast, "contrast", recorder)
     assemble_mod.assemble(build(tmp_path), plan_frame(), admitted=None)
-    assert len(calls) == 18  # three hypotheses, three pairs, two arms each
+    assert len(calls) == 12  # three pairs; H1 and H3 each one arm (as_is), H2 the two straddle rules
     d, quarters, tickers = calls[0]  # H1, pair H, as_is
     assert np.allclose(d, 1.0)
     assert quarters == ["2024Q1", "2024Q2", "2025Q1", "2025Q2"]
@@ -204,7 +198,6 @@ def test_non_testable_pair_is_reported_and_the_report_is_written(tmp_path):
     assemble_mod.assemble(out, plan_frame(), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
     assert "| H1 | H | as_is | not_testable: pair_member_excluded |" in text
-    assert "| H1 | H | retuned | not_testable: pair_member_excluded |" in text
     assert "| H1 | +1 | not_testable |" in text
 
 
@@ -221,7 +214,6 @@ def test_single_ticker_across_quarters_is_not_testable(tmp_path):
     assemble_mod.assemble(out, plan_frame(SINGLE_TICKER), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
     assert "| H1 | H | as_is | not_testable: too_few_quarters_or_tickers |" in text
-    assert "| H1 | H | retuned | not_testable: too_few_quarters_or_tickers |" in text
 
 
 def _section_lines(text, title):
@@ -239,11 +231,11 @@ def test_t8_exact_rung_shares_for_the_fixture(tmp_path):
     out = build(tmp_path)
     assemble_mod.assemble(out, plan_frame(), admitted=None)
     lines = _section_lines((out / "REPORT.md").read_text(encoding="utf-8"), "### T8")
-    # Per model: short_vol rung 2 on 2 arms x N events; straddle rung 1 on len(RULES) x N events.
+    # Per model: short_vol rung 2 on 1 arm (as_is) x N events; straddle rung 1 on len(RULES) x N events.
     n = len(EVENT_DATES)
-    short, long = 2 * n, len(RULES) * n
+    short, long = 1 * n, len(RULES) * n
     share_rung1, share_rung2 = f"{long / (short + long):.4g}", f"{short / (short + long):.4g}"
-    assert (share_rung1, share_rung2) == ("0.5", "0.5")
+    assert (share_rung1, share_rung2) == ("0.6667", "0.3333")
     header = _cells(next(line for line in lines if line.startswith("| model_id")))
     assert header == ["model_id", "1", "2", "exit_unquoted_worst_case"]
     for label in ROLES.values():
@@ -674,8 +666,8 @@ def test_mid_column_adds_the_sensitivity_sections_after_the_primary_verdicts(tmp
     summary = assemble_mod.assemble(out, plan_frame(), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
     sens = [line for line in _sections(text) if "not the pre-registered verdict" in line]
-    assert summary["sections"] == 17  # the 11 primary sections and 5 sensitivity sections plus the Amendment 2 not_testable note
-    assert [line.rsplit(": ", 1)[1] for line in sens] == ["T4 Short-vol, as is", "T5 Short-vol, retuned", "T6 Straddle buy rules",
+    assert summary["sections"] == 15  # the 10 primary sections, 4 sensitivity sections and the Amendment 2 not_testable note
+    assert [line.rsplit(": ", 1)[1] for line in sens] == ["T4 Short-vol, as is", "T6 Straddle buy rules",
                                                           "T7 Contrasts", "T10 Verdicts"]
     assert all(line.startswith("### Sensitivity (Amendment 1), not the pre-registered verdict: ") for line in sens)
     assert text.index(sens[0]) > text.index("### T10 Verdicts")
@@ -698,9 +690,9 @@ def test_primary_sections_do_not_depend_on_the_mid_column(tmp_path):
     # 4 events = 25 per event, hit rate 1. The shifted run adds 500 to every taken row, so the sensitivity total is
     # 100 + 4 * 500 = 2100.00 and the per-event value is 2100 / 4 = 525.
     plain_row = next(line for line in _section_lines(texts["plain"], "### T4") if line.startswith("| H-sq |"))
-    assert plain_row == "| H-sq | 1 | 4 | 100.00 | 25 | 1 |"
+    assert plain_row == "| H-sq | 4 | 100.00 | 25 | 1 |"
     shifted_row = next(line for line in _section_lines(texts["shifted"], sens) if line.startswith("| H-sq |"))
-    assert shifted_row == "| H-sq | 1 | 4 | 2100.00 | 525 | 1 |"
+    assert shifted_row == "| H-sq | 4 | 2100.00 | 525 | 1 |"
     # No verdict flip is asserted here. A uniform per-trade shift cancels in a paired contrast only when both models of the
     # pair take the same number of trades per event (the shift then enters both legs equally and subtracts out). This
     # fixture has equal counts (every model takes every row), so the uniform shift leaves the sensitivity verdicts unchanged;
@@ -833,7 +825,7 @@ def test_straddle_only_run_is_testable_for_the_account(tmp_path):
 def test_empty_taken_frame_with_the_column_reports_zero_trade_accounts(tmp_path):
     # One model, every row not_taken: the taken frame is empty but keeps secured_per_contract, so the account table
     # (zero-trade accounts at $100,000) is produced and the not_testable note is not.
-    rows = [_row("m-hsq", "short_vol", arm, NAMES[0], "E01", "2024-02-15", 2, 0.0) for arm in ("as_is", "retuned")]
+    rows = [_row("m-hsq", "short_vol", "as_is", NAMES[0], "E01", "2024-02-15", 2, 0.0)]
     rows += [_row("m-hsq", "straddle", rule, "straddle", "E01", "2024-02-15", 1, 0.0) for rule in RULES]
     universe = pd.DataFrame(_with_account([{**row, "status": "not_taken", "reason": "below_cutoff"} for row in rows]))
     taken = universe[universe["status"] == "taken"]

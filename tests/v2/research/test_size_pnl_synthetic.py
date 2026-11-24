@@ -11,9 +11,9 @@ import yaml
 from engine.v2.ops.errors import OpsError
 from experiments import size_pnl_readers as readers
 from experiments import size_pnl_synthetic as syn
-from experiments import size_pnl_tuning as tuning
+from experiments import size_pnl_receipts as tuning
 from experiments.size_pnl_shortvol import Refusal
-from experiments.size_pnl_tuning import SYNTHETIC_PREFIX
+from experiments.size_pnl_receipts import SYNTHETIC_PREFIX
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 SPEC_PATH = ROOT / "experiments" / "EXP-188_size_decision_pnl_rescore" / "spec.yaml"
@@ -441,25 +441,20 @@ def test_model_id_refuses_predictor_not_in_arm(predictor):
     assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "synthetic_predictor_invalid")
 
 
-# 9. tuning guard
-def test_synthetic_model_cannot_be_tuned_or_receipted(tmp_path):
+# 9. receipt guard (the divisor re-tune was removed by Amendment 6, so only the receipt library guards synthetics)
+def test_synthetic_model_cannot_be_receipted(tmp_path):
     mid = syn.model_id(ARM, syn.predictors(ARM)[1])
+    path = tmp_path / "receipt_x.json"
     with pytest.raises(Refusal) as exc:
-        tuning.tune([], mid)
-    assert exc.value.details["reason"] == "SYNTHETIC_IN_TUNING"
-    path = tmp_path / "tuning_x.json"
-    with pytest.raises(Refusal) as exc:
-        tuning.write_receipt(path, {"stage": "tuning", "model_id": mid, "c": 1.0})
+        tuning.write_receipt(path, {"stage": "inner", "model_id": mid})
     assert exc.value.details["reason"] == "SYNTHETIC_IN_TUNING"
     assert not path.exists()
 
 
 def test_real_model_ids_and_inputs_receipts_still_work(tmp_path):
-    with pytest.raises(ValueError, match="items must not be empty"):
-        tuning.tune([], "M1")
     out = tuning.write_receipt(tmp_path / "inputs.json", {"stage": "inputs"})
     assert out["stage"] == "inputs" and "content_hash" in out
-    real = tuning.write_receipt(tmp_path / "tuning_m1.json", {"stage": "tuning", "model_id": "M1", "c": 1.0})
+    real = tuning.write_receipt(tmp_path / "receipt_m1.json", {"stage": "inner", "model_id": "M1"})
     assert real["model_id"] == "M1"
 
 
@@ -468,7 +463,7 @@ def test_real_model_ids_and_inputs_receipts_still_work(tmp_path):
 # byte-identity of the inner receipts with and without the synthetic arm in
 # tests/v2/research/test_size_pnl_driver_synthetic.py.
 ROSTER_MODULES = ("size_pnl_inputs", "size_pnl_readers", "size_pnl_pool",
-                  "size_pnl_tuning", "size_pnl_report")
+                  "size_pnl_receipts", "size_pnl_report")
 
 
 def _imported_names(source):

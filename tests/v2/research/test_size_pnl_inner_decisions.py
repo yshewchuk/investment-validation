@@ -1,5 +1,5 @@
 """EXP-188: the inner stage's decisions pass (``_inner_decisions``): decisions_inner.parquet, its receipt and its replay.
-Real readers and driver; pool, simulation, scorers and tuning stubbed through ``outer_stubs``."""
+Real readers and driver; pool, simulation and scorers stubbed through ``outer_stubs``. Short vol is as-is only (Amendment 6)."""
 import hashlib
 import json
 
@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from experiments import size_pnl_driver as driver, size_pnl_tuning as tuning
+from experiments import size_pnl_driver as driver, size_pnl_receipts as tuning
 from experiments.size_pnl_shortvol import Refusal
 from tests.v2.research.test_size_pnl_driver import (  # noqa: F401  (bounded, stubs, structure_gate_passes, equivalence_passes are fixtures)
     CONFLICT, OK, bounded, chunk, sources, stubs, structure_gate_passes, equivalence_passes)
@@ -36,43 +36,30 @@ def test_inner_publishes_decisions_for_the_scored_window_only(tmp_path, outer_st
     assert list(frame.columns[:len(FRONT)]) == FRONT
     assert summary["inner_decisions_rows"] == len(frame)
     assert set(frame["book"]) == {"short_vol", "straddle"}
-    assert set(frame.loc[frame["book"] == "short_vol", "arm_or_rule"]) == {"as_is", "retuned"}
+    assert set(frame.loc[frame["book"] == "short_vol", "arm_or_rule"]) == {"as_is"}
     assert set(frame.loc[frame["book"] == "straddle", "arm_or_rule"]) == set(driver.straddle.RULES)
 
 
-def test_inner_decisions_label_only_the_retuned_arm_in_sample(tmp_path, outer_stubs, monkeypatch):
+def test_inner_decisions_carry_no_in_sample_or_c_columns(tmp_path, outer_stubs, monkeypatch):
     _inner(tmp_path, monkeypatch)
     frame = _frame(tmp_path)
-    retuned = frame["arm_or_rule"] == "retuned"
-    assert retuned.any()
-    assert frame.loc[retuned, "in_sample"].all()
-    assert not frame.loc[~retuned, "in_sample"].any()
+    assert "in_sample" not in frame.columns and "c" not in frame.columns
 
 
-def test_inner_retuned_rows_use_the_frozen_c_and_the_receipt_binds_it(tmp_path, outer_stubs, monkeypatch):
-    monkeypatch.setattr(tuning, "tune", lambda items, mid, **kw: {"stage": "tuning", "model_id": mid, "c": 1.25, "skipped": False})
-    seen, scored = set(), driver.shortvol.score_events
-
-    def recording(chunk_, events, sims, name, *, alpha=0.5, c=1.0):
-        seen.add(c)
-        return scored(chunk_, events, sims, name, alpha=alpha, c=c)
-
-    monkeypatch.setattr(driver.shortvol, "score_events", recording)
+def test_inner_decisions_receipt_binds_models_and_has_no_tuning_or_c(tmp_path, outer_stubs, monkeypatch):
     summary = _inner(tmp_path, monkeypatch)
-    assert {1.0, 1.25} <= seen  # as_is scores at unity, retuned at the frozen c
     rec = tuning.load_receipt(tmp_path / "receipts" / "inner_decisions.json")
-    inner = tuning.load_receipt(tmp_path / "receipts" / "inner.json")
     assert rec["stage"] == "inner_decisions"
-    assert rec["c"] == {mid: 1.25 for mid in summary["models"]}
-    assert rec["tuning"] == inner["models"]
+    assert sorted(rec["models"]) == sorted(summary["models"])
+    assert "tuning" not in rec and "c" not in rec
     assert rec["decisions_sha256"] == hashlib.sha256((tmp_path / "decisions_inner.parquet").read_bytes()).hexdigest()
     assert rec["rows"] > 0 and rec["rows"] == summary["inner_decisions_rows"]
     assert rec["emit_from"] == "2023-07-01"
 
 
-def test_inner_json_and_tuning_receipts_do_not_change_content(tmp_path, outer_stubs, monkeypatch):
+def test_inner_json_does_not_change_content(tmp_path, outer_stubs, monkeypatch):
     def receipts(out):
-        return {p.name: p.read_bytes() for p in (out / "receipts").iterdir() if p.name == "inner.json" or p.name.startswith("tuning_")}
+        return {p.name: p.read_bytes() for p in (out / "receipts").iterdir() if p.name == "inner.json"}
 
     real = driver._inner_decisions
     monkeypatch.setattr(driver, "_inner_decisions", lambda *a, **k: 0)
@@ -81,7 +68,7 @@ def test_inner_json_and_tuning_receipts_do_not_change_content(tmp_path, outer_st
     _inner(tmp_path, monkeypatch, out=tmp_path / "real")
     stubbed, actual = receipts(tmp_path / "stubbed"), receipts(tmp_path / "real")
     names = set(stubbed) & set(actual)
-    assert "inner.json" in names and any(n.startswith("tuning_") for n in names)
+    assert "inner.json" in names and not any(p.name.startswith("tuning_") for p in (tmp_path / "real" / "receipts").iterdir())
     assert {n: stubbed[n] for n in names} == {n: actual[n] for n in names}
     assert "decisions_sha256" not in json.loads(actual["inner.json"])
 
@@ -101,21 +88,6 @@ def test_outer_refuses_when_inner_decisions_is_bound_to_other_inputs(tmp_path, o
     rec = tuning.load_receipt(tmp_path / "receipts" / "inner_decisions.json")
     tampered = {k: v for k, v in rec.items() if k != "content_hash"}
     tampered["inputs"] = "0" * 64
-    (tmp_path / "receipts" / "inner_decisions.json").unlink()
-    tuning.write_receipt(tmp_path / "receipts" / "inner_decisions.json", tampered)
-    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
-    with pytest.raises(Refusal) as caught:
-        driver.run(sources(), "outer", tmp_path, prereg=OK)
-    assert caught.value.code == CONFLICT
-    assert caught.value.details["reason"] == "inner_decisions_mismatch"
-
-
-def test_outer_refuses_when_inner_decisions_binds_a_different_c(tmp_path, outer_stubs, monkeypatch):
-    _inner(tmp_path, monkeypatch)
-    rec = tuning.load_receipt(tmp_path / "receipts" / "inner_decisions.json")
-    tampered = {k: v for k, v in rec.items() if k != "content_hash"}
-    mid = sorted(tampered["c"])[0]
-    tampered["c"] = {**tampered["c"], mid: tampered["c"][mid] + 1}
     (tmp_path / "receipts" / "inner_decisions.json").unlink()
     tuning.write_receipt(tmp_path / "receipts" / "inner_decisions.json", tampered)
     use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
@@ -167,7 +139,7 @@ def _marks(ids, pnl, mid_marks):
 
 
 def test_inner_decisions_carry_the_scored_pnl_and_taken_rows(tmp_path, stubs, monkeypatch):
-    def scored_rows(chunk_, events, sims, name, *, alpha=0.5, c=1.0):
+    def scored_rows(chunk_, events, sims, name, *, alpha=0.5):
         return pd.DataFrame({"event_id": events["event_id"].astype(str).to_numpy(), "event_date": events["event_date"].to_numpy(),
                              "structure": name, "status": "scored", "reason": "scored"})
 
@@ -179,7 +151,7 @@ def test_inner_decisions_carry_the_scored_pnl_and_taken_rows(tmp_path, stubs, mo
 
     monkeypatch.setattr(driver.shortvol, "score_events", scored_rows)
     monkeypatch.setattr(driver.shortvol, "decide", lambda scored: scored.assign(cutoff=np.nan, status="taken", reason="taken"))
-    monkeypatch.setattr(driver.shortvol, "score", lambda chunk_, events, mine, name, alpha, *, c=1.0, drop_unquoted=False, mid_marks=False:
+    monkeypatch.setattr(driver.shortvol, "score", lambda chunk_, events, mine, name, alpha, *, drop_unquoted=False, mid_marks=False:
                         _marks(mine["event_id"].astype(str).to_numpy(), (7.0, 9.0), mid_marks))
     monkeypatch.setattr(driver.straddle, "decide", taken_straddle)
     monkeypatch.setattr(driver.straddle, "score", lambda chunk_, events, dec, alpha, mid_marks=False, **kw:
@@ -194,4 +166,4 @@ def test_inner_decisions_carry_the_scored_pnl_and_taken_rows(tmp_path, stubs, mo
     assert (short["status"] == "taken").all() and (short["pnl_dollars"] == 7.0).all()
     assert (short["pnl_dollars_mid"] == 9.0).all() and (short["rung"] == 2).all()
     assert (long["pnl_dollars"] == 5.0).all() and (long["pnl_dollars_mid"] == 6.0).all()
-    assert len(frame) == models * (2 * len(driver.shortvol.NAMES) + len(driver.straddle.RULES))
+    assert len(frame) == models * (len(driver.shortvol.NAMES) + len(driver.straddle.RULES))

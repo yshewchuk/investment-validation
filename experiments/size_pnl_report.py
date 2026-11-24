@@ -19,7 +19,7 @@ import pandas as pd
 
 from experiments.size_pnl_contrast import classify, CLEAR_SHARE, DIRECTIONAL_SHARE
 
-ARMS = ("as_is", "retuned")
+ARMS = ("as_is",)
 POOLS = ("common_2023", "native_full_history")
 STATUSES = ("taken", "not_taken", "undetermined")
 RUNG_ALWAYS = "exit_unquoted_worst_case"
@@ -157,12 +157,11 @@ def t3_forecast(frame, pairs):
     return first + "\n\n" + second
 
 
-def t4_t5_shortvol(scored, n_events, tuning, *, arm):
-    if arm not in ARMS:
-        raise ValueError(f"arm must be one of {ARMS}, got {arm!r}")
-    who = "t4_t5_shortvol"
+def t4_shortvol(scored, n_events):
+    """T4: the short-vol as-is arm only (Amendment 6; there is no re-tuned arm and no T5)."""
+    who = "t4_shortvol"
     _require(scored, ["model_id", "arm", "taken", "pnl_dollars"], who)
-    sub = scored[scored["arm"] == arm]
+    sub = scored[scored["arm"] == "as_is"]
     sub = sub.assign(taken=_flag(sub["taken"], who, "taken"))
     taken = sub[sub["taken"]]
     _finite(taken["pnl_dollars"], who, "pnl_dollars")
@@ -174,19 +173,9 @@ def t4_t5_shortvol(scored, n_events, tuning, *, arm):
         total_cell = f"{total:.2f}"
         per_event = _per_event(total, m, n_events)
         hit = float((pnl > 0).mean()) if len(pnl) else None
-        if arm == "as_is":
-            rows.append([m, 1.0, len(pnl), total_cell, per_event, hit])
-            continue
-        body = tuning.get(m)
-        if body is None:
-            raise ValueError(f"no tuning receipt for model {m!r}")
-        skip = body["skip_reason"] if body["skipped"] else "-"
-        rows.append([m, body["c"], len(pnl), total_cell, per_event, hit, skip])
-    headers = ["model_id", "c", "trades", "total_pnl", "pnl_per_event", "hit_rate"]
-    if arm == "retuned":
-        headers.append("skip_note")
-    title = "T4 Short-vol, as is" if arm == "as_is" else "T5 Short-vol, retuned"
-    return _section(title, headers, rows,
+        rows.append([m, len(pnl), total_cell, per_event, hit])
+    headers = ["model_id", "trades", "total_pnl", "pnl_per_event", "hit_rate"]
+    return _section("T4 Short-vol, as is", headers, rows,
                     note="pnl_per_event = total pnl / candidate events in E (untaken rows count 0). "
                          "hit_rate = share of taken trades with pnl > 0.")
 
@@ -298,5 +287,9 @@ def t11_synthetic(result):
     return [first, second, means, contrasts]
 
 
+AMENDMENT_6_LINE = ("Amendment 6 (post-hoc revision by the user, 2026-11-24): short vol is as-is only; the re-tuned arm, T5 "
+                    "and the divisor c were removed.")
+
+
 def build_report(sections):
-    return "# EXP-188 REPORT\n\n" + "\n\n".join(sections) + "\n"
+    return "# EXP-188 REPORT\n\n" + AMENDMENT_6_LINE + "\n\n" + "\n\n".join(sections) + "\n"

@@ -6,7 +6,6 @@ at exit by the rung rules. Pure functions over numpy/pandas: no I/O, no ledger. 
 call ``simulate``, ``score_events``, ``decide`` and ``score`` per quarter (future); no production caller
 yet. Progress logging: none needed (pure per-quarter functions).
 """
-import itertools
 import math
 
 import numpy as np
@@ -17,14 +16,16 @@ from engine.fills import FillModel
 from engine.forecast_sizing import FORECAST_SIZED, forecast_params
 from engine.portfolio import CONTRACT_MULTIPLIER
 from engine.pnl_sim import DRAWS, trailing_cutoff
-from engine.structures import BUY, PUT, SELL, STRUCTURES, StructureError
+from engine.score import _mean_relative_spread
+from engine.structures import (BUY, PUT, SELL, STRUCTURES, ChainSnapshot, LadderTooCoarse, StructureError,
+                               price_structure)
 from experiments.size_pnl_account import secured_per_contract
 from experiments.size_pnl_pool import MIN_WINDOW, put_means, structure_pnl
 from experiments.size_pnl_straddle import EXIT_UNQUOTED, lots
 
 NAMES = tuple(sorted(FORECAST_SIZED))
 SCORE_COLS = ["event_id", "event_date", "structure", "width", "entry_cost", "rel_spread", "mcap_usd",
-              "exp_pnl_sim", "status", "reason", "alpha", "c"]
+              "exp_pnl_sim", "status", "reason", "alpha"]
 _OUT_COLS = ["event_id", "structure", "entry_cost", "exit_value", "rung", "lots", "pnl_per_share",
              "pnl_dollars"]
 _CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
@@ -65,17 +66,9 @@ def pinned(name):
     return spec
 
 
-def _check_c(c):
-    """``c`` as a float; it divides the forecast, so it must be finite and positive."""
-    value = float(c)
-    if not (math.isfinite(value) and value > 0):
-        raise ValueError(f"c must be finite and > 0, got {c!r}")
-    return value
-
-
-def _width_params(name, pred, c):
-    """Sizing parameters for ``name`` at ``pred / c``, or None when the forecast declines."""
-    return forecast_params(name, _num(pred) / _check_c(c))
+def _width_params(name, pred):
+    """Sizing parameters for ``name`` at production's rule (k=1), or None when the forecast declines."""
+    return forecast_params(name, _num(pred))
 
 
 def _put_slots(chunk, i):
@@ -99,35 +92,62 @@ def _floor_ok(legs):
     return True
 
 
-def resolve(chunk, i, name, pred, c=1.0):
-    """(legs, reason) for event ``i``: every leg as a dict (traded and reference), or (None, reason)."""
-    params = _width_params(name, pred, c)
+def chain_snapshot(chunk, i):
+    """Event ``i``'s put chain at entry quotes, as ``price_structure`` reads it.
+
+    The ladder already chose the single expiry (first_post_event), so the snapshot carries only it, and
+    event_date = expiry makes the selector's inclusive rule return it.
+    """
+    puts = _put_slots(chunk, i)
+    expiry = pd.Timestamp(chunk["expiry"][i])
+    rows = pd.DataFrame({"expiry": [expiry] * puts.size, "dte": [chunk["dte_entry"][i]] * puts.size,
+                         "strike": chunk["strike"][puts], "right": [PUT] * puts.size,
+                         "bid": chunk["bid_e"][puts], "ask": chunk["ask_e"][puts]})
+    return ChainSnapshot(ticker="", obs_date=expiry, event_date=expiry, rows=rows,
+                         spot=float(chunk["spot_entry"][i]))
+
+
+def resolve_priced(chunk, i, name, pred, fill):
+    """(priced, legs, reason) for event ``i``: production's ``StructurePrice`` and every leg as a dict.
+
+    Both resolution and pricing run in ``engine.structures.price_structure``; the dicts carry the listed strikes.
+    On a refusal the result is (None, None, reason).
+    """
+    params = _width_params(name, pred)
     pinned(name)
     if params is None:
-        return None, "width_declined"
+        return None, None, "width_declined"
     spec = STRUCTURES[name](**params)
-    puts = _put_slots(chunk, i)
-    rows = pd.DataFrame({"strike": chunk["strike"][puts], "right": ["P"] * puts.size})
-    resolved = {}
     try:
-        for leg in spec.legs:
-            resolved[leg.name] = leg.strike.select(rows, float(chunk["spot_entry"][i]), resolved, right="P")
+        priced = price_structure(spec, chain_snapshot(chunk, i), fill)
+    except LadderTooCoarse:  # before StructureError: it is a subclass
+        return None, None, "ladder_too_coarse"
     except StructureError:
-        return None, "structure_unresolved"
-    if any(np.isclose(a, b) for a, b in itertools.combinations(resolved.values(), 2)):
-        return None, "ladder_too_coarse"
+        return None, None, "structure_unresolved"
+    except ValueError:  # FillModel refuses a crossed, negative or NaN quote
+        return None, None, "entry_quote_unusable"
+    puts = _put_slots(chunk, i)
     legs = []
-    for leg in spec.legs:
-        hit = puts[np.isclose(chunk["strike"][puts], resolved[leg.name])]
+    for leg in priced.legs:
+        hit = puts[np.isclose(chunk["strike"][puts], leg.strike)]
         if hit.size == 0:
-            return None, "structure_unresolved"
+            return None, None, "structure_unresolved"
         # The LISTED strike, not the arithmetic one: a mirrored leg can be 93.99999999999999 for a listed 94.0,
         # and structure_value needs exact grid equality.
         legs.append({"name": leg.name, "strike": float(chunk["strike"][hit[0]]), "side": leg.side,
                      "qty": float(leg.qty), "idx": int(hit[0])})
     if not _floor_ok(legs):
-        return None, "negative_floor"
-    return legs, None
+        return None, None, "negative_floor"
+    return priced, legs, None
+
+
+def resolve(chunk, i, name, pred):
+    """(legs, reason) for event ``i``: every leg as a dict (traded and reference), or (None, reason).
+
+    Resolution does not depend on alpha, so this resolves at alpha 0.5 and keeps only the legs.
+    """
+    _priced, legs, reason = resolve_priced(chunk, i, name, pred, FillModel(0.5))
+    return legs, reason
 
 
 def simulate(chunk, events, pool, *, draws=DRAWS):
@@ -152,28 +172,17 @@ def simulate(chunk, events, pool, *, draws=DRAWS):
     return out
 
 
-def entry_legs(chunk, legs, fill):
-    """(entry cost per share, mean relative spread), or None when a traded leg has no finite entry quote.
+def entry(priced):
+    """(entry cost per share, mean relative spread), or None when the entry cost is not finite.
 
-    Zero-bid and locked entry quotes are priced normally, as ``price_structure`` does. This is
-    deliberately NOT the straddle's stricter entry rule. The spread averages every resolved leg
-    with a finite quote and a positive mid, reference legs included, exactly as the board does: `engine.score._mean_relative_spread` iterates `priced.legs`
-    (engine/score.py:2476, 5333), which holds the zero-quantity reference legs too. EXP-133's `build.py` averages
-    only used legs; the design (section 5) pins the board's rule.
+    The cost is production's ``StructurePrice.cost``. The spread is production's ``_mean_relative_spread``
+    over all resolved legs, reference legs included, as the board computes it.
     """
-    cost, spreads = 0.0, []
-    for leg in legs:
-        k = leg["idx"]
-        bid, ask = float(chunk["bid_e"][k]), float(chunk["ask_e"][k])
-        finite = math.isfinite(bid) and math.isfinite(ask)
-        if finite and bid + ask > 0:
-            spreads.append((ask - bid) / ((bid + ask) / 2.0))
-        if leg["qty"] > 0:
-            if not finite:
-                return None
-            price = fill.buy(bid, ask) if leg["side"] == BUY else fill.sell(bid, ask)
-            cost += _sign(leg["side"]) * leg["qty"] * float(price)
-    return cost, (float(np.mean(spreads)) if spreads else math.nan)
+    cost = priced.cost
+    if not math.isfinite(cost):
+        return None
+    rel = _mean_relative_spread(priced)
+    return cost, (math.nan if rel is None else rel)
 
 
 def _row(ev, name, **kw):
@@ -181,28 +190,27 @@ def _row(ev, name, **kw):
     row = {"event_id": str(ev["event_id"]), "event_date": ev["event_date"], "structure": name,
            "width": math.nan, "entry_cost": math.nan, "rel_spread": math.nan,
            "mcap_usd": _num(ev["mcap_usd"]), "exp_pnl_sim": math.nan, "status": "undetermined", "reason": None,
-           "alpha": math.nan, "c": math.nan}
+           "alpha": math.nan}
     row.update(kw)
     return row
 
 
-def score_events(chunk, events, sims, name, *, alpha=0.5, c=1.0):
+def score_events(chunk, events, sims, name, *, alpha=0.5):
     """One row per event: ``exp_pnl_sim`` of ``name`` at its entry cost, or the reason it is undetermined."""
     pinned(name)
     fill = FillModel(alpha)
-    _check_c(c)
     pos = {str(e): i for i, e in enumerate(chunk["event_id"])}
     rows = []
     for ev in events.to_dict("records"):
         eid = str(ev["event_id"])
-        params = _width_params(name, ev["pred_move"], c)
-        row = _row(ev, name, width=params["width_moneyness"] if params else math.nan, alpha=alpha, c=c)
+        params = _width_params(name, ev["pred_move"])
+        row = _row(ev, name, width=params["width_moneyness"] if params else math.nan, alpha=alpha)
         sim = sims.get(eid)
         if eid not in pos or sim is None:
             row["reason"] = "unsimulable"
         else:
-            legs, reason = resolve(chunk, pos[eid], name, ev["pred_move"], c)
-            entered = None if legs is None else entry_legs(chunk, legs, fill)
+            priced, legs, reason = resolve_priced(chunk, pos[eid], name, ev["pred_move"], fill)
+            entered = None if legs is None else entry(priced)
             if legs is None:
                 row["reason"] = reason
             elif entered is None:
@@ -279,22 +287,21 @@ def _exit_value(chunk, traded, alpha, mid=False):
     return total
 
 
-def score(chunk, events, decisions, name, alpha, *, c=1.0, drop_unquoted=False, mid_marks=False):
+def score(chunk, events, decisions, name, alpha, *, drop_unquoted=False, mid_marks=False):
     """Marked P&L of the TAKEN events of ``name`` only; ``drop_unquoted`` removes the worst-case rung-3 rows.
 
     ``mid_marks`` values rung-2 legs at ``alpha``, as rung-1 legs are (the Amendment 1 sensitivity arm); the taken set,
-    rung-3 rows and rung labels are unchanged. A decision priced at a different alpha or c than this call is refused,
+    rung-3 rows and rung labels are unchanged. A decision priced at a different alpha than this call is refused,
     not silently re-marked.
     """
     FillModel(alpha)  # validate up front, even when nothing is taken
     pinned(name)
-    _check_c(c)
     if "structure" not in decisions.columns:
         raise ValueError("decisions must carry a structure column")
     if "entry_cost" not in decisions.columns:
         raise ValueError("decisions must carry an entry_cost column")
-    if not {"alpha", "c"} <= set(decisions.columns):
-        raise ValueError("decisions must carry alpha and c columns")
+    if "alpha" not in decisions.columns:
+        raise ValueError("decisions must carry an alpha column")
     pred = dict(zip(events["event_id"].astype(str), events["pred_move"]))
     pos = {str(e): i for i, e in enumerate(chunk["event_id"])}
     mine = decisions[(decisions["status"] == "taken") & (decisions["structure"] == name)]
@@ -303,17 +310,18 @@ def score(chunk, events, decisions, name, alpha, *, c=1.0, drop_unquoted=False, 
         eid = str(dec["event_id"])
         if eid not in pred or eid not in pos:
             raise ValueError(f"taken event {eid!r} is missing from the chunk or events")
-        legs, reason = resolve(chunk, pos[eid], name, pred[eid], c)
+        priced, legs, reason = resolve_priced(chunk, pos[eid], name, pred[eid], FillModel(alpha))
+        if reason == "entry_quote_unusable":
+            raise ValueError(f"taken event {eid!r} has an unusable entry quote")
         if legs is None:
             raise ValueError(f"taken event {eid!r} has no resolvable {name} structure ({reason})")
-        entered = entry_legs(chunk, legs, FillModel(alpha))
+        entered = entry(priced)
         if entered is None:
             raise ValueError(f"taken event {eid!r} has an unusable entry quote")
         cost = entered[0]
         bound = _num(dec["entry_cost"])
-        if not (math.isfinite(bound) and abs(bound - cost) <= 1e-9
-                and _num(dec["alpha"]) == float(alpha) and _num(dec["c"]) == float(c)):
-            raise ValueError("decision was not priced at this alpha and c")
+        if not (math.isfinite(bound) and abs(bound - cost) <= 1e-9 and _num(dec["alpha"]) == float(alpha)):
+            raise ValueError("decision was not priced at this alpha")
         if not (math.isfinite(cost) and cost >= MIN_DEBIT):
             raise ValueError(f"taken event {eid!r} has an entry debit below {MIN_DEBIT} a share ({cost!r})")
         traded = [leg for leg in legs if leg["qty"] > 0]
@@ -332,24 +340,19 @@ def score(chunk, events, decisions, name, alpha, *, c=1.0, drop_unquoted=False, 
     return pd.DataFrame(rows, columns=_OUT_COLS)
 
 
-def secured(chunk, events, decisions, name, c=1.0):
+def secured(chunk, events, decisions, name):
     """[event_id, secured_per_contract] of the TAKEN rows of ``name``: the cash one contract ties up (Amendment 2).
     Legs are resolved exactly as ``score`` resolves them, so the secured cash is the one the traded legs imply."""
     pinned(name)
-    _check_c(c)
     pred = dict(zip(events["event_id"].astype(str), events["pred_move"]))
     pos = {str(e): i for i, e in enumerate(chunk["event_id"])}
     mine = decisions[(decisions["status"] == "taken") & (decisions["structure"] == name)]
-    if not mine.empty and "c" not in decisions.columns:
-        raise ValueError("decisions must carry alpha and c columns")
-    if not mine.empty and any(float(c_col) != float(c) for c_col in mine["c"]):  # refused, not silently re-resolved
-        raise ValueError("decision was not priced at this c")
     rows = []
     for dec in mine.to_dict("records"):
         eid = str(dec["event_id"])
         if eid not in pred or eid not in pos:
             raise ValueError(f"taken event {eid!r} is missing from the chunk or events")
-        legs, reason = resolve(chunk, pos[eid], name, pred[eid], c)
+        legs, reason = resolve(chunk, pos[eid], name, pred[eid])
         if legs is None:
             raise ValueError(f"taken event {eid!r} has no resolvable {name} structure ({reason})")
         rows.append({"event_id": eid, "secured_per_contract": secured_per_contract(legs)})

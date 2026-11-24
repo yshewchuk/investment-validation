@@ -10,7 +10,7 @@ import pandas as pd
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import fail
 from experiments import size_pnl_readers as readers
-from experiments.size_pnl_tuning import SYNTHETIC_PREFIX
+from experiments.size_pnl_receipts import SYNTHETIC_PREFIX
 
 _DENIED = "HOLDOUT_ACCESS_DENIED"
 OUT_OF_SCOPE = "SYNTHETIC_OUT_OF_SCOPE"

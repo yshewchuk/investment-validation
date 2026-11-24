@@ -1,5 +1,5 @@
-"""EXP-188 S9a: inner-stage driver orchestration with small fakes. Real inputs and readers; pool, simulation and tuning
-stubbed."""
+"""EXP-188 S9a: inner-stage driver orchestration with small fakes. Real inputs and readers; pool and simulation
+stubbed. Short vol is as-is only (Amendment 6): there is no divisor re-tune and no tuning receipt."""
 import dataclasses
 import importlib.util
 import json
@@ -17,7 +17,7 @@ from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import OpsError, fail
 from experiments import size_pnl_driver as driver
 from experiments import size_pnl_readers as readers
-from experiments import size_pnl_tuning as tuning
+from experiments import size_pnl_receipts as tuning
 from experiments.size_pnl_shortvol import Refusal
 
 RUN = Path(__file__).resolve().parents[3] / "experiments" / "EXP-188_size_decision_pnl_rescore" / "run.py"
@@ -99,18 +99,13 @@ def equivalence_passes(monkeypatch):
 
 @pytest.fixture
 def stubs(monkeypatch):
-    """Pool, simulation and tuning are stubbed so the tests exercise the driver's own orchestration.
+    """Pool and simulation are stubbed so the tests exercise the driver's own orchestration.
 
-    Returns the call log that the tune stub appends to.
+    Returns an empty call log (the divisor re-tune and its tune stub were removed by Amendment 6).
     """
     log = []
 
-    def fake_tune(items, mid, **kwargs):  # logs every event id in the items
-        log.append(("tune", mid, tuple(sorted(str(e) for _c, ev, _s in items for e in ev["event_id"]))))
-        return {"stage": "tuning", "model_id": mid, "c": 1.0, "skipped": False,
-                "events": sum(len(ev) for _c, ev, _s in items)}
-
-    def fake_scored(chunk_, events, sims, name, *, alpha=0.5, c=1.0):
+    def fake_scored(chunk_, events, sims, name, *, alpha=0.5):
         return pd.DataFrame({"event_id": events["event_id"].astype(str).to_numpy(), "event_date": events["event_date"].to_numpy(),
                              "structure": name, "status": "scored", "reason": "scored"})
 
@@ -120,11 +115,10 @@ def stubs(monkeypatch):
                              "status": "undetermined", "reason": "thin_history"})
 
     monkeypatch.setattr(driver, "build_pool", lambda table, labels: None)
-    monkeypatch.setattr(tuning, "tune", fake_tune)
     monkeypatch.setattr(driver.shortvol, "simulate", SIMS)
     monkeypatch.setattr(driver.shortvol, "score_events", fake_scored)
     monkeypatch.setattr(driver.shortvol, "decide", lambda scored: scored.assign(cutoff=np.nan))
-    monkeypatch.setattr(driver.shortvol, "score", lambda chunk_, events, decisions, name, alpha, *, c=1.0, drop_unquoted=False, mid_marks=False: pd.DataFrame(columns=EMPTY_MARKS))
+    monkeypatch.setattr(driver.shortvol, "score", lambda chunk_, events, decisions, name, alpha, *, drop_unquoted=False, mid_marks=False: pd.DataFrame(columns=EMPTY_MARKS))
     monkeypatch.setattr(driver.straddle, "decide", fake_straddle)
     monkeypatch.setattr(driver.straddle, "score", lambda chunk_, events, dec, alpha, **kw: pd.DataFrame(columns=EMPTY_MARKS))
     return log
@@ -193,9 +187,8 @@ def test_inner_writes_receipts_replays_read_only_and_refuses_a_changed_binding(t
     use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
     src, out = sources(), tmp_path / "out"
     summary = driver.run(src, "inner", out, prereg=OK)
-    mid = summary["models"][0]
     assert sorted(p.name for p in (out / "receipts").iterdir()) == sorted(
-        ["inputs_inner.json", f"tuning_{mid}.json", "inner.json", "inner_decisions.json"])
+        ["inputs_inner.json", "inner.json", "inner_decisions.json"])
     before = {p: (p.stat().st_ino, p.stat().st_mtime_ns) for p in (out / "receipts").iterdir()}
     assert driver.run(src, "inner", out, prereg=OK) == summary  # exact replay succeeds
     assert {p: (p.stat().st_ino, p.stat().st_mtime_ns) for p in (out / "receipts").iterdir()} == before
@@ -212,16 +205,13 @@ def test_inner_receipts_bind_scope_none_and_the_snapshot(tmp_path, stubs, monkey
     mid = summary["models"][0]
     inputs = tuning.load_receipt(tmp_path / "receipts" / "inputs_inner.json")
     inner = tuning.load_receipt(tmp_path / "receipts" / "inner.json")
-    tuned = tuning.load_receipt(tmp_path / "receipts" / f"tuning_{mid}.json")
     assert inputs["scope"] is None and inner["scope"] is None
     assert inputs["snapshot"] == "snap-1"
     assert inputs["crush_table_hash"] == "CTH"
     production = next(m["model_id"] for m in inputs["roster"]["models"] if m["kind"] == "production")
     assert inputs["models"][production] == {"status": "ready"}
-    # Literal content of each receipt (the tune stub's fields, and the bindings between receipts).
-    assert tuned["stage"] == "tuning" and tuned["model_id"] == mid and tuned["c"] == 1.0
     assert inner["stage"] == "inner"
-    assert inner["models"] == {mid: tuned["content_hash"]}
+    assert inner["models"] == [mid]  # the sorted ready model ids; no tuning hash
     assert inner["inputs"] == inputs["content_hash"]
     assert inner["ladder_skipped"] == {}
     assert inner["events_by_model"] == {mid: 1}
@@ -230,56 +220,6 @@ def test_inner_receipts_bind_scope_none_and_the_snapshot(tmp_path, stubs, monkey
         assert digest.startswith("sha256:")
         remainder = digest[len("sha256:"):]
         assert len(remainder) == 64 and set(remainder) <= set("0123456789abcdef")
-
-
-def test_real_tune_skips_with_no_trades_and_binds_the_receipt(tmp_path, monkeypatch):
-    """The real ``tune`` (not stubbed) on a fixture where nothing is taken: the S6 fallback is persisted and bound."""
-    monkeypatch.setattr(driver, "_inner_decisions", lambda *a, **k: 0)  # the decisions pass is tested in test_size_pnl_inner_decisions.py
-    monkeypatch.setattr(driver, "build_pool", lambda table, labels: None)
-    monkeypatch.setattr(driver.shortvol, "simulate", SIMS)
-    scored_ids = lambda chunk_, events, sims, name, **kw: pd.DataFrame({"event_id": events["event_id"].to_numpy(), "reason": None})  # noqa: E731
-    monkeypatch.setattr(tuning, "score_events", scored_ids)
-    monkeypatch.setattr(tuning, "decide", lambda scored: scored.iloc[:0])  # every row undetermined, none taken
-    monkeypatch.setattr(tuning, "score", lambda chunk_, events, mine, name, alpha, c: pd.DataFrame(
-        {"pnl_dollars": pd.Series(dtype=float)}))
-    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
-    summary = driver.run(sources(), "inner", tmp_path, prereg=OK)
-    mid = summary["models"][0]
-    tuned = tuning.load_receipt(tmp_path / "receipts" / f"tuning_{mid}.json")
-    inner = tuning.load_receipt(tmp_path / "receipts" / "inner.json")
-    _c, reason = tuning.choose_c({1.0: 0.0}, 0)  # the literal skip reason for fewer than MIN_TRADES
-    assert tuned["skipped"] is True and tuned["c"] == 1.0 and tuned["trades"] == 0
-    assert tuned["skip_reason"] == reason == "fewer_than_300_inner_trades"
-    assert inner["models"][mid] == tuned["content_hash"]
-
-
-def test_real_tune_selects_the_argmax_and_binds_the_receipt(tmp_path, monkeypatch):
-    """The real ``tune`` (not stubbed) with taken trades: 7 structures x 50 trades per c, so 350 >= MIN_TRADES.
-
-    Only c == 0.75 earns 2.0 per trade, so it has the largest total (700.0); every other c totals 350.0.
-    """
-    monkeypatch.setattr(driver, "_inner_decisions", lambda *a, **k: 0)  # the decisions pass is tested in test_size_pnl_inner_decisions.py
-    monkeypatch.setattr(driver, "build_pool", lambda table, labels: None)
-    monkeypatch.setattr(driver.shortvol, "simulate", SIMS)
-    scored_ids = lambda chunk_, events, sims, name, **kw: pd.DataFrame({"event_id": events["event_id"].to_numpy(), "reason": None})  # noqa: E731
-    monkeypatch.setattr(tuning, "score_events", scored_ids)
-    monkeypatch.setattr(tuning, "decide", lambda scored: scored)  # every row taken; score below sets the trades
-
-    def taken_50(chunk_, events, mine, name, alpha, c):
-        pnl = 2.0 if c == 0.75 else 1.0
-        return pd.DataFrame({"pnl_dollars": np.full(50, pnl)})
-
-    monkeypatch.setattr(tuning, "score", taken_50)
-    use_chunks(monkeypatch, [("2023Q2", chunk("E1"))])
-    summary = driver.run(sources(), "inner", tmp_path, prereg=OK)
-    mid = summary["models"][0]
-    tuned = tuning.load_receipt(tmp_path / "receipts" / f"tuning_{mid}.json")
-    inner = tuning.load_receipt(tmp_path / "receipts" / "inner.json")
-    assert tuned["c"] == 0.75 and tuned["skipped"] is False and tuned["skip_reason"] is None
-    assert tuned["trades"] == 350
-    assert tuned["totals"] == {"0.5": 350.0, "0.6": 350.0, "0.67": 350.0, "0.75": 700.0, "0.9": 350.0,
-                               "1.0": 350.0}
-    assert inner["models"][mid] == tuned["content_hash"]
 
 
 def test_model_events_aligns_every_column_by_event_id():
@@ -336,11 +276,9 @@ def test_an_event_unsimulable_under_one_model_leaves_for_every_model(tmp_path, s
     monkeypatch.setattr(driver, "_sims", sims_of)
     use_chunks(monkeypatch, [("2023Q2", chunk("E1", "E2"))])
     driver.run(sources(), "inner", tmp_path, prereg=OK)
-    tuned = [ids for kind, _mid, ids in stubs if kind == "tune"]
-    assert len(tuned) == 2 and all(ids == ("E1",) for ids in tuned)  # neither model's items hold E2
     inner = tuning.load_receipt(tmp_path / "receipts" / "inner.json")
-    assert inner["common_dropped"] == {"2023Q2": 1}
-    assert inner["events"] == len(tuned[0]) == 1  # the taken population: the common-dropped E2 is not counted
+    assert inner["common_dropped"] == {"2023Q2": 1}  # E2 leaves for every model
+    assert inner["events"] == 1  # the taken population: the common-dropped E2 is not counted
     assert set(inner["events_by_model"].values()) == {inner["events"]}
 
 
@@ -356,14 +294,12 @@ def test_an_event_missing_from_one_table_leaves_for_every_model(tmp_path, stubs,
     monkeypatch.setattr(readers, "model_tables", twinned)
     use_chunks(monkeypatch, [("2023Q2", chunk("E1", "E2", "E3"))])
     driver.run(sources(), "inner", tmp_path, prereg=OK)
-    tuned = [ids for kind, _mid, ids in stubs if kind == "tune"]
-    assert len(tuned) == 2 and all(ids == ("E1", "E2") for ids in tuned)  # E3 is in neither model's items
-    assert tuning.load_receipt(tmp_path / "receipts" / "inner.json")["common_dropped"] == {"2023Q2": 1}
+    assert tuning.load_receipt(tmp_path / "receipts" / "inner.json")["common_dropped"] == {"2023Q2": 1}  # E3 is in neither model's items
 
 
 def test_an_event_declined_at_unity_stays_in_every_models_items_as_a_non_trade(tmp_path, stubs, monkeypatch):
-    """The twin's E2 is non-"scored" (width_declined) at c == 1.0 only. A non-trade is P&L 0 for that (model, structure, c):
-    E2 stays in both models' tuned items, and the receipt counts the twin's declines (one per structure) under its own model."""
+    """The twin's E2 is non-"scored" (width_declined). A non-trade is P&L 0 for that model and structure: E2 stays in both
+    models' items, and the receipt counts the twin's declines (one per structure) under its own model."""
     real, seen = readers.model_tables, {}
 
     def twinned(bound, roster, admitted, production, **kw):
@@ -376,8 +312,8 @@ def test_an_event_declined_at_unity_stays_in_every_models_items_as_a_non_trade(t
     def sims_of(chunk_, events, table, labels):  # the twin's E2 is marked; a marked sim is still a simulation
         return {e: ("undetermined" if table.attrs.get("twin") and e == "E2" else "sim") for e in events["event_id"]}
 
-    def scored_of(chunk_, events, sims, name, c, **kw):  # the twin's E2 is declined at c == 1.0 only
-        declined = [sims.get(e) == "undetermined" and c == 1.0 for e in events["event_id"]]
+    def scored_of(chunk_, events, sims, name, *, alpha=0.5, **kw):  # the twin's E2 is declined
+        declined = [sims.get(e) == "undetermined" for e in events["event_id"]]
         return pd.DataFrame({"event_id": events["event_id"].to_numpy(),
                              "status": ["undetermined" if d else "scored" for d in declined],
                              "reason": ["width_declined" if d else None for d in declined]})
@@ -387,19 +323,17 @@ def test_an_event_declined_at_unity_stays_in_every_models_items_as_a_non_trade(t
     monkeypatch.setattr(driver.shortvol, "score_events", scored_of)
     use_chunks(monkeypatch, [("2023Q2", chunk("E1", "E2"))])
     summary = driver.run(sources(), "inner", tmp_path, prereg=OK)
-    tuned = {mid: ids for kind, mid, ids in stubs if kind == "tune"}
-    assert set(tuned) == set(summary["models"]) and len(tuned) == 2
-    assert all(ids == ("E1", "E2") for ids in tuned.values())  # E2 stays in every model's items
+    assert sorted(summary["models"]) == sorted([next(mid for mid in summary["models"] if mid != "twin"), "twin"])
     inner = tuning.load_receipt(tmp_path / "receipts" / "inner.json")
-    primary = next(mid for mid in tuned if mid != "twin")
+    primary = next(mid for mid in summary["models"] if mid != "twin")
     assert inner["non_trades"] == {primary: {}, "twin": {"width_declined": len(driver.shortvol.NAMES)}}  # 7 == len(NAMES)
     assert inner["missing_facts"] == {primary: {}, "twin": {}}  # a width decline is a non-trade, never a missing fact
     assert inner["common_dropped"] == {"2023Q2": 0}  # the quarter-level count is unchanged; no model-level drop here
 
 
-def test_an_entry_quote_unusable_event_is_a_missing_fact_and_stays_in_tune_items(tmp_path, stubs, monkeypatch):
-    """The twin's E2 is non-"scored" with reason entry_quote_unusable at c == 1.0 only. That is a missing fact, not a non-trade:
-    it is counted under missing_facts and not under non_trades, and the driver keeps E2 in every model's tuned items."""
+def test_an_entry_quote_unusable_event_is_a_missing_fact_and_stays_in_the_items(tmp_path, stubs, monkeypatch):
+    """The twin's E2 is non-"scored" with reason entry_quote_unusable. That is a missing fact, not a non-trade:
+    it is counted under missing_facts and not under non_trades, and the driver keeps E2 in every model's items."""
     real, seen = readers.model_tables, {}
 
     def twinned(bound, roster, admitted, production, **kw):
@@ -412,8 +346,8 @@ def test_an_entry_quote_unusable_event_is_a_missing_fact_and_stays_in_tune_items
     def sims_of(chunk_, events, table, labels):  # the twin's E2 is marked; a marked sim is still a simulation
         return {e: ("undetermined" if table.attrs.get("twin") and e == "E2" else "sim") for e in events["event_id"]}
 
-    def scored_of(chunk_, events, sims, name, c, **kw):  # the twin's E2 has no usable entry quote at c == 1.0 only
-        missing = [sims.get(e) == "undetermined" and c == 1.0 for e in events["event_id"]]
+    def scored_of(chunk_, events, sims, name, *, alpha=0.5, **kw):  # the twin's E2 has no usable entry quote
+        missing = [sims.get(e) == "undetermined" for e in events["event_id"]]
         return pd.DataFrame({"event_id": events["event_id"].to_numpy(),
                              "status": ["undetermined" if m else "scored" for m in missing],
                              "reason": ["entry_quote_unusable" if m else None for m in missing]})
@@ -423,79 +357,11 @@ def test_an_entry_quote_unusable_event_is_a_missing_fact_and_stays_in_tune_items
     monkeypatch.setattr(driver.shortvol, "score_events", scored_of)
     use_chunks(monkeypatch, [("2023Q2", chunk("E1", "E2"))])
     summary = driver.run(sources(), "inner", tmp_path, prereg=OK)
-    tuned = {mid: ids for kind, mid, ids in stubs if kind == "tune"}
-    assert set(tuned) == set(summary["models"]) and len(tuned) == 2
-    assert all(ids == ("E1", "E2") for ids in tuned.values())  # E2 stays in every model's items
+    assert sorted(summary["models"]) == sorted([next(mid for mid in summary["models"] if mid != "twin"), "twin"])
     inner = tuning.load_receipt(tmp_path / "receipts" / "inner.json")
-    primary = next(mid for mid in tuned if mid != "twin")
+    primary = next(mid for mid in summary["models"] if mid != "twin")
     assert inner["missing_facts"] == {primary: {}, "twin": {"entry_quote_unusable": len(driver.shortvol.NAMES)}}  # 7 == len(NAMES)
     assert inner["non_trades"] == {primary: {}, "twin": {}}  # the missing fact is not counted as a non-trade
-
-
-def test_a_declined_off_unity_event_stays_in_every_models_items_for_the_real_tune(tmp_path, monkeypatch):
-    """tuning.decide and tuning.score are stubbed. The real ``tuning.tune`` and ``choose_c`` run on 60 events in 2023-2024 across
-    7 structures. Every event is taken at every c (P&L 1.0 each), so trades[1.0] == 7 * 60 == 420 >= MIN_TRADES. The twin declines
-    one event (V07) at c == 0.5 only: a non-trade for that (model, structure, c), so it stays in both items and only the twin's
-    c == 0.5 total drops. This test covers real tune/choose_c and item retention only."""
-    monkeypatch.setattr(driver, "_inner_decisions", lambda *a, **k: 0)  # the decisions pass is tested in test_size_pnl_inner_decisions.py
-    ids = [f"V{i:02d}" for i in range(60)]
-    dates = [pd.Timestamp("2023-01-10") + pd.Timedelta(days=12 * i) for i in range(60)]  # 2023-01 .. 2024-12
-    base = pd.DataFrame([{"event_id": e, "pred_abs_move": 5.0, "pred_iv_crush_30": -12.0, "horizon_sessions": 1, "abs_move": 4.0,
-                          "crush_pct_iv30": -10.0, "available_as_of_date": (d + pd.Timedelta(days=1)).date().isoformat()}
-                         for e, d in zip(ids, dates)])
-    plan = pd.DataFrame({"event_id": ids, "ticker": "T", "event_date": dates, "session": "AMC",
-                         "entry_date": [d - pd.Timedelta(days=1) for d in dates], "exit_date": [d + pd.Timedelta(days=1) for d in dates]})
-    admitted = readers.Admitted({"events": pd.DataFrame({"event_id": ids, "event_date": pd.DatetimeIndex(dates)}), "excluded": {}})
-    facts = pd.DataFrame({"pre_iv30": 40.0, "mcap_usd": 2e10, "implied_move": 5.0}, index=pd.Index(ids, name="event_id"))
-    src = sources(plan_frame=plan, admitted=admitted, facts=lambda want: facts.reindex(list(want)),
-                  fetch=lambda columns, want: base[base["event_id"].isin(list(want))])
-    real, real_tune, declined, spied = readers.model_tables, tuning.tune, "V07", {}
-
-    def twinned(bound, roster, admitted_, production, **kw):
-        tables = real(bound, roster, admitted_, production, **kw)
-        mid = next(iter(tables))
-        twin = tables[mid]["table"].copy()
-        twin.attrs["twin"] = True
-        return {mid: tables[mid], "twin": {**tables[mid], "table": twin}}
-
-    def sims_of(chunk_, events, table, labels):  # the marker rides in the sims, so score_events can see which model asks
-        return {e: ("twin" if table.attrs.get("twin") else "sim") for e in events["event_id"]}
-
-    def scored_of(chunk_, events, sims, name, alpha=0.5, c=1.0):
-        hit = [sims.get(e) == "twin" and e == declined and c == 0.5 for e in events["event_id"]]
-        return pd.DataFrame({"event_id": events["event_id"].to_numpy(),
-                             "status": ["undetermined" if h else "scored" for h in hit],
-                             "reason": ["width_declined" if h else None for h in hit]})
-
-    def spy(items, mid, **kwargs):  # records the event ids the driver hands tune, then runs the real tune
-        spied[mid] = tuple(sorted(str(e) for _c, events, _s in items for e in events["event_id"]))
-        return real_tune(items, mid, **kwargs)
-
-    groups = {}
-    for eid, d in zip(ids, dates):
-        groups.setdefault(f"{d.year}Q{(d.month - 1) // 3 + 1}", []).append(eid)
-    monkeypatch.setattr(readers, "model_tables", twinned)
-    monkeypatch.setattr(driver, "_sims", sims_of)
-    monkeypatch.setattr(driver.shortvol, "score_events", scored_of)  # the non-trade count in _inner
-    monkeypatch.setattr(tuning, "score_events", scored_of)  # tune's own bound names
-    monkeypatch.setattr(tuning, "decide", lambda scored: scored[scored["status"] == "scored"])
-    monkeypatch.setattr(tuning, "score", lambda chunk_, events, mine, name, alpha, c: pd.DataFrame(
-        {"pnl_dollars": np.ones(len(mine))}))
-    monkeypatch.setattr(tuning, "tune", spy)
-    use_chunks(monkeypatch, [(label, chunk(*eids)) for label, eids in sorted(groups.items())])
-    summary = driver.run(src, "inner", tmp_path, prereg=OK)
-    primary = next(mid for mid in summary["models"] if mid != "twin")
-    assert sorted(summary["models"]) == sorted([primary, "twin"])
-    assert spied == {mid: tuple(sorted(ids)) for mid in summary["models"]}  # V07 is in every model's items
-    tuned = {mid: tuning.load_receipt(tmp_path / "receipts" / f"tuning_{mid}.json") for mid in summary["models"]}
-    for body in tuned.values():
-        assert body["skipped"] is False and body["skip_reason"] is None
-        assert body["trades"] == 7 * 60 and body["c"] == 1.0
-    assert tuned["twin"]["totals"]["0.5"] == 7 * 60 - 7  # the declined event's 7 structure rows are non-trades at c == 0.5
-    assert tuned[primary]["totals"]["0.5"] == 7 * 60
-    inner = tuning.load_receipt(tmp_path / "receipts" / "inner.json")
-    assert inner["non_trades"] == {primary: {}, "twin": {}}  # the count is c == 1.0 only, and nothing is declined at 1.0
-    assert inner["events"] == 60 and inner["events_by_model"] == {primary: 60, "twin": 60}
 
 
 def test_inner_refuses_a_changed_plan_window_on_replay(tmp_path, stubs, monkeypatch):
@@ -828,7 +694,7 @@ def test_ladder_skipped_counts_reach_the_inner_receipt_and_summary(tmp_path, stu
 
 # ---- run.py gate ---------------------------------------------------------------
 
-def test_equivalence_runs_before_tuning_and_is_receipted(tmp_path, stubs, monkeypatch):
+def test_equivalence_runs_before_scoring_and_is_receipted(tmp_path, stubs, monkeypatch):
     def logged(*args, **kwargs):
         stubs.append(("equivalence",))
         return {"checked": 1, "skipped": 0, "max_abs_diff": 0.0}
@@ -837,13 +703,12 @@ def test_equivalence_runs_before_tuning_and_is_receipted(tmp_path, stubs, monkey
     use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
     out = tmp_path / "out"
     summary = driver.run(sources(), "inner", out, prereg=OK)
-    kinds = [entry[0] for entry in stubs]
-    assert kinds.index("equivalence") < kinds.index("tune")
+    assert stubs and {entry[0] for entry in stubs} == {"equivalence"}
     receipt = json.loads((out / "receipts" / "inner.json").read_text())
     assert receipt["equivalence"] == {summary["models"][0]: {"checked": 1, "skipped": 0, "max_abs_diff": 0.0}}
 
 
-def test_a_fast_path_mismatch_aborts_before_any_tuning(tmp_path, stubs, monkeypatch):
+def test_a_fast_path_mismatch_aborts_before_any_inner_receipt(tmp_path, stubs, monkeypatch):
     def mismatch(*args, **kwargs):
         raise fail(CONFLICT, "the fast path disagrees with expected_pnl", details={"reason": "fast_path_mismatch"})
 
@@ -853,10 +718,10 @@ def test_a_fast_path_mismatch_aborts_before_any_tuning(tmp_path, stubs, monkeypa
         driver.run(sources(), "inner", tmp_path / "out", prereg=OK)
     assert caught.value.code == CONFLICT
     assert caught.value.problem.details["reason"] == "fast_path_mismatch"
-    assert not [entry for entry in stubs if entry[0] == "tune"]
+    assert not (tmp_path / "out" / "receipts" / "inner.json").exists()
 
 
-def test_no_simulable_sample_refuses_before_any_tuning(tmp_path, stubs, monkeypatch):
+def test_no_simulable_sample_refuses_before_any_inner_receipt(tmp_path, stubs, monkeypatch):
     monkeypatch.setattr(driver, "_equivalence", lambda *args, **kwargs: None)
     use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
     with pytest.raises(OpsError) as caught:
@@ -864,7 +729,7 @@ def test_no_simulable_sample_refuses_before_any_tuning(tmp_path, stubs, monkeypa
     assert caught.value.code == CONFLICT
     assert caught.value.problem.details["reason"] == "equivalence_empty"
     assert caught.value.problem.details["models"]
-    assert not [entry for entry in stubs if entry[0] == "tune"]
+    assert not (tmp_path / "out" / "receipts" / "inner.json").exists()
 
 
 def _run_main():
@@ -1304,7 +1169,6 @@ def _labels_blanked(*eids):
 def test_inner_event_without_a_label_leaves_every_model_table_and_the_receipts(tmp_path, stubs, monkeypatch):
     use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
     summary = driver.run(sources(fetch=_labels_blanked("E2")), "inner", tmp_path, prereg=OK)
-    assert sorted(stubs) == sorted(("tune", mid, ("E1",)) for mid in summary["models"])  # E1 alone is tuned; E2 is in no table
     inner = tuning.load_receipt(tmp_path / "receipts" / "inner.json")
     assert inner["events_by_model"] == {mid: 1 for mid in summary["models"]}
     assert inner["events"] == 1
