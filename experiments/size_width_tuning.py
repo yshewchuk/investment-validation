@@ -51,8 +51,8 @@ def choose(scores):
 
 
 def units(arm):
-    """Unit name -> member structures: A one account, B one per structure, D the TWIN pair and the five centre-peaked structures."""
-    return {"A": {"all": NAMES}, "B": {n: (n,) for n in NAMES},
+    """Unit name -> member structures: A one account, B and C one per structure, D the TWIN pair and the five centre-peaked structures."""
+    return {"A": {"all": NAMES}, "B": {n: (n,) for n in NAMES}, "C": {n: (n,) for n in NAMES},
             "D": {"T": TWIN, "C": tuple(n for n in NAMES if n not in TWIN)}}[arm]
 
 
@@ -110,13 +110,13 @@ def run_inner(sweep, out, inputs_hash):
 
 
 def _valid(arm, receipt):
-    """True when ``receipt`` is EXP-189 arm ``arm`` on the inner window with a dict body; A, B and D bodies hold exactly the units
+    """True when ``receipt`` is EXP-189 arm ``arm`` on the inner window with a dict body; A, B, C and D bodies hold exactly the units
     of ``arm``, each with its members and a grid k (a bool is not a k)."""
     body = receipt.get("body")
     if not (receipt.get("experiment") == "EXP-189" and receipt.get("arm") == arm and receipt.get("window") == "2023H2-2024"
             and isinstance(body, dict)):
         return False
-    if arm not in ("A", "B", "D"):
+    if arm not in ("A", "B", "C", "D"):
         return True
     try:
         return set(body) == set(units(arm)) and all(
