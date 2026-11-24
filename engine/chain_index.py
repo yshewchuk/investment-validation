@@ -1,11 +1,15 @@
-"""Chain-index twin of :func:`engine.structures.price_structure` (expiry rule only).
+"""Chain-index twin of :func:`engine.structures.price_structure`.
 
-:func:`price_structure_indexed` repeats the ``price_structure`` leg loop; only expiry selection
-differs: it is answered from a per-snapshot numpy index of the distinct expiries (dte plus
-memoised rule results). Strike selection, contract lookup, pricing, the ``LadderTooCoarse``
-check and the messages are the same code, so results are bit-identical. The index is built
-lazily, lives with its snapshot, and calls or snapshots outside the proven shape go whole to
-``price_structure``. The expiry and dte columns are checksummed on every call; a change raises
+:func:`price_structure_indexed` repeats the ``price_structure`` leg loop. Expiry selection is
+answered from a per-snapshot numpy index of the distinct expiries (dte plus memoised rule
+results). Strike selection and the (expiry, right, strike) contract lookup are answered from
+cached numpy arrays of the strike and right columns, grouped by expiry and right. The selection
+rules are copied verbatim from :class:`engine.structures.StrikeSelector`; a case the arrays do
+not cover falls back to the legacy DataFrame path for that leg. bid, ask, dte and delta are read
+live from the snapshot, never cached. Pricing, the ``LadderTooCoarse`` check and the messages are
+the same code, so results are bit-identical. The index is built lazily, lives with its snapshot,
+and calls or snapshots outside the proven shape go whole to ``price_structure``. The checksums
+cover expiry, dte, strike, right and index uniqueness on every call; a change raises
 :class:`ChainSnapshotMutated`. ``ENGINE_CHAIN_INDEX_VERIFY=0`` disables the check.
 """
 from __future__ import annotations
@@ -27,6 +31,7 @@ from engine.structures import (
     ExpirySelector,
     LadderTooCoarse,
     ResolvedLeg,
+    StrikeSelector,
     Structure,
     StructureError,
     StructurePrice,
@@ -54,9 +59,216 @@ def _num(value: Any) -> bool:
     return isinstance(value, _NUM) and bool(np.isfinite(value))
 
 
-def _checksums(rows: pd.DataFrame) -> tuple[int, int]:
+def _checksums(rows: pd.DataFrame) -> tuple[Any, ...]:
     expiry = rows["expiry"].to_numpy().astype("datetime64[ns]").view(np.int64)
-    return zlib.crc32(expiry.tobytes()), zlib.crc32(rows["dte"].to_numpy().tobytes())
+    return (
+        zlib.crc32(expiry.tobytes()),
+        zlib.crc32(rows["dte"].to_numpy().tobytes()),
+        zlib.crc32(rows["strike"].to_numpy().tobytes()),
+        zlib.crc32(pd.util.hash_array(rows["right"].to_numpy()).tobytes()),
+        bool(rows.index.is_unique),
+    )
+
+
+class _Fallback(Exception):
+    """Internal: this leg's strike selection must run the legacy DataFrame path."""
+
+
+class _Group:
+    """Rows of one (expiry, right) group in row order, with lazily built derived arrays."""
+
+    def __init__(self, pos: np.ndarray, st: np.ndarray) -> None:
+        self.pos = pos  # row positions, ascending
+        self.st = st  # strike at each position
+        self._grid: np.ndarray | None = None
+        self._sorted: tuple[np.ndarray, np.ndarray] | None = None
+
+    @property
+    def grid(self) -> np.ndarray:
+        if self._grid is None:
+            grid = np.sort(np.unique(self.st.astype(float)))
+            grid.flags.writeable = False
+            self._grid = grid
+        return self._grid
+
+    def ordered(self) -> tuple[np.ndarray, np.ndarray]:
+        if self._sorted is None:
+            order = np.argsort(self.st, kind="stable")
+            self._sorted = (order, self.st[order])
+        return self._sorted
+
+
+class _StrikeData:
+    """Strike and right arrays of one snapshot. Raises if the columns are not the proven shape."""
+
+    def __init__(self, rows: pd.DataFrame, inv: np.ndarray) -> None:
+        if not rows.index.is_unique:
+            raise ValueError("chain index labels are not unique")
+        for col in ("strike", "right", "bid", "ask", "dte"):
+            if col not in rows.columns:
+                raise KeyError(col)
+        sdtype = rows["strike"].dtype
+        if not (isinstance(sdtype, np.dtype) and sdtype.name in ("float64", "int64")):
+            raise TypeError(f"column 'strike' has unsupported dtype {sdtype}")
+        self.strike = rows["strike"].to_numpy()
+        if not np.isfinite(self.strike).all():
+            raise ValueError("non-finite strike")
+        if pd.api.types.infer_dtype(rows["right"], skipna=False) != "string":
+            raise TypeError("column 'right' must hold strings only")
+        for col in ("bid", "ask"):
+            if rows[col].dtype.kind not in "iuf":
+                raise TypeError(f"column {col!r} has unsupported dtype {rows[col].dtype}")
+        rvals, rinv = np.unique(rows["right"].to_numpy(), return_inverse=True)
+        self.rcode = rinv.reshape(-1)
+        self.rights = {str(v): i for i, v in enumerate(rvals)}
+        self.rows = rows
+        self.inv = inv
+        self.groups: dict[tuple[int, int | None], _Group] = {}
+
+    def group(self, e: int, r: int | None) -> _Group:
+        key = (e, r)
+        grp = self.groups.get(key)
+        if grp is None:
+            mask = self.inv == e
+            if r is not None:
+                mask &= self.rcode == r
+            pos = np.flatnonzero(mask)
+            grp = self.groups[key] = _Group(pos, self.strike[pos])
+        return grp
+
+    @staticmethod
+    def find(grp: _Group, strike: Any) -> int | None:
+        """Local index of the first row whose strike ``np.isclose``-matches ``strike``."""
+        if not (isinstance(strike, _NUM) and np.isfinite(strike)):
+            hit = np.flatnonzero(np.isclose(grp.st, strike))
+            return int(hit[0]) if hit.size else None
+        order, sorted_st = grp.ordered()
+        tol = 1e-8 + 1e-5 * abs(strike)
+        lo = np.searchsorted(sorted_st, strike - 2 * tol, "left")
+        hi = np.searchsorted(sorted_st, strike + 2 * tol, "right")
+        cand = order[lo:hi][np.isclose(sorted_st[lo:hi], strike)]
+        return int(cand.min()) if cand.size else None
+
+    def lookup(self, e: int, right: str, strike: Any) -> int | None:
+        """Row position of the (expiry, right, strike) contract, or None."""
+        rc = self.rights.get(right)
+        if rc is None:
+            return None
+        grp = self.group(e, rc)
+        loc = self.find(grp, strike)
+        return None if loc is None else int(grp.pos[loc])
+
+    def select_strike(self, sel: StrikeSelector, e: int, right: str, spot: float,
+                      resolved: dict[str, float]) -> float:
+        """Mirror of :meth:`StrikeSelector.select` on the cached arrays."""
+        grp = self.group(e, None)
+        if grp.pos.size == 0:
+            raise StructureError("no chain rows at the selected expiry")
+        rc = self.rights.get(right)
+        if rc is not None:
+            same_right = self.group(e, rc)
+            if same_right.pos.size:
+                grp = same_right
+        grid, st = grp.grid, grp.st
+
+        if sel.kind == "bracket":
+            side = grid[grid <= spot] if sel.side == "below" else grid[grid > spot]
+            if side.size == 0:
+                raise StructureError(
+                    f"no listed strike {sel.side} spot {spot:.4f} at this expiry"
+                )
+            anchor = float(side[-1] if sel.side == "below" else side[0])
+            if not sel.steps:
+                return anchor
+            hit = np.flatnonzero(np.isclose(grid, anchor))
+            target = int(hit[0]) + int(sel.steps)
+            if not 0 <= target < grid.size:
+                raise StructureError(
+                    f"{sel.steps:+d} steps from the bracketing strike {anchor:.4f} "
+                    f"runs off the ladder ({grid.size} listed strikes)"
+                )
+            return float(grid[target])
+
+        if sel.kind == "grid_step":
+            if sel.ref not in resolved:
+                raise StructureError(
+                    f"leg {sel.ref!r} must resolve before a grid_step reference to it"
+                )
+            hit = np.flatnonzero(np.isclose(grid, resolved[sel.ref]))
+            if hit.size == 0:
+                raise StructureError(
+                    f"anchor strike {resolved[sel.ref]:.4f} is not on this expiry's grid"
+                )
+            target = int(hit[0]) + int(sel.steps)
+            if not 0 <= target < grid.size:
+                raise StructureError(
+                    f"{sel.steps:+d} grid steps from {resolved[sel.ref]:.4f} runs off "
+                    f"the ladder ({grid.size} listed strikes)"
+                )
+            return float(grid[target])
+
+        if sel.kind == "offset_from":
+            if sel.ref not in resolved:
+                raise StructureError(
+                    f"leg {sel.ref!r} must resolve before an offset_from reference to it"
+                )
+            anchor = resolved[sel.ref]
+            grid = grid[grid > anchor] if sel.moneyness > 0 else grid[grid < anchor]
+            if grid.size == 0:
+                side = "above" if sel.moneyness > 0 else "below"
+                raise StructureError(
+                    f"no listed strike {side} {anchor:.4f} at this expiry"
+                )
+            target = anchor + sel.moneyness * spot
+            return float(grid[np.abs(grid - target).argmin()])
+
+        if sel.kind == "mirror":
+            for name in (sel.ref, sel.about):
+                if name not in resolved:
+                    raise StructureError(
+                        f"leg {name!r} must resolve before a mirror reference to it"
+                    )
+            target = 2.0 * resolved[sel.about] - resolved[sel.ref]
+            if not np.isclose(grid, target).any():
+                raise StructureError(
+                    f"mirrored strike {target:.4f} "
+                    f"(2x{resolved[sel.about]:.4f} - {resolved[sel.ref]:.4f}) "
+                    "is not listed at this expiry"
+                )
+            return float(target)
+
+        if sel.kind == "same_as":
+            if sel.ref not in resolved:
+                raise StructureError(
+                    f"leg {sel.ref!r} must resolve before a same_as reference to it"
+                )
+            target = resolved[sel.ref]
+            if not np.isclose(st, target).any():
+                raise StructureError(
+                    f"strike {target} from leg {sel.ref!r} absent at this expiry"
+                )
+            return float(target)
+
+        if sel.kind == "fixed":
+            if not np.isclose(st, sel.strike).any():
+                raise StructureError(f"strike {sel.strike} absent at this expiry")
+            return float(sel.strike)
+
+        if sel.kind == "delta":
+            if "delta" not in self.rows.columns:
+                raise StructureError("delta selector needs a delta column")
+            dcol = self.rows["delta"].to_numpy()
+            if dcol.dtype != np.float64:
+                raise _Fallback
+            dv = dcol[grp.pos]
+            if np.isnan(dv).all():
+                raise StructureError("delta selector needs a delta column")
+            gap = np.abs(np.abs(dv) - abs(sel.target_delta))
+            return float(st[int(np.nanargmin(gap))])
+
+        target = spot if sel.kind == "atm" else sel.moneyness * spot
+        gap = np.abs(st - target)
+        return float(st[int(np.argmin(gap))])
 
 
 class _ChainIndex:
@@ -89,8 +301,18 @@ class _ChainIndex:
         if np.unique(self.udte).size != self.udte.size:
             raise ValueError("two expiries share a dte")
         self.ts = [pd.Timestamp(rows["expiry"].iloc[int(i)]) for i in first]
+        self.inv = inv
         self.crcs = _checksums(rows)
         self._memo: dict[str, tuple[str, Any]] = {}
+        try:
+            self.sd: _StrikeData | None = _StrikeData(rows, inv)
+        except Exception:
+            self.sd = None  # every leg then takes the legacy path
+
+    def expiry_pos(self, expiry: pd.Timestamp) -> int | None:
+        ns = _ns(expiry)
+        i = int(np.searchsorted(self.uex, ns))
+        return i if i < self.uex.size and int(self.uex[i]) == ns else None
 
     def select_expiry(self, sel: ExpirySelector, event_date: pd.Timestamp,
                       session: str | None) -> pd.Timestamp:
@@ -174,9 +396,11 @@ def _index_for(snapshot: ChainSnapshot) -> _ChainIndex | None:
         return index
 
 
-def _call_eligible(structure: Structure, snapshot: ChainSnapshot) -> bool:
+def _call_eligible(structure: Structure, snapshot: ChainSnapshot, pin: Any = None) -> bool:
     try:
         if snapshot.session is not None and not isinstance(snapshot.session, str):
+            return False
+        if not _num(snapshot.spot_price):
             return False
         for spec in structure.legs:
             if spec.expiry.kind == "fixed":
@@ -184,15 +408,22 @@ def _call_eligible(structure: Structure, snapshot: ChainSnapshot) -> bool:
             for value in (spec.expiry.min_dte, spec.expiry.max_dte, spec.expiry.target_dte):
                 if value is not None and not _num(value):
                     return False
+            sel = spec.strike
+            for value in (sel.moneyness, sel.target_delta, sel.strike, sel.steps):
+                if value is not None and not _num(value):
+                    return False
+        for leg in pin or ():
+            _ns(leg.expiry)
         return True
     except Exception:
         return False
 
 
-def _select_index(structure: Structure, snapshot: ChainSnapshot) -> _ChainIndex | None:
+def _select_index(structure: Structure, snapshot: ChainSnapshot,
+                  pin: Any = None) -> _ChainIndex | None:
     try:
         index = _index_for(snapshot)
-        if index is None or not _call_eligible(structure, snapshot):
+        if index is None or not _call_eligible(structure, snapshot, pin):
             return None
     except Exception:
         return None
@@ -208,43 +439,66 @@ def _select_index(structure: Structure, snapshot: ChainSnapshot) -> _ChainIndex 
 
 def price_structure_indexed(structure: Structure, snapshot: ChainSnapshot, fill: FillModel, *,
                             pin: Any = None, closing: bool = False) -> StructurePrice:
-    """Equal to :func:`price_structure`; expiry selection uses the chain index when eligible."""
-    spot = snapshot.spot_price
-    index = _select_index(structure, snapshot)
+    """Equal to :func:`price_structure`; expiry, strike and contract lookup come from the index."""
+    index = _select_index(structure, snapshot, pin)
     if index is None:
         return price_structure(structure, snapshot, fill, pin=pin, closing=closing)
 
+    spot = snapshot.spot_price
+    sd = index.sd
     rows = snapshot.rows
     pinned = {leg.name: leg for leg in (pin or ())}
     resolved_strikes: dict[str, float] = {}
     out: list[ResolvedLeg] = []
 
     for spec in structure.legs:
+        fast = sd is not None  # strike selection and lookup from the cached arrays
         if spec.name in pinned:
             expiry = pinned[spec.name].expiry
             strike = pinned[spec.name].strike
-            at_expiry = rows[rows["expiry"] == expiry]
-            if at_expiry.empty:
+            if fast:
+                e = index.expiry_pos(expiry)
+                present = e is not None
+            else:
+                at_expiry = rows[rows["expiry"] == expiry]
+                present = not at_expiry.empty
+            if not present:
                 raise StructureError(
                     f"{spec.name}: pinned expiry {expiry.date()} absent from the "
                     f"{snapshot.obs_date.date()} chain"
                 )
         else:
             expiry = index.select_expiry(spec.expiry, snapshot.event_date, snapshot.session)
-            at_expiry = rows[rows["expiry"] == expiry]
-            strike = spec.strike.select(at_expiry, spot, resolved_strikes, right=spec.right)
+            e = index.expiry_pos(expiry) if fast else None
+            try:
+                if e is None:
+                    raise _Fallback
+                strike = sd.select_strike(spec.strike, e, spec.right, spot, resolved_strikes)
+            except _Fallback:
+                fast = False
+                at_expiry = rows[rows["expiry"] == expiry]
+                strike = spec.strike.select(at_expiry, spot, resolved_strikes, right=spec.right)
 
         resolved_strikes[spec.name] = strike
-        hit = at_expiry[
-            np.isclose(at_expiry["strike"], strike) & (at_expiry["right"] == spec.right)
-        ]
-        if hit.empty:
+        if fast:
+            p = sd.lookup(e, spec.right, strike)
+            found = p is not None
+            if found:
+                bid, ask = float(rows["bid"].to_numpy()[p]), float(rows["ask"].to_numpy()[p])
+                dte = int(rows["dte"].to_numpy()[p])
+        else:
+            hit = at_expiry[
+                np.isclose(at_expiry["strike"], strike) & (at_expiry["right"] == spec.right)
+            ]
+            found = not hit.empty
+            if found:
+                row = hit.iloc[0]
+                bid, ask, dte = float(row["bid"]), float(row["ask"]), int(row["dte"])
+        if not found:
             raise StructureError(
                 f"{spec.name}: no {spec.right} at strike {strike} expiry "
                 f"{expiry.date()} on {snapshot.obs_date.date()}"
             )
-        row = hit.iloc[0]
-        bid, ask = float(row["bid"]), float(row["ask"])
         side = _OPPOSITE[spec.side] if closing else spec.side
         out.append(
             ResolvedLeg(
@@ -254,7 +508,7 @@ def price_structure_indexed(structure: Structure, snapshot: ChainSnapshot, fill:
                 qty=spec.qty,
                 expiry=pd.Timestamp(expiry),
                 strike=float(strike),
-                dte=int(row["dte"]),
+                dte=dte,
                 bid=bid,
                 ask=ask,
                 price=float(fill.price(side, bid, ask)),

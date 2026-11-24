@@ -222,9 +222,9 @@ board = score_calendar(horizon_days=21)     # the dashboard's input
 ## 7a. Chain-index twin (`engine/chain_index.py`)
 
 - `price_structure_indexed(structure, snapshot, fill, *, pin=None, closing=False)` equals `price_structure`: same strikes, prices, cash flows and flags, and the same exception types and messages (`LadderTooCoarse` included).
-- Expiry selection runs on a lazily built per-snapshot index (distinct expiries, their dte, memoised rule results); every other step is the legacy pandas code. The index lives with its snapshot.
-- `ChainSnapshot.rows` is treated as immutable once priced through this function; the expiry and dte columns are checksummed on every call and a change raises `ChainSnapshotMutated` (`ENGINE_CHAIN_INDEX_VERIFY=0` disables the check; other columns are not checksummed).
-- A snapshot or call outside the proven shape (tz-aware or NaT expiries, NaN dte, several dte per expiry or one dte shared by expiries, empty rows, non-numeric selector bounds) is sent whole to `price_structure`.
+- Expiry selection runs on a lazily built per-snapshot index (distinct expiries, their dte, memoised rule results). Strike selection (every `StrikeSelector` kind) and the per-leg contract lookup run on cached per-(expiry, right) numpy strike arrays (`searchsorted` window, then the exact `np.isclose`); bid, ask, dte and delta are read live. A leg the arrays do not cover (non-float64 delta) runs the legacy pandas code. The index lives with its snapshot.
+- `ChainSnapshot.rows` is treated as immutable once priced through this function; the expiry, dte, strike and right columns and index uniqueness are checksummed on every call and a change raises `ChainSnapshotMutated` (`ENGINE_CHAIN_INDEX_VERIFY=0` disables the check; bid, ask and delta are never cached).
+- A snapshot or call outside the proven shape (tz-aware or NaT expiries, NaN dte, several dte per expiry or one dte shared by expiries, empty rows, non-numeric selector fields or spot) is sent whole to `price_structure`; a snapshot whose strikes are not finite float64/int64, whose rights are not strings or whose row index is not unique keeps the expiry index but runs strike selection and lookup through the legacy code.
 - `engine/structures.py` and `engine/fills.py` are not modified; nothing in the v14 SIZE closure imports this module (`tests/v2/integration/test_chain_index_closure.py`).
 
 ## 8. Known limits

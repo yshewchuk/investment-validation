@@ -22,6 +22,7 @@ from engine.structures import (
     BUY,
     CALL,
     PUT,
+    SELL,
     STRUCTURES,
     ChainSnapshot,
     ExpirySelector,
@@ -702,7 +703,8 @@ def test_mutation_is_not_checked_with_verify_disabled(monkeypatch):
     second = price_structure_indexed(straddle_through(), priced, MID)  # no ChainSnapshotMutated
     assert second.leg(name).bid != first.leg(name).bid
     assert second.leg(name).bid == new_bid
-    # Only expiry/dte are checksummed; the bid change must still price exactly as legacy does.
+    # bid/ask/dte/delta are read live and strike/right/expiry/dte are checksummed; the bid
+    # change must still price exactly as legacy does.
     assert second.to_dict() == price_structure(straddle_through(), priced, MID).to_dict()
 
 
@@ -726,7 +728,8 @@ def test_verify_mode_does_not_checksum_bid():
     assert first.legs
     name = _bump_selected_bid(priced, first)
     new_bid = _selected_rows(priced, first.legs[0])["bid"].iloc[0]
-    # Documented: only expiry and dte are checksummed, so a bid change is not refused.
+    # Documented: bid/ask/dte/delta are read live and strike/right/expiry/dte are checksummed,
+    # so a bid change is not refused.
     second = price_structure_indexed(straddle_through(), priced, MID)
     assert second.legs
     assert second.leg(name).bid != first.leg(name).bid
@@ -798,3 +801,654 @@ def test_registry_entry_dropped_when_snapshot_dies():
     del priced
     gc.collect()
     assert key not in ci._INDEXES
+
+
+# --------------------------------------------------------------------------
+# 14. strike selection and contract lookup
+# --------------------------------------------------------------------------
+
+
+def _S(kind, **kw):
+    return StrikeSelector(kind, **kw)
+
+
+def _kind_cases():
+    cases = []
+
+    def add(label, build):
+        cases.append((label, build))
+
+    add("atm-put", lambda: _struct(_leg("a", strike=_S("atm"), right=PUT)))
+    add("atm-call", lambda: _struct(_leg("a", strike=_S("atm"), right=CALL)))
+    for m in (0.97, 1.0, 1.03, 0.0, 50.0):
+        for r in (PUT, CALL):
+            add(f"moneyness-{m}-{r}", lambda m=m, r=r: _struct(
+                _leg("a", strike=_S("moneyness", moneyness=m), right=r)))
+    for d in (0.1, 0.25, 0.5):
+        for r in (PUT, CALL):
+            add(f"delta-{d}-{r}", lambda d=d, r=r: _struct(
+                _leg("a", strike=_S("delta", target_delta=d), right=r)))
+    for k in (100.0, 100.0 + 1e-9, 100.0 + 1e-4, 123456.0, 99.5):
+        for r in (PUT, CALL):
+            add(f"fixed-{k!r}-{r}", lambda k=k, r=r: _struct(
+                _leg("a", strike=_S("fixed", strike=k), right=r)))
+    for side in ("below", "above"):
+        for steps in (None, 0, 1, -1, 3, -3, 500, -500):
+            add(f"bracket-{side}-{steps}", lambda side=side, steps=steps: _struct(
+                _leg("a", strike=_S("bracket", side=side, steps=steps),
+                     right=PUT if side == "below" else CALL)))
+    for s in (1, -1, 2, -2, 500, -500):
+        add(f"grid-step-{s}", lambda s=s: _struct(
+            _leg("a", strike=ATM, right=PUT),
+            _leg("b", strike=_S("grid_step", ref="a", steps=s), right=CALL)))
+    for m in (0.03, -0.03, 0.0001, 5.0, -5.0):
+        add(f"offset-from-{m}", lambda m=m: _struct(
+            _leg("a", strike=ATM, right=PUT),
+            _leg("b", strike=_S("offset_from", ref="a", moneyness=m), right=CALL)))
+    add("mirror-bracket-below-listed", lambda: _struct(
+        _leg("a", strike=ATM, right=PUT),
+        _leg("b", strike=_S("bracket", side="below"), right=CALL),
+        _leg("c", strike=_S("mirror", ref="a", about="b"), right=PUT)))
+    add("mirror-above-listed", lambda: _struct(
+        _leg("a", strike=ATM, right=PUT),
+        _leg("b", strike=_S("bracket", side="above"), right=CALL),
+        _leg("c", strike=_S("mirror", ref="a", about="b"), right=CALL)))
+    add("mirror-unlisted", lambda: _struct(
+        _leg("a", strike=_S("moneyness", moneyness=1.03), right=PUT),
+        _leg("b", strike=ATM, right=CALL),
+        _leg("c", strike=_S("mirror", ref="a", about="b"), right=PUT)))
+    add("same-as-call-of-put", lambda: _struct(
+        _leg("a", strike=ATM, right=PUT),
+        _leg("b", strike=_S("same_as", ref="a"), right=CALL)))
+    add("same-as-put-of-call", lambda: _struct(
+        _leg("a", strike=ATM, right=CALL),
+        _leg("b", strike=_S("same_as", ref="a"), right=PUT)))
+    add("same-as-unlisted-anchor", lambda: _struct(
+        _leg("a", strike=_S("fixed", strike=99.5), right=PUT),
+        _leg("b", strike=_S("same_as", ref="a"), right=CALL)))
+    add("qty0-reference-leg", lambda: _struct(
+        LegSpec("a", PUT, BUY, FIRST_POST, ATM, 0.0),
+        _leg("b", strike=_S("grid_step", ref="a", steps=1), right=CALL)))
+    add("two-legs-same-contract", lambda: _struct(
+        _leg("a", strike=ATM, right=PUT),
+        _leg("b", strike=_S("same_as", ref="a"), right=PUT)))
+    add("two-legs-same-as-both", lambda: _struct(
+        _leg("a", strike=ATM, right=PUT),
+        _leg("b", strike=_S("same_as", ref="a"), right=PUT),
+        _leg("c", strike=_S("same_as", ref="a"), right=CALL)))
+    return cases
+
+
+KIND_CASES = _kind_cases()
+
+
+@pytest.mark.parametrize("label,build", KIND_CASES, ids=[case[0] for case in KIND_CASES])
+@pytest.mark.parametrize("spacing", [0.5, 1.0, 5.0])
+@pytest.mark.parametrize("rights", ["CP", "P"])
+@pytest.mark.parametrize("delta", [True, False])
+@pytest.mark.parametrize("session", ["AMC", "BMO"])
+@pytest.mark.parametrize("fill_name", ["MID", "WORST"])
+def test_every_strike_kind_matches_legacy(label, build, spacing, rights, delta, session, fill_name):
+    rows = make_chain(spacing=spacing, rights=rights, delta=delta, n_strikes=21)
+    assert_same(build(), lambda: snap(rows.copy(), session), FILLS[fill_name])
+
+
+DANGLING_CASES = [
+    ("grid-step-ref-missing", lambda: _struct(_leg("a", strike=_S("grid_step", ref="zz", steps=1)))),
+    ("offset-from-ref-missing", lambda: _struct(
+        _leg("a", strike=_S("offset_from", ref="zz", moneyness=0.03)))),
+    ("same-as-ref-missing", lambda: _struct(_leg("a", strike=_S("same_as", ref="zz")))),
+    ("mirror-ref-missing", lambda: _struct(
+        _leg("a", strike=ATM), _leg("b", strike=_S("mirror", ref="zz", about="a")))),
+    ("mirror-about-missing", lambda: _struct(
+        _leg("a", strike=ATM), _leg("b", strike=_S("mirror", ref="a", about="zz")))),
+    ("forward-reference", lambda: _struct(
+        _leg("a", strike=_S("same_as", ref="b")), _leg("b", strike=ATM))),
+]
+
+
+@pytest.mark.parametrize("label,build", DANGLING_CASES, ids=[case[0] for case in DANGLING_CASES])
+def test_refs_to_missing_or_later_legs_refused_at_construction(label, build):
+    # A dangling or forward reference never reaches pricing: Structure refuses it first.
+    with pytest.raises(ValueError, match="is not a leg|resolves later"):
+        build()
+
+
+TWO_A = [98.0, 99.0, 100.0, 101.0, 102.0]
+TWO_B = [98.0, 100.0, 102.0]
+
+
+def _same_as_pair():
+    return _struct(
+        _leg("a", _fixed(A_DAY), _S("fixed", strike=100.0), right=PUT),
+        _leg("b", _fixed(B_DAY), _S("same_as", ref="a"), right=PUT),
+    )
+
+
+def _grid_pair(anchor):
+    return _struct(
+        _leg("a", _fixed(A_DAY), _S("fixed", strike=anchor), right=PUT),
+        _leg("b", _fixed(B_DAY), _S("grid_step", ref="a", steps=1), right=PUT),
+    )
+
+
+def _mirror_pair():
+    return _struct(
+        _leg("a", _fixed(A_DAY), _S("fixed", strike=100.0), right=PUT),
+        _leg("c", _fixed(B_DAY), _S("fixed", strike=101.0), right=PUT),
+        _leg("b", _fixed(B_DAY), _S("mirror", ref="a", about="c"), right=PUT),
+    )
+
+
+def _fixed_pair():
+    return _struct(
+        _leg("a", _fixed(A_DAY), _S("fixed", strike=100.0), right=PUT),
+        _leg("b", _fixed(B_DAY), _S("fixed", strike=100.0), right=PUT),
+    )
+
+
+TWO_EXPIRY_CASES = [
+    ("same-as-listed-on-both", _same_as_pair, TWO_A, TWO_B),
+    ("same-as-absent-on-b", _same_as_pair, TWO_A, [98.0, 99.0, 101.0]),
+    ("grid-step-anchor-off-b-grid", lambda: _grid_pair(99.0), TWO_A, TWO_B),
+    ("grid-step-anchor-on-b-grid", lambda: _grid_pair(99.0), TWO_A, [98.0, 99.0, 100.0, 101.0]),
+    ("mirror-listed-on-b", _mirror_pair, TWO_A, [100.0, 101.0, 102.0]),
+    ("mirror-unlisted-on-b", _mirror_pair, TWO_A, [100.0, 101.0, 103.0]),
+    ("fixed-on-one-expiry-only", _fixed_pair, TWO_A, [98.0, 102.0]),
+    ("fixed-on-both-expiries", _fixed_pair, TWO_A, TWO_B),
+]
+
+
+@pytest.mark.parametrize("label,build,a_strikes,b_strikes", TWO_EXPIRY_CASES,
+                         ids=[case[0] for case in TWO_EXPIRY_CASES])
+def test_strike_across_two_expiries(label, build, a_strikes, b_strikes):
+    rows = _two_expiry_chain(a_strikes, b_strikes)
+    assert_same(build(), lambda: snap(rows.copy(), "AMC"), MID)
+
+
+def test_missing_right_falls_back_to_all_rights_then_lookup_fails():
+    rows = _two_expiry_chain([100.0], [100.0])  # puts only
+    structure = _struct(_leg("a", _fixed(A_DAY), _S("atm"), right=CALL))
+    legacy = assert_same(structure, lambda: snap(rows.copy(), "AMC"), MID)
+    assert legacy[0] == "err" and legacy[1] is StructureError
+    assert "no C at strike" in legacy[2]
+
+
+DELTA_KINDS = ("all-nan", "some-nan", "tie", "float32", "object")
+
+
+def _delta_chain(kind):
+    if kind == "tie":
+        rows = make_chain(strikes=[99.0, 101.0], rights="P", delta=True)
+        rows["delta"] = -0.25  # every row ties on |delta|
+        return rows
+    rows = make_chain(rights="CP", delta=True)
+    if kind == "all-nan":
+        rows["delta"] = np.nan
+    elif kind == "some-nan":
+        rows.loc[rows.index[::3], "delta"] = np.nan
+    elif kind == "float32":
+        rows["delta"] = rows["delta"].astype("float32")
+    elif kind == "object":
+        rows["delta"] = rows["delta"].astype(object)
+    return rows
+
+
+@pytest.mark.parametrize("kind", DELTA_KINDS)
+@pytest.mark.parametrize("target", [0.1, 0.25, 0.5])
+@pytest.mark.parametrize("right", [PUT, CALL])
+@pytest.mark.parametrize("order", ["asis", "reversed", "shuffled"])
+def test_delta_edge_cases_match_legacy(kind, target, right, order):
+    rows = _reorder(_delta_chain(kind), order)
+    structure = _struct(_leg("a", strike=_S("delta", target_delta=target), right=right))
+    legacy = assert_same(structure, lambda: snap(rows.copy(), "AMC"), MID)
+    if kind == "tie" and right == PUT:
+        assert legacy[0] == "ok"
+        first_put = float(rows.loc[rows["right"] == PUT, "strike"].iloc[0])
+        assert legacy[1].legs[0].strike == first_put  # first row in row order wins
+
+
+def _dup_tie_chain():
+    base = make_chain(spot=100.5, strikes=[100.0, 101.0], rights="CP", delta=True)
+    return _concat(base, base.assign(bid=base["bid"] * 0.5)), 100.5
+
+
+def _tol_pair_chain():
+    base = make_chain(spot=100.0, strikes=[100.0, 100.0000005, 101.0], rights="CP", delta=True)
+    return _concat(base, base.assign(bid=base["bid"] * 0.5)), 100.0
+
+
+ROW_ORDER_CHAINS = {"dup-tie": _dup_tie_chain, "tol-pair": _tol_pair_chain}
+
+ROW_ORDER_SELECTIONS = {
+    "atm": lambda: _struct(_leg("a", strike=ATM, right=CALL)),
+    "moneyness": lambda: _struct(_leg("a", strike=_S("moneyness", moneyness=1.0), right=PUT)),
+    "delta": lambda: _struct(_leg("a", strike=_S("delta", target_delta=0.5), right=CALL)),
+    "fixed": lambda: _struct(_leg("a", strike=_S("fixed", strike=100.0), right=PUT)),
+    "bracket": lambda: _struct(_leg("a", strike=_S("bracket", side="below"), right=CALL)),
+    "same_as": lambda: _struct(
+        _leg("a", strike=ATM, right=CALL),
+        _leg("b", strike=_S("same_as", ref="a"), right=PUT)),
+}
+
+
+@pytest.mark.parametrize("order", ["asis", "reversed", "shuffled"])
+@pytest.mark.parametrize("chain_name", list(ROW_ORDER_CHAINS))
+@pytest.mark.parametrize("selection", list(ROW_ORDER_SELECTIONS))
+def test_first_row_in_row_order_wins(order, chain_name, selection):
+    chain, spot = ROW_ORDER_CHAINS[chain_name]()
+    rows = _reorder(chain, order)
+    legacy = assert_same(ROW_ORDER_SELECTIONS[selection](), lambda: snap(rows.copy(), "AMC", spot=spot), MID)
+    if legacy[0] == "ok":
+        for leg in legacy[1].legs:
+            hit = rows[(rows["expiry"] == leg.expiry) & (rows["right"] == leg.right)
+                       & np.isclose(rows["strike"], leg.strike)]
+            assert leg.bid == float(hit["bid"].iloc[0]), (leg.name, order)
+
+
+def _obj_with(series, value):
+    arr = series.to_numpy(dtype=object, copy=True)
+    arr[0] = value
+    return arr
+
+
+UNINDEXABLE_STRIKE_SHAPES = {
+    "float32-strike": lambda r: r.assign(strike=r["strike"].astype("float32")),
+    "nan-strike": lambda r: r.assign(
+        strike=np.where(np.arange(len(r)) == 0, np.nan, r["strike"].to_numpy(float))),
+    "inf-strike": lambda r: r.assign(
+        strike=np.where(np.arange(len(r)) == 0, np.inf, r["strike"].to_numpy(float))),
+    "right-none": lambda r: r.assign(right=_obj_with(r["right"], None)),
+    "right-nan": lambda r: r.assign(right=_obj_with(r["right"], np.nan)),
+    "non-unique-index": lambda r: pd.concat([r, r]),
+}
+
+INDEXABLE_SHAPES = {
+    "int64-strike": lambda r: r.assign(strike=r["strike"].astype("int64")),
+    "right-lowercase": lambda r: r.assign(right=r["right"].str.lower()),
+}
+
+SHAPE_STRUCTURES = [
+    ("straddle", straddle_through),
+    ("condor", put_condor),
+    ("one-put", lambda: _struct(_leg("a", right=PUT))),
+]
+
+
+@pytest.mark.parametrize("shape", list(UNINDEXABLE_STRIKE_SHAPES))
+@pytest.mark.parametrize("sname,structure_fn", SHAPE_STRUCTURES, ids=[s[0] for s in SHAPE_STRUCTURES])
+def test_unindexable_strike_shapes_fall_back_identically(shape, sname, structure_fn):
+    rows = UNINDEXABLE_STRIKE_SHAPES[shape](make_chain(rights="CP", delta=True))
+    index = ci._index_for(snap(rows.copy(), "AMC"))
+    assert index is not None and index.sd is None, shape
+    assert_same(structure_fn(), lambda: snap(rows.copy(), "AMC"), MID)
+
+
+@pytest.mark.parametrize("shape", list(INDEXABLE_SHAPES))
+@pytest.mark.parametrize("sname,structure_fn", SHAPE_STRUCTURES, ids=[s[0] for s in SHAPE_STRUCTURES])
+def test_indexable_strike_shapes_are_served(shape, sname, structure_fn):
+    rows = INDEXABLE_SHAPES[shape](make_chain(rights="CP", delta=True))
+    index = ci._index_for(snap(rows.copy(), "AMC"))
+    assert index is not None and index.sd is not None, shape
+    assert_same(structure_fn(), lambda: snap(rows.copy(), "AMC"), MID)
+
+
+def test_normal_chain_is_indexed_with_strike_data():
+    priced = snap(make_chain(rights="CP", delta=True), "AMC")
+    index = ci._index_for(priced)
+    assert index is not None and index.sd is not None
+
+
+def _tol_pin_case(label, pin_strike, listed):
+    return pytest.param(pin_strike, listed, id=label)
+
+
+PIN_STRIKE_CASES = [
+    _tol_pin_case("absent", 100.0, [99.0, 101.0]),
+    _tol_pin_case("nan", float("nan"), [99.0, 100.0, 101.0]),
+    _tol_pin_case("inf", float("inf"), [99.0, 100.0, 101.0]),
+    _tol_pin_case("rel-edge-minus", 100.0 * (1 + 1e-5) - 1e-9, [100.0]),
+    _tol_pin_case("rel-edge-plus", 100.0 * (1 + 1e-5) + 1e-9, [100.0]),
+    _tol_pin_case("abs-edge-minus", 100.0 + 1e-8 - 1e-9, [100.0]),
+    _tol_pin_case("abs-edge-plus", 100.0 + 1e-8 + 1e-9, [100.0]),
+    _tol_pin_case("rel-outside", 100.0 * (1 + 1e-5) + 1e-7, [100.0]),
+]
+
+
+@pytest.mark.parametrize("pin_strike,listed", PIN_STRIKE_CASES)
+def test_pinned_strike_against_other_chain(pin_strike, listed):
+    structure = _struct(_leg("a", right=PUT))
+    entry = price_structure(structure, snap(make_chain(rights="P", delta=False), "AMC"), MID)
+    pin = (dataclasses.replace(entry.legs[0], strike=pin_strike),)
+    chain_b = make_chain(strikes=listed, rights="P", delta=False)
+    assert_same(structure, lambda: snap(chain_b.copy(), "AMC"), MID, pin=pin, closing=True)
+
+
+@pytest.mark.parametrize("bad_expiry", [pd.Timestamp("2026-05-01"), pd.Timestamp("2026-03-18")])
+def test_pinned_expiry_absent_on_other_chain_edges(bad_expiry):
+    structure = _struct(_leg("a", right=PUT))
+    entry = price_structure(structure, snap(make_chain(rights="P", delta=False), "AMC"), MID)
+    pin = (dataclasses.replace(entry.legs[0], expiry=bad_expiry),)
+    legacy = assert_same(structure, lambda: snap(make_chain(rights="P", delta=False), "AMC"), MID,
+                         pin=pin, closing=True)
+    assert legacy[0] == "err" and legacy[1] is StructureError
+    assert "absent from the" in legacy[2]
+
+
+@pytest.mark.parametrize("bad_expiry", [
+    pd.Timestamp("2026-03-17", tz="UTC"),
+    date(2026, 3, 17),
+    "2026-03-17",
+])
+def test_pin_with_unsupported_expiry_goes_whole_to_legacy(bad_expiry):
+    structure = _struct(_leg("a", right=PUT))
+    chain = make_chain(rights="P", delta=False)
+    entry = price_structure(structure, snap(chain.copy(), "AMC"), MID)
+    pin = (dataclasses.replace(entry.legs[0], expiry=bad_expiry),)
+    assert ci._select_index(structure, snap(chain.copy(), "AMC"), pin) is None
+    assert_same(structure, lambda: snap(chain.copy(), "AMC"), MID, pin=pin)
+
+
+def _pin_ref_structure(kind):
+    a = _leg("a", strike=ATM, right=PUT)
+    if kind == "same_as":
+        return _struct(a, _leg("b", strike=_S("same_as", ref="a"), right=CALL))
+    if kind == "grid_step":
+        return _struct(a, _leg("b", strike=_S("grid_step", ref="a", steps=1), right=CALL))
+    if kind == "offset_from":
+        return _struct(a, _leg("b", strike=_S("offset_from", ref="a", moneyness=0.03), right=CALL))
+    return _struct(
+        a,
+        _leg("c", strike=_S("fixed", strike=101.0), right=CALL),
+        _leg("b", strike=_S("mirror", ref="a", about="c"), right=PUT),
+    )
+
+
+@pytest.mark.parametrize("kind", ["same_as", "grid_step", "offset_from", "mirror"])
+def test_pin_on_leg_a_while_leg_b_references_it(kind):
+    structure = _pin_ref_structure(kind)
+    entry = price_structure(structure, snap(make_chain(rights="CP", delta=True), "AMC"), MID)
+    pin = tuple(leg for leg in entry.legs if leg.name == "a")
+    chain_b = make_chain(spot=103.0, seed=1, rights="CP", delta=True)
+    assert_same(structure, lambda: snap(chain_b.copy(), "AMC", spot=103.0), MID,
+                pin=pin, closing=True)
+
+
+WINDOW_K = (0.0, 1e-9, 1.0, 100.0, 1e5)
+
+
+def _window_offsets(K):
+    tol = 1e-8 + 1e-5 * abs(K)
+    return {
+        "zero": 0.0,
+        "edge-in-plus": tol * (1 - 1e-12),
+        "edge-in-minus": -tol * (1 - 1e-12),
+        "edge-out-plus": tol * (1 + 1e-12),
+        "edge-out-minus": -tol * (1 + 1e-12),
+        "two-tol-plus": 2 * tol,
+        "two-tol-minus": -2 * tol,
+    }
+
+
+@pytest.mark.parametrize("K", WINDOW_K, ids=repr)
+@pytest.mark.parametrize("dname", list(_window_offsets(1.0)))
+def test_isclose_window_boundaries(K, dname):
+    d = _window_offsets(K)[dname]
+    structure = _struct(_leg("a", strike=_S("fixed", strike=K), right=PUT))
+    rows = make_chain(strikes=[K + d, K + 1.0, K - 1.0], rights="P", delta=False)
+    legacy = assert_same(structure, lambda: snap(rows.copy(), "AMC"), MID)
+    if dname == "zero":
+        assert legacy[0] == "ok"
+    # Pinned lookup of the same strike on the same listed chain, closing.
+    entry_rows = make_chain(strikes=[K], rights="P", delta=False)
+    entry = price_structure(structure, snap(entry_rows, "AMC"), MID)
+    pin = (dataclasses.replace(entry.legs[0], strike=K),)
+    assert_same(structure, lambda: snap(rows.copy(), "AMC"), MID, pin=pin, closing=True)
+
+
+RANDOM_EXPIRY_POOL = (
+    (A_DAY, 1),
+    (B_DAY, 8),
+    (date(2026, 3, 24), 15),
+    (date(2026, 4, 14), 36),
+)
+REF_KINDS = ("grid_step", "offset_from", "mirror", "same_as")
+RANDOM_KINDS = ("atm", "moneyness", "delta", "fixed", "bracket") + REF_KINDS
+
+
+def _random_strike_case(seed):
+    rng = np.random.default_rng(seed)
+    spacing = float(rng.choice([0.01, 0.5, 1.0, 2.5, 5.0]))
+    n_strikes = int(rng.integers(9, 31))
+    base = round(100.0 / spacing) * spacing
+    strikes = base + (np.arange(n_strikes) - n_strikes // 2) * spacing
+    strikes = strikes[(strikes > 0) & (rng.random(n_strikes) > 0.1)]
+    n_exp = int(rng.integers(1, 4))
+    idx = sorted(rng.choice(len(RANDOM_EXPIRY_POOL), size=n_exp, replace=False).tolist())
+    expiries = tuple(RANDOM_EXPIRY_POOL[i] for i in idx)
+    rights = "CP" if rng.random() < 0.6 else "P"
+    rows = make_chain(seed=int(rng.integers(1 << 30)), expiries=expiries, strikes=strikes,
+                      rights=rights, delta=bool(rng.random() < 0.7))
+    if rng.random() < 0.3:  # duplicate contract rows
+        dup = rows.sample(n=int(rng.integers(1, 6)), random_state=int(rng.integers(1 << 30)))
+        rows = _concat(rows, dup)
+    if "delta" in rows.columns:  # sprinkle NaN deltas
+        delta = rows["delta"].to_numpy(copy=True)
+        delta[rng.random(len(delta)) < 0.05] = np.nan
+        rows["delta"] = delta
+    rows = rows.sample(frac=1.0, random_state=int(rng.integers(1 << 30))).reset_index(drop=True)
+    spot = float(rng.choice([99.0, 100.0, 100.5, 103.0]))
+    session = SESSIONS[int(rng.integers(len(SESSIONS)))]
+    fill = list(FILLS.values())[int(rng.integers(len(FILLS)))]
+    closing = bool(rng.random() < 0.3)
+    legs = _random_legs(rng, strikes)
+    return rows, spot, session, fill, closing, legs
+
+
+def _random_legs(rng, strikes):
+    legs, names = [], []
+    for i in range(int(rng.integers(1, 5))):
+        right = CALL if rng.random() < 0.5 else PUT
+        side = BUY if rng.random() < 0.5 else SELL
+        qty = float(rng.choice([1.0, 1.0, 2.0, 0.0]))
+        if rng.random() < 0.8:
+            expiry = FIRST_POST
+        else:
+            expiry = ExpirySelector("nearest_dte", target_dte=int(rng.choice([3, 10, 20, 40])))
+        pool = [k for k in RANDOM_KINDS if names or k not in REF_KINDS]
+        kind = pool[int(rng.integers(len(pool)))]
+
+        def ref():
+            if rng.random() < 0.05:  # sometimes dangling
+                return "ghost"
+            return names[int(rng.integers(len(names)))]
+
+        if kind == "atm":
+            sel = _S("atm")
+        elif kind == "moneyness":
+            sel = _S("moneyness", moneyness=float(rng.choice([0.95, 0.98, 1.0, 1.02, 1.05])))
+        elif kind == "delta":
+            sel = _S("delta", target_delta=float(rng.choice([0.1, 0.25, 0.5])))
+        elif kind == "fixed":
+            sel = _S("fixed", strike=float(rng.choice(strikes)) + float(rng.choice([0.0, 0.0, 0.5])))
+        elif kind == "bracket":
+            steps = [None, 0, 1, -1][int(rng.integers(4))]
+            sel = _S("bracket", side=("below", "above")[int(rng.integers(2))], steps=steps)
+        elif kind == "grid_step":
+            sel = _S("grid_step", ref=ref(), steps=int(rng.integers(-2, 3)))
+        elif kind == "offset_from":
+            sel = _S("offset_from", ref=ref(), moneyness=float(rng.choice([0.01, -0.01, 0.03])))
+        elif kind == "mirror":
+            sel = _S("mirror", ref=ref(), about=ref())
+        else:
+            sel = _S("same_as", ref=ref())
+        legs.append(LegSpec(f"l{i}", right, side, expiry, sel, qty))
+        names.append(f"l{i}")
+    return legs
+
+
+def _has_dangling(legs):
+    names = {leg.name for leg in legs}
+    return any(ref not in names for leg in legs for ref in leg.strike.refs)
+
+
+@pytest.mark.parametrize("seed", range(300))
+def test_random_strike_cases_match_legacy(seed):
+    rows, spot, session, fill, closing, legs = _random_strike_case(seed)
+    if _has_dangling(legs):
+        with pytest.raises(ValueError, match="is not a leg"):
+            _struct(*legs)
+        return
+    assert_same(_struct(*legs), lambda: snap(rows.copy(), session, spot=spot), fill, closing=closing)
+
+
+def test_random_strike_cases_are_not_vacuous():
+    counts = {"ok": 0, "err": 0, "dangling": 0}
+    for seed in range(300):
+        rows, spot, session, fill, closing, legs = _random_strike_case(seed)
+        if _has_dangling(legs):
+            counts["dangling"] += 1
+            continue
+        structure = _struct(*legs)
+        got = outcome(lambda: price_structure(structure, snap(rows.copy(), session, spot=spot),
+                                              fill, closing=closing))
+        counts[got[0]] += 1
+    assert counts["ok"] > 20 and counts["err"] > 20, counts
+
+
+def _every_kind_structure():
+    return _struct(
+        _leg("a", strike=_S("atm"), right=PUT),
+        _leg("b", strike=_S("moneyness", moneyness=1.03), right=CALL),
+        _leg("c", strike=_S("delta", target_delta=0.25), right=CALL),
+        _leg("d", strike=_S("fixed", strike=95.0), right=PUT),
+        _leg("e", strike=_S("bracket", side="below"), right=CALL),
+        _leg("f", strike=_S("grid_step", ref="a", steps=2), right=PUT),
+        _leg("g", strike=_S("offset_from", ref="d", moneyness=0.02), right=PUT),
+        _leg("h", strike=_S("mirror", ref="d", about="a"), right=PUT),
+        _leg("i", strike=_S("same_as", ref="c"), right=PUT),
+    )
+
+
+def test_strike_selection_and_lookup_do_not_use_dataframe_select(monkeypatch):
+    rows = make_chain(spacing=1.0, rights="CP", delta=True)
+    structure = _every_kind_structure()
+    legacy = outcome(lambda: price_structure(structure, snap(rows.copy(), "AMC"), MID))
+    assert legacy[0] == "ok"
+
+    def forbidden(self, *args, **kwargs):
+        raise AssertionError("StrikeSelector.select ran on the index path")
+
+    monkeypatch.setattr(StrikeSelector, "select", forbidden)
+    twin = outcome(lambda: price_structure_indexed(structure, snap(rows.copy(), "AMC"), MID))
+    _same(legacy, twin)
+
+
+def test_fallback_path_uses_legacy_select(monkeypatch):
+    rows = make_chain(rights="P", delta=False)
+    rows["strike"] = rows["strike"].astype("float32")
+    priced = snap(rows, "AMC")
+    index = ci._index_for(priced)
+    assert index is not None and index.sd is None
+
+    def forbidden(self, *args, **kwargs):
+        raise AssertionError("legacy select reached from the fallback")
+
+    monkeypatch.setattr(StrikeSelector, "select", forbidden)
+    with pytest.raises(AssertionError, match="legacy select reached"):
+        price_structure_indexed(_struct(_leg("a", strike=ATM, right=PUT)), priced, MID)
+
+
+@pytest.mark.parametrize("mutation", ["strike", "right", "index"])
+def test_verify_mode_raises_on_strike_or_right_mutation(mutation):
+    priced = snap(make_chain(rights="CP", delta=True), "AMC")
+    assert price_structure_indexed(straddle_through(), priced, MID).legs
+    rows = priced.rows
+    first = rows.index[0]
+    if mutation == "strike":
+        rows.loc[first, "strike"] += 1.0
+    elif mutation == "right":
+        rows.loc[first, "right"] = "P" if rows.loc[first, "right"] == "C" else "C"
+    else:
+        rows.index = pd.Index([0] * len(rows))  # reorder by making the index non-unique
+    with pytest.raises(ChainSnapshotMutated) as excinfo:
+        price_structure_indexed(straddle_through(), priced, MID)
+    assert str(excinfo.value) == "chain snapshot rows changed after the index was built"
+
+
+def test_strike_or_right_mutation_not_checked_with_verify_disabled(monkeypatch):
+    monkeypatch.setenv("ENGINE_CHAIN_INDEX_VERIFY", "0")
+    priced = snap(make_chain(rights="CP", delta=True), "AMC")
+    assert price_structure_indexed(straddle_through(), priced, MID).legs
+    priced.rows.loc[priced.rows.index[0], "strike"] += 1.0
+    out = outcome(lambda: price_structure_indexed(straddle_through(), priced, MID))
+    assert not (out[0] == "err" and out[1] is ChainSnapshotMutated)
+
+
+def test_ask_edit_is_read_live_and_priced_as_legacy():
+    priced = snap(make_chain(rights="CP", delta=True), "AMC")
+    first = price_structure_indexed(straddle_through(), priced, MID)
+    name = first.legs[0].name
+    sel = _selected_rows(priced, first.legs[0])
+    assert len(sel) == 1
+    priced.rows.loc[sel.index[0], "ask"] += 0.5
+    second = price_structure_indexed(straddle_through(), priced, MID)  # no ChainSnapshotMutated
+    assert second.leg(name).ask != first.leg(name).ask
+    assert second.to_dict() == price_structure(straddle_through(), priced, MID).to_dict()
+
+
+def test_delta_edit_on_delta_leg_is_read_live():
+    structure = _struct(_leg("a", strike=_S("delta", target_delta=0.25), right=CALL))
+    priced = snap(make_chain(rights="CP", delta=True), "AMC")
+    first = price_structure_indexed(structure, priced, MID)
+    leg = first.legs[0]
+    rows = priced.rows
+    mask = (rows["right"] == CALL) & (rows["expiry"] == leg.expiry) & (rows["strike"] == 110.0)
+    rows.loc[mask, "delta"] = 0.25  # the 110 call now carries exactly the target delta
+    second = price_structure_indexed(structure, priced, MID)
+    assert second.legs[0].strike == 110.0
+    assert second.to_dict() == price_structure(structure, priced, MID).to_dict()
+
+
+@pytest.mark.parametrize("key", list(STRUCTURES))
+def test_registry_structures_use_strike_index(key):
+    rows = make_chain(spacing=1.0, rights="CP", delta=True)
+    index = ci._index_for(snap(rows.copy(), "AMC"))
+    assert index is not None and index.sd is not None
+    opening = outcome(lambda: price_structure(STRUCTURES[key](), snap(rows.copy(), "AMC"), MID))
+    pin = opening[1].legs if opening[0] == "ok" else None
+    assert_same(STRUCTURES[key](), lambda: snap(rows.copy(), "AMC"), MID, closing=True)
+    assert_same(STRUCTURES[key](), lambda: snap(rows.copy(), "AMC"), MID, pin=pin, closing=True)
+
+
+def test_planted_select_strike_defect_is_detected(monkeypatch):
+    original = ci._StrikeData.select_strike
+
+    def neighbour(self, sel, e, right, spot, resolved):
+        chosen = original(self, sel, e, right, spot, resolved)
+        grid = self.group(e, None).grid
+        i = int(np.searchsorted(grid, chosen))
+        j = i + 1 if i + 1 < grid.size else i - 1
+        return float(grid[j])
+
+    monkeypatch.setattr(ci._StrikeData, "select_strike", neighbour)
+    with pytest.raises(AssertionError):
+        assert_same(straddle_through(), lambda: snap(make_chain(rights="CP", delta=True), "AMC"), MID)
+
+
+def test_planted_find_defect_detected_on_duplicate_rows(monkeypatch):
+    def last_match(grp, strike):
+        hit = np.flatnonzero(np.isclose(grp.st, strike))
+        return int(hit[-1]) if hit.size else None
+
+    monkeypatch.setattr(ci._StrikeData, "find", staticmethod(last_match))
+    base = make_chain(rights="P", delta=False)
+    doubled = _concat(base, base.assign(bid=base["bid"] * 0.5))
+    with pytest.raises(AssertionError):
+        assert_same(_struct(_leg("a")), lambda: snap(doubled.copy(), "AMC"), MID)
+
+
+def test_planted_lookup_none_detected(monkeypatch):
+    monkeypatch.setattr(ci._StrikeData, "lookup", lambda self, e, right, strike: None)
+    with pytest.raises(AssertionError):
+        assert_same(straddle_through(), lambda: snap(make_chain(rights="CP", delta=True), "AMC"), MID)
