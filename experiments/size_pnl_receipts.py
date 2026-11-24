@@ -1,48 +1,22 @@
-"""EXP-188 S6: divisor re-tune on the INNER years (2023, 2024).
+"""EXP-188 receipts: content-hashed, write-once receipt files (Amendment 6 removed the divisor re-tune that used to live here).
 
-S6 of guides/size_decision_pnl_design.md (sections 5, 7, R4, R6). For each divisor ``c`` in ``C_GRID`` the seven
-short-vol structures are scored over the inner-year quarters with S5's ``score_events``, ``decide`` and ``score``,
-and the ``c`` with the largest taken-trade P&L is chosen; ``choose_c`` falls back to 1.0 when the inner sample has
-fewer than ``MIN_TRADES`` taken trades. Outer years are refused before any scoring. The S9 driver calls
-``tune`` and ``write_receipt`` per model. Progress logging: none (pure, per-model, small loops).
-Synthetic model ids (``SYNTHETIC_PREFIX``) are refused by both ``tune`` and ``write_receipt`` (SYNTHETIC_IN_TUNING).
+Receipts are canonical JSON with a ``content_hash`` over the body. ``write_receipt`` publishes once and never
+overwrites: an existing receipt is replayed read-only when its hash matches, otherwise refused. Synthetic model ids
+(``SYNTHETIC_PREFIX``) are refused before any receipt is written (SYNTHETIC_IN_TUNING).
 """
 import hashlib
 import json
-import math
 import os
 import stat
 import tempfile
 from pathlib import Path
 
-import pandas as pd
+from experiments.size_pnl_shortvol import Refusal
 
-from experiments.size_pnl_shortvol import NAMES, Refusal, decide, score, score_events
-
-C_GRID = (0.5, 0.6, 0.67, 0.75, 0.9, 1.0)
-INNER_YEARS = (2023, 2024)
-MIN_TRADES = 300
 ALPHA = 0.5
 _CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
-_HOLDOUT = "HOLDOUT_ACCESS_DENIED"
 MAX_RECEIPT_BYTES = 1 << 20
 SYNTHETIC_PREFIX = "synthetic-"
-
-
-def choose_c(totals, trades):
-    """(c, skip_reason): the argmax of ``totals`` (c -> summed pnl_dollars), or (1.0, reason) below MIN_TRADES.
-
-    Exact ties go to the c nearest 1, then the smaller c. A non-finite or empty totals set is refused.
-    """
-    if not totals:
-        raise ValueError("totals must not be empty")
-    if not all(math.isfinite(float(v)) for v in totals.values()):
-        raise ValueError(f"totals must be finite, got {totals!r}")
-    if trades < MIN_TRADES:
-        return 1.0, "fewer_than_300_inner_trades"
-    best = max(float(v) for v in totals.values())
-    tied = [c for c, v in totals.items() if float(v) == best]
-    return float(min(tied, key=lambda c: (abs(c - 1.0), c))), None
 
 
 def _refuse_synthetic(model_id):
@@ -50,43 +24,6 @@ def _refuse_synthetic(model_id):
     if str(model_id).startswith(SYNTHETIC_PREFIX):
         raise Refusal(_CONFLICT, "a synthetic model cannot be tuned or receipted as a tuning result",
                       {"reason": "SYNTHETIC_IN_TUNING"})
-
-
-def tune(items, model_id, *, alpha=ALPHA, grid=C_GRID):
-    """The S6 tuning receipt body for one model. ``items`` is ``[(chunk, events, sims), ...]``, one per quarter."""
-    _refuse_synthetic(model_id)
-    if 1.0 not in grid:
-        raise ValueError("grid must include the unity divisor 1.0")
-    if not items:
-        raise ValueError("items must not be empty")
-    for _chunk, events, _sims in items:  # every item is checked before any scoring
-        for year in sorted({int(y) for y in pd.to_datetime(events["event_date"]).dt.year}):
-            if year not in INNER_YEARS:
-                raise Refusal(_HOLDOUT, f"event year {year} is outside the inner tuning years {INNER_YEARS}",
-                              {"reason": "outer_year_in_tuning", "year": year})
-    totals, trades, declined = {}, {}, {}
-    for c in grid:
-        total, count = 0.0, 0
-        dec, cand = 0, 0
-        for name in NAMES:
-            scored = pd.concat([score_events(chunk, events, sims, name, alpha=alpha, c=c)
-                                for chunk, events, sims in items], ignore_index=True)
-            dec += int((scored["reason"] == "width_declined").sum())
-            cand += len(scored)
-            decisions = decide(scored)  # the cutoff history spans quarters, recomputed per c
-            for chunk, events, _sims in items:
-                ids = {str(e) for e in chunk["event_id"]}
-                mine = decisions[decisions["event_id"].astype(str).isin(ids)]
-                taken = score(chunk, events, mine, name, alpha, c=c)
-                total += float(taken["pnl_dollars"].sum())
-                count += len(taken)
-        totals[float(c)], trades[float(c)] = total, count
-        declined[float(c)] = dec / cand if cand else 0.0
-    chosen, skip_reason = choose_c(totals, trades[1.0])
-    return {"stage": "tuning", "model_id": model_id, "alpha": alpha, "grid": list(grid), "c": chosen,
-            "skipped": skip_reason is not None, "skip_reason": skip_reason, "trades": trades[1.0],
-            "totals": {str(c): total for c, total in totals.items()},
-            "declined": {str(c): share for c, share in declined.items()}}
 
 
 def _admit(body):

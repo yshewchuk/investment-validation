@@ -24,7 +24,7 @@ from experiments.size_pnl_straddle import EXIT_UNQUOTED, lots
 
 NAMES = tuple(sorted(FORECAST_SIZED))
 SCORE_COLS = ["event_id", "event_date", "structure", "width", "entry_cost", "rel_spread", "mcap_usd",
-              "exp_pnl_sim", "status", "reason", "alpha", "c"]
+              "exp_pnl_sim", "status", "reason", "alpha"]
 _OUT_COLS = ["event_id", "structure", "entry_cost", "exit_value", "rung", "lots", "pnl_per_share",
              "pnl_dollars"]
 _CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
@@ -65,17 +65,9 @@ def pinned(name):
     return spec
 
 
-def _check_c(c):
-    """``c`` as a float; it divides the forecast, so it must be finite and positive."""
-    value = float(c)
-    if not (math.isfinite(value) and value > 0):
-        raise ValueError(f"c must be finite and > 0, got {c!r}")
-    return value
-
-
-def _width_params(name, pred, c):
-    """Sizing parameters for ``name`` at ``pred / c``, or None when the forecast declines."""
-    return forecast_params(name, _num(pred) / _check_c(c))
+def _width_params(name, pred):
+    """Sizing parameters for ``name`` at production's rule (k=1), or None when the forecast declines."""
+    return forecast_params(name, _num(pred))
 
 
 def _put_slots(chunk, i):
@@ -99,9 +91,9 @@ def _floor_ok(legs):
     return True
 
 
-def resolve(chunk, i, name, pred, c=1.0):
+def resolve(chunk, i, name, pred):
     """(legs, reason) for event ``i``: every leg as a dict (traded and reference), or (None, reason)."""
-    params = _width_params(name, pred, c)
+    params = _width_params(name, pred)
     pinned(name)
     if params is None:
         return None, "width_declined"
@@ -181,27 +173,26 @@ def _row(ev, name, **kw):
     row = {"event_id": str(ev["event_id"]), "event_date": ev["event_date"], "structure": name,
            "width": math.nan, "entry_cost": math.nan, "rel_spread": math.nan,
            "mcap_usd": _num(ev["mcap_usd"]), "exp_pnl_sim": math.nan, "status": "undetermined", "reason": None,
-           "alpha": math.nan, "c": math.nan}
+           "alpha": math.nan}
     row.update(kw)
     return row
 
 
-def score_events(chunk, events, sims, name, *, alpha=0.5, c=1.0):
+def score_events(chunk, events, sims, name, *, alpha=0.5):
     """One row per event: ``exp_pnl_sim`` of ``name`` at its entry cost, or the reason it is undetermined."""
     pinned(name)
     fill = FillModel(alpha)
-    _check_c(c)
     pos = {str(e): i for i, e in enumerate(chunk["event_id"])}
     rows = []
     for ev in events.to_dict("records"):
         eid = str(ev["event_id"])
-        params = _width_params(name, ev["pred_move"], c)
-        row = _row(ev, name, width=params["width_moneyness"] if params else math.nan, alpha=alpha, c=c)
+        params = _width_params(name, ev["pred_move"])
+        row = _row(ev, name, width=params["width_moneyness"] if params else math.nan, alpha=alpha)
         sim = sims.get(eid)
         if eid not in pos or sim is None:
             row["reason"] = "unsimulable"
         else:
-            legs, reason = resolve(chunk, pos[eid], name, ev["pred_move"], c)
+            legs, reason = resolve(chunk, pos[eid], name, ev["pred_move"])
             entered = None if legs is None else entry_legs(chunk, legs, fill)
             if legs is None:
                 row["reason"] = reason
@@ -279,22 +270,21 @@ def _exit_value(chunk, traded, alpha, mid=False):
     return total
 
 
-def score(chunk, events, decisions, name, alpha, *, c=1.0, drop_unquoted=False, mid_marks=False):
+def score(chunk, events, decisions, name, alpha, *, drop_unquoted=False, mid_marks=False):
     """Marked P&L of the TAKEN events of ``name`` only; ``drop_unquoted`` removes the worst-case rung-3 rows.
 
     ``mid_marks`` values rung-2 legs at ``alpha``, as rung-1 legs are (the Amendment 1 sensitivity arm); the taken set,
-    rung-3 rows and rung labels are unchanged. A decision priced at a different alpha or c than this call is refused,
+    rung-3 rows and rung labels are unchanged. A decision priced at a different alpha than this call is refused,
     not silently re-marked.
     """
     FillModel(alpha)  # validate up front, even when nothing is taken
     pinned(name)
-    _check_c(c)
     if "structure" not in decisions.columns:
         raise ValueError("decisions must carry a structure column")
     if "entry_cost" not in decisions.columns:
         raise ValueError("decisions must carry an entry_cost column")
-    if not {"alpha", "c"} <= set(decisions.columns):
-        raise ValueError("decisions must carry alpha and c columns")
+    if "alpha" not in decisions.columns:
+        raise ValueError("decisions must carry an alpha column")
     pred = dict(zip(events["event_id"].astype(str), events["pred_move"]))
     pos = {str(e): i for i, e in enumerate(chunk["event_id"])}
     mine = decisions[(decisions["status"] == "taken") & (decisions["structure"] == name)]
@@ -303,7 +293,7 @@ def score(chunk, events, decisions, name, alpha, *, c=1.0, drop_unquoted=False, 
         eid = str(dec["event_id"])
         if eid not in pred or eid not in pos:
             raise ValueError(f"taken event {eid!r} is missing from the chunk or events")
-        legs, reason = resolve(chunk, pos[eid], name, pred[eid], c)
+        legs, reason = resolve(chunk, pos[eid], name, pred[eid])
         if legs is None:
             raise ValueError(f"taken event {eid!r} has no resolvable {name} structure ({reason})")
         entered = entry_legs(chunk, legs, FillModel(alpha))
@@ -311,9 +301,8 @@ def score(chunk, events, decisions, name, alpha, *, c=1.0, drop_unquoted=False, 
             raise ValueError(f"taken event {eid!r} has an unusable entry quote")
         cost = entered[0]
         bound = _num(dec["entry_cost"])
-        if not (math.isfinite(bound) and abs(bound - cost) <= 1e-9
-                and _num(dec["alpha"]) == float(alpha) and _num(dec["c"]) == float(c)):
-            raise ValueError("decision was not priced at this alpha and c")
+        if not (math.isfinite(bound) and abs(bound - cost) <= 1e-9 and _num(dec["alpha"]) == float(alpha)):
+            raise ValueError("decision was not priced at this alpha")
         if not (math.isfinite(cost) and cost >= MIN_DEBIT):
             raise ValueError(f"taken event {eid!r} has an entry debit below {MIN_DEBIT} a share ({cost!r})")
         traded = [leg for leg in legs if leg["qty"] > 0]
@@ -332,24 +321,19 @@ def score(chunk, events, decisions, name, alpha, *, c=1.0, drop_unquoted=False, 
     return pd.DataFrame(rows, columns=_OUT_COLS)
 
 
-def secured(chunk, events, decisions, name, c=1.0):
+def secured(chunk, events, decisions, name):
     """[event_id, secured_per_contract] of the TAKEN rows of ``name``: the cash one contract ties up (Amendment 2).
     Legs are resolved exactly as ``score`` resolves them, so the secured cash is the one the traded legs imply."""
     pinned(name)
-    _check_c(c)
     pred = dict(zip(events["event_id"].astype(str), events["pred_move"]))
     pos = {str(e): i for i, e in enumerate(chunk["event_id"])}
     mine = decisions[(decisions["status"] == "taken") & (decisions["structure"] == name)]
-    if not mine.empty and "c" not in decisions.columns:
-        raise ValueError("decisions must carry alpha and c columns")
-    if not mine.empty and any(float(c_col) != float(c) for c_col in mine["c"]):  # refused, not silently re-resolved
-        raise ValueError("decision was not priced at this c")
     rows = []
     for dec in mine.to_dict("records"):
         eid = str(dec["event_id"])
         if eid not in pred or eid not in pos:
             raise ValueError(f"taken event {eid!r} is missing from the chunk or events")
-        legs, reason = resolve(chunk, pos[eid], name, pred[eid], c)
+        legs, reason = resolve(chunk, pos[eid], name, pred[eid])
         if legs is None:
             raise ValueError(f"taken event {eid!r} has no resolvable {name} structure ({reason})")
         rows.append({"event_id": eid, "secured_per_contract": secured_per_contract(legs)})

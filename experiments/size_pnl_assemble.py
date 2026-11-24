@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
-from experiments import size_pnl_decisions as decisions, size_pnl_tuning as tuning, size_pnl_report as report, size_pnl_contrast as contrast
+from experiments import size_pnl_decisions as decisions, size_pnl_receipts as receipts, size_pnl_report as report, size_pnl_contrast as contrast
 from experiments import size_pnl_account, size_pnl_driver, size_pnl_ladder
 from experiments import size_pnl_synthetic_eval as synthetic_eval
 from experiments import size_pnl_gprod_report as gprod_report
@@ -26,7 +26,7 @@ _CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
 COLUMNS = ["model_id", "book", "arm_or_rule", "structure", "event_id", "event_date", "status", "rung", "pnl_dollars"]
 # Amendment 2 account columns: optional, read only when the run stored them.
 ACCOUNT_COLS = ["entry_date", "exit_date", "entry_cost", "exit_value", "exit_value_mid", "secured_per_contract"]
-ARMS = ("as_is", "retuned")
+ARMS = ("as_is",)
 LONG_RULE = "R_L"
 AMENDMENT_5_NOTE = ("Amendment 5 (2026-11-23): the straddle universe was changed to production's (market cap at or above engine.score "
                     "GATE_MCAP_FLOOR, no spread term) after the 2025 outputs of the pre-registered run were inspected; the H2 verdict, "
@@ -154,21 +154,18 @@ def _roster_rows(roster, outer_models, inputs, inner, label_of):
 
 
 def _load_receipts(rdir):
-    outer = tuning.load_receipt(rdir / "outer.json")
-    inputs = tuning.load_receipt(rdir / "inputs_outer.json")
-    inner = tuning.load_receipt(rdir / "inner.json")
+    outer = receipts.load_receipt(rdir / "outer.json")
+    inputs = receipts.load_receipt(rdir / "inputs_outer.json")
+    inner = receipts.load_receipt(rdir / "inner.json")
     with _admit("report_receipt_malformed", "a receipt lacks a required field"):
-        tuned = {mid: tuning.load_receipt(rdir / f"tuning_{mid}.json") for mid in outer["models"]}
         if outer.get("stage") != "outer":
             raise _refuse("report_receipt_stage", "outer.json is not the outer stage's receipt")
         broken = outer.get("inputs") != inputs["content_hash"]
-        for mid, receipt in tuned.items():
-            digest = receipt["content_hash"]
-            broken |= outer.get("tuning", {}).get(mid) != digest or inner.get("models", {}).get(mid) != digest
-            broken |= mid not in inputs.get("models", {})
+        broken |= not set(outer["models"]) <= set(inner.get("models", []))  # inner.json lists every outer model
+        broken |= any(mid not in inputs.get("models", {}) for mid in outer["models"])
     if broken:
-        raise _refuse("report_receipt_chain_mismatch", "outer, inputs_outer, inner and the tuning receipts do not chain")
-    return outer, inputs, inner, tuned
+        raise _refuse("report_receipt_chain_mismatch", "outer, inputs_outer and inner do not chain")
+    return outer, inputs, inner
 
 
 _HASH_BLOCK = 1 << 20
@@ -213,8 +210,8 @@ def _load_decisions(out, receipt, name="decisions.parquet"):
         if decoded > MAX_DECODED_BYTES:
             raise _refuse("report_decisions_invalid", f"{name} decodes to more than MAX_DECODED_BYTES")
         # Optional columns, read only when the schema has them. "reason": population() exempts short-vol non-trades (published
-        # decisions always carry it). "pnl_dollars_mid": the Amendment 1 sensitivity marks. "in_sample": the inner retuned arm.
-        optional = [c for c in ("reason", "pnl_dollars_mid", "in_sample") if c in parquet.schema_arrow.names]
+        # decisions always carry it). "pnl_dollars_mid": the Amendment 1 sensitivity marks.
+        optional = [c for c in ("reason", "pnl_dollars_mid") if c in parquet.schema_arrow.names]
         account = [c for c in ACCOUNT_COLS if c in parquet.schema_arrow.names]  # Amendment 2 account columns, when the run stored them
         frame = parquet.read(columns=COLUMNS + optional + account).to_pandas()
     if frame.empty:
@@ -231,7 +228,7 @@ def _load_decisions(out, receipt, name="decisions.parquet"):
     return frame
 
 
-def _load_inner(out, outer, inner, tuned):
+def _load_inner(out, outer, inner):
     """The inner stage's decisions, or None when the run has no inner_decisions receipt (older runs)."""
     path = out / "receipts" / "inner_decisions.json"
     if not path.exists():
@@ -239,17 +236,15 @@ def _load_inner(out, outer, inner, tuned):
             raise _refuse("report_receipt_chain_mismatch", "decisions_inner.parquet has no inner_decisions.json receipt")
         return None
     with _admit("report_receipt_malformed", "inner_decisions.json lacks a required field"):
-        receipt = tuning.load_receipt(path)
+        receipt = receipts.load_receipt(path)
         if receipt["stage"] != "inner_decisions":
             raise _refuse("report_receipt_stage", "inner_decisions.json is not the inner decisions stage's receipt")
-        if not (isinstance(receipt["models"], list) and isinstance(receipt["tuning"], dict) and isinstance(receipt["c"], dict)):
-            raise _refuse("report_receipt_malformed", "inner_decisions.json's models, tuning or c has the wrong type")
-        # Subset semantics: the inner stage may have tuned models the outer excluded, so the receipt may cover a superset.
+        if not isinstance(receipt["models"], list):
+            raise _refuse("report_receipt_malformed", "inner_decisions.json's models has the wrong type")
+        # Subset semantics: the inner stage may have scored models the outer excluded, so the receipt may cover a superset.
         if not (receipt["inputs"] == inner["inputs"] and receipt["scope"] == inner["scope"]
                 and set(outer["models"]) <= set(receipt["models"])):
             raise _refuse("report_receipt_chain_mismatch", "inner_decisions.json is not bound to inner.json's inputs, scope or models")
-        if any(receipt["tuning"].get(mid) != outer["tuning"][mid] or receipt["c"].get(mid) != tuned[mid]["c"] for mid in outer["models"]):
-            raise _refuse("report_receipt_chain_mismatch", "inner_decisions.json's tuning or c does not match outer.json's or the tuning receipts'")
     return _load_decisions(out, receipt, "decisions_inner.parquet")  # the FULL inner frame: the caller checks every row before filtering to the outer's models
 
 
@@ -267,20 +262,9 @@ def _inner_title(text):
     return "### Inner window (2023H2-2024), not the headline: " + text[len("### "):]
 
 
-def _insample_lines(shown):
-    """One bullet per retuned (hyp, pair) cell that is a summary; 2024 is marked * because the retuned c was chosen on it."""
-    lines = []
-    for (hyp, pid, arm), cell in shown.items():
-        if arm != "retuned" or not isinstance(cell, dict):
-            continue
-        signs = ", ".join(f"{year}{'*' if year == 2024 else ''} {int(np.sign(v)):+d}" for year, v in sorted(cell["year_signs"].items()))
-        lines.append(f"- {hyp} {pid} retuned: year_signs {signs}")
-    return "\n".join(lines)
-
-
-def _verdicts(classify_in, missing_years, inner_present=False, shown_c=None):
+def _verdicts(classify_in, missing_years, inner_present=False):
     """The T10 section, with the note that a missing full year makes its verdicts not testable. With inner decisions it pools
-    them with the outer ones and notes the in-sample retuned rows."""
+    them with the outer ones."""
     verdicts = report.t10_verdicts(classify_in)
     if missing_years and inner_present:
         verdicts += "\n\n" + f"not_testable because the required full year(s) {missing_years} are absent from the inner and outer decisions."
@@ -289,8 +273,7 @@ def _verdicts(classify_in, missing_years, inner_present=False, shown_c=None):
                               "the inner window publishes no decisions, so this verdict needs inner evidence (design question, see PR).")
     if inner_present:
         verdicts += ("\n\nT10 pools the inner (2023H2-2024) and outer (2025) decisions by the registered rule: predicted sign in every full year "
-                     "(2024, 2025; 2023 partial). The retuned arm's 2023H2 and 2024 rows are in-sample (each c was chosen on those years), "
-                     "so its 2024 sign is in-sample.\n" + _insample_lines(shown_c))
+                     "(2024, 2025; 2023 partial).")
     verdicts += "\n\n" + AMENDMENT_5_NOTE
     return verdicts
 
@@ -313,13 +296,13 @@ def _account_sections(frame, role_model, label_of, universe):
     return size_pnl_account.tables(results, diffs)
 
 
-def _sections(out, outer, inputs, inner, tuned, tickers, stored_gate=None):
+def _sections(out, outer, inputs, inner, tickers, stored_gate=None):
     """The report's sections in order. Reads receipt fields throughout; the caller maps a missing or mistyped field to a refusal.
     Returns (sections, inner row count)."""
     raw = _load_decisions(out, outer)
     gate_rows = raw["arm_or_rule"] == GATE_RULE  # Amendment 3: G_PROD rows never enter E, E_str, T1-T10 or the verdicts; only the Amendment 2 accounts read them
     raw, gate_raw = raw[~gate_rows], raw[gate_rows]
-    inner_raw = _load_inner(out, outer, inner, tuned)
+    inner_raw = _load_inner(out, outer, inner)
     tick = {str(e): str(t) for e, t in tickers.items()}
     roster = inputs["roster"]
     label_of = {m["model_id"]: "+".join(m["roles"]) for m in roster["models"]}
@@ -373,16 +356,13 @@ def _sections(out, outer, inputs, inner, tuned, tickers, stored_gate=None):
         n_long = {lab: len(events.get((lab, "straddle"), ())) for lab in labels}
         return {"events": events, "quarter_of": quarter_of, "n_short": n_short, "n_long": n_long}
 
-    tuning_by_label = {label_of[mid]: {k: v for k, v in receipt.items() if k != "content_hash"} for mid, receipt in tuned.items()}
-
     def tables(scored, ctx):
-        """T4, T5, T6 and T7 of ``scored`` (its ``pnl_dollars`` is the P&L under test) in the window's context ``ctx``,
+        """T4, T6 and T7 of ``scored`` (its ``pnl_dollars`` is the P&L under test) in the window's context ``ctx``,
         with the contrast summaries ``shown`` and the T10 input ``classify`` that the same call computed."""
         shown, classify = _contrasts(scored, ctx["events"], roster, role_model, label_of, outer_models, ctx["quarter_of"], tick)
         short = scored[scored["book"] == "short_vol"].rename(columns={"arm_or_rule": "arm"})
         long_rows = scored[scored["book"] == "straddle"].rename(columns={"arm_or_rule": "rule"})
-        sections = [report.t4_t5_shortvol(short, ctx["n_short"], tuning_by_label, arm="as_is"),
-                    report.t4_t5_shortvol(short, ctx["n_short"], tuning_by_label, arm="retuned"),
+        sections = [report.t4_shortvol(short, ctx["n_short"]),
                     report.t6_straddle(long_rows[long_rows["taken"]], long_rows, ctx["n_long"]),
                     report.t7_contrasts(shown)]
         return sections, shown, classify
@@ -399,8 +379,8 @@ def _sections(out, outer, inputs, inner, tuned, tickers, stored_gate=None):
     missing_years = sorted(set(contrast.FULL_YEARS) - {int(y) for y in combined["event_date"].dt.year})
     o_tables, shown_o, classify_o = tables(frame, ctx_o)
     # Without an inner window the pooled frame is the outer frame: reuse its contrasts rather than bootstrapping them again.
-    shown_c, classify_c = (_contrasts(combined, ctx_c["events"], roster, role_model, label_of, outer_models, ctx_c["quarter_of"], tick)
-                           if inner_present else (shown_o, classify_o))
+    _shown_c, classify_c = (_contrasts(combined, ctx_c["events"], roster, role_model, label_of, outer_models, ctx_c["quarter_of"], tick)
+                            if inner_present else (shown_o, classify_o))
     note = (f"short-vol undetermined rows exclude events from E: {undet_e}; "
             f"straddle undetermined rows exclude events from E_str (H2, T6, straddle T7, G_PROD, the H2 verdict): {undet_str}; "
             f"H3 uses E intersect E_str. "
@@ -415,29 +395,28 @@ def _sections(out, outer, inputs, inner, tuned, tickers, stored_gate=None):
         *o_tables,
         report.t8_rungs(_shares(frame), models=[label_of[m] for m in outer["models"]]),
         _not_testable("T9 Pool sensitivity", "native_pool_arm_not_produced"),
-        _verdicts(classify_c, missing_years, inner_present, shown_c),
+        _verdicts(classify_c, missing_years, inner_present),
     ]
     if inner_present:  # the inner window, after the outer tables: never the headline
         ctx_i = _context(inner_frame)
         inner_note = (f"short-vol undetermined rows exclude events from E: {inner_undet_e}; "
                       f"straddle undetermined rows exclude events from E_str (H2, T6, straddle T7, G_PROD, the H2 verdict): {inner_undet_str}; "
                       f"H3 uses E intersect E_str. Inner window only; run totals are the outer receipt's.")
-        (t4_as_is, t5_retuned, t6, t7), _shown_i, _classify_i = tables(inner_frame, ctx_i)
+        (t4_as_is, t6, t7), _shown_i, _classify_i = tables(inner_frame, ctx_i)
         t2_inner = report.t2_in_e(inner_frame[inner_frame["book"] == "short_vol"][["event_id", "quarter"]].drop_duplicates(), inner_note)
-        t5_retuned += "\n\nretuned rows are IN-SAMPLE: each model's c was chosen on these same years."
-        sections += [_inner_title(text) for text in (t2_inner, t4_as_is, t5_retuned, t6, t7)]
+        sections += [_inner_title(text) for text in (t2_inner, t4_as_is, t6, t7)]
     inner_rows = len(inner_raw) if inner_present else 0
     if "pnl_dollars_mid" not in frame.columns:
         sections += [_not_testable("Sensitivity (Amendment 1)", "pnl_dollars_mid_not_in_decisions")]
     else:
         # The Amendment 1 marks: T4-T7 on the outer window, and T10 pooled over the same windows as the primary verdict.
-        mid, shown_mo, classify_mo = tables(frame.assign(pnl_dollars=frame["pnl_dollars_mid"]), ctx_o)
+        mid, _shown_mo, classify_mo = tables(frame.assign(pnl_dollars=frame["pnl_dollars_mid"]), ctx_o)
         if inner_present:
             combined_mid = pd.concat([w.assign(pnl_dollars=w["pnl_dollars_mid"]) for w in (inner_frame, frame)])
-            shown_m, classify_mid = _contrasts(combined_mid, ctx_c["events"], roster, role_model, label_of, outer_models, ctx_c["quarter_of"], tick)
+            _shown_m, classify_mid = _contrasts(combined_mid, ctx_c["events"], roster, role_model, label_of, outer_models, ctx_c["quarter_of"], tick)
         else:  # no inner window: the pooled mid frame is the outer one, so reuse its contrasts
-            shown_m, classify_mid = shown_mo, classify_mo
-        sections += [_sens(text) for text in (*mid, _verdicts(classify_mid, missing_years, inner_present, shown_m))]
+            classify_mid = classify_mo
+        sections += [_sens(text) for text in (*mid, _verdicts(classify_mid, missing_years, inner_present))]
     if not gate_raw.empty:  # Amendment 3: the G_PROD sections, after the Amendment 1 ones and before the accounts
         sections += gprod_report.sections(gate_raw, frame[frame["book"] == "straddle"], label_of=label_of, role_model=role_model, roster=roster, outer_models=outer_models,
                                           quarter_of=ctx_o["quarter_of"], tick=tick, stored_gate=stored_gate)
@@ -475,7 +454,7 @@ def assemble(out_dir, plan, *, admitted, expected=None, spec_hash=None, snapshot
         raise _refuse("report_tickers_invalid", "tickers must map unique non-blank event ids to non-blank tickers")
     started, out = time.monotonic(), Path(out_dir)
     _log(f"start rss={_rss_mb():.0f}MB")
-    outer, inputs, inner, tuned = _load_receipts(out / "receipts")
+    outer, inputs, inner = _load_receipts(out / "receipts")
     with _admit("report_receipt_malformed", "outer.json lacks a scope field"):
         if outer["scope"] is not None:  # a smoke receipt binds a restricted plan that this report cannot recover
             raise _refuse("report_scope_unsupported", "the report covers full-population outer runs only; this receipt is a smoke scope")
@@ -494,7 +473,7 @@ def assemble(out_dir, plan, *, admitted, expected=None, spec_hash=None, snapshot
             inner_path = out / "receipts" / "inputs_inner.json"
             if not inner_path.exists():
                 raise _refuse("report_receipt_malformed", "inputs_inner.json is missing")
-            inner_inputs = tuning.load_receipt(inner_path)
+            inner_inputs = receipts.load_receipt(inner_path)
             bound_inputs = inner.get("inputs")
             inner_unchained = bound_inputs is None or inner_inputs.get("content_hash") != bound_inputs
             with _admit("report_tickers_invalid", "the plan frame cannot be bound"):
@@ -505,7 +484,7 @@ def assemble(out_dir, plan, *, admitted, expected=None, spec_hash=None, snapshot
         if inner_bad:
             raise _refuse("report_inputs_mismatch", "the plan's inner-window rows do not match inputs_inner.json")
     with _admit("report_receipt_malformed", "a receipt or decisions row lacks a required field"):
-        sections, inner_rows = _sections(out, outer, inputs, inner, tuned, tickers, stored_gate)
+        sections, inner_rows = _sections(out, outer, inputs, inner, tickers, stored_gate)
     text = report.build_report(sections)
     path = out / "REPORT.md"
     handle = tempfile.NamedTemporaryFile("w", dir=out, delete=False, suffix=".tmp", encoding="utf-8")
@@ -516,7 +495,7 @@ def assemble(out_dir, plan, *, admitted, expected=None, spec_hash=None, snapshot
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, path)
-        tuning._fsync_dir(out)
+        receipts._fsync_dir(out)
     finally:
         tmp.unlink(missing_ok=True)
     _log(f"end elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB sections={len(sections)} inner_rows={inner_rows}")

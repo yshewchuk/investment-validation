@@ -15,7 +15,7 @@ import pandas as pd
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import fail
 from experiments import label_availability, size_pnl_decisions as decisions, size_pnl_inputs as inputs, size_pnl_ladder as ladder, size_pnl_prereg
-from experiments import size_pnl_readers as readers, size_pnl_shortvol as shortvol, size_pnl_straddle as straddle, size_pnl_tuning as tuning, size_pnl_equivalence as equivalence, size_pnl_outer_inputs as outer_inputs, size_pnl_gprod as gprod
+from experiments import size_pnl_readers as readers, size_pnl_shortvol as shortvol, size_pnl_straddle as straddle, size_pnl_receipts as receipts, size_pnl_equivalence as equivalence, size_pnl_outer_inputs as outer_inputs, size_pnl_gprod as gprod
 from experiments.size_pnl_pool import TOLERANCE, build_pool
 from experiments.size_pnl_shortvol import Refusal
 from experiments import size_pnl_report as report, size_pnl_synthetic as synthetic, size_pnl_synthetic_eval as synthetic_eval
@@ -26,7 +26,7 @@ WARMUP_START = "2024-07-01"  # six months of inner history so the trailing cutof
 INNER_EMIT_FROM = pd.Timestamp("2023-07-01")  # six months of 2023 history (burn-in) feed the trailing cutoffs; rows are emitted from 2023H2 through 2024
 OUTER_YEAR = 2025  # the roster is resolved for this year
 STAGES = ("inner", "outer")
-ALPHA = tuning.ALPHA
+ALPHA = receipts.ALPHA
 _DENIED, _CONFLICT = "HOLDOUT_ACCESS_DENIED", "EXPERIMENT_IDENTITY_CONFLICT"
 _FACTS = ("pre_iv30", "mcap_usd", "implied_move")
 _MARKS = ["exit_value", "rung", "lots", "pnl_dollars"]
@@ -171,9 +171,9 @@ def _plan_rows(plan):
 
 
 def _receipt(path, body, reason):
-    """``tuning.write_receipt``, with a changed replay refused under ``reason`` so the refusal names the receipt."""
+    """``receipts.write_receipt``, with a changed replay refused under ``reason`` so the refusal names the receipt."""
     try:
-        return tuning.write_receipt(path, body)
+        return receipts.write_receipt(path, body)
     except shortvol.Refusal as refusal:
         if refusal.details.get("reason") != "tuning_receipt_changed": raise
         raise shortvol.Refusal(_CONFLICT, str(refusal), {**refusal.details, "reason": reason}) from refusal
@@ -312,10 +312,10 @@ def _inner(src, out, ready, plan, facts_all, labels):
         elapsed = max(time.monotonic() - started, 1e-9)
         _log(f"inner quarter {number}/{quarters} {label} events={len(chunk['event_id'])} " f"rate={kept / elapsed:.2f}/s eta={(quarters - number) * elapsed / number:.0f}s rss={_rss_mb():.0f}MB")
     if pending: raise fail(_CONFLICT, "no simulable sample for the fast-path equivalence check", details={"reason": "equivalence_empty", "models": sorted(pending)})
-    nontrades, missing_facts = {}, {}  # per model, counts at c=1.0 only: non-"scored" rows by reason. A non-trade reason (short-vol, P&L 0) stays in every model's and c's items; any other reason is a missing fact, counted apart
+    nontrades, missing_facts = {}, {}  # per model: non-"scored" rows by reason. A non-trade reason (short-vol, P&L 0) stays in every model's items; any other reason is a missing fact, counted apart
     for i, mid in enumerate(ready, start=1):
         started = time.monotonic()
-        rows = pd.concat([shortvol.score_events(chunk, events, sims, name, alpha=tuning.ALPHA, c=1.0) for chunk, events, sims in items[mid] for name in shortvol.NAMES], ignore_index=True)
+        rows = pd.concat([shortvol.score_events(chunk, events, sims, name, alpha=ALPHA) for chunk, events, sims in items[mid] for name in shortvol.NAMES], ignore_index=True)
         missed = rows.loc[rows["status"] != "scored"]
         reasons = missed["reason"].fillna(missed["status"]).astype(str)
         is_non_trade = reasons.isin(synthetic_eval.NON_TRADE_REASONS)
@@ -323,13 +323,7 @@ def _inner(src, out, ready, plan, facts_all, labels):
         missing_facts[mid] = _reason_counts(reasons[~is_non_trade])
         _log(f"non-trade recount model {i}/{len(ready)} {mid} elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB")
     by_model = {mid: sum(len(events) for _c, events, _s in items[mid]) for mid in ready}
-    hashes = {}
-    for i, mid in enumerate(ready, start=1):
-        started = time.monotonic()
-        body = tuning.tune(items[mid], mid)
-        hashes[mid] = tuning.write_receipt(out / "receipts" / f"tuning_{mid}.json", body)["content_hash"]
-        _log(f"tuning model {i}/{len(ready)} {mid} elapsed={time.monotonic() - started:.1f}s " f"c={body['c']} skipped={body['skipped']}")
-    return hashes, max(by_model.values(), default=0), skipped, by_model, common, nontrades, missing_facts, "sha256:" + digest.hexdigest(), checked
+    return sorted(ready), max(by_model.values(), default=0), skipped, by_model, common, nontrades, missing_facts, "sha256:" + digest.hexdigest(), checked
 
 
 def _equivalence_ok(entry):
@@ -339,40 +333,37 @@ def _equivalence_ok(entry):
 
 
 def _outer_gate(out, ready, scope, body, inner_tables, inner_production, inner_plan, inner_facts, inner_models):
-    """Refuses before any chunk is built: every ready model needs its tuning receipt, and inner.json must bind those
-    receipts, have been tuned on this run's event scope, carry every ready model's fast-path equivalence evidence, and
+    """Refuses before any chunk is built: inner.json must list every ready model, carry the inner decisions bound to it,
+    have been scored on this run's event scope, carry every ready model's fast-path equivalence evidence, and
     bind the inner window's inputs. The inner window's inputs, plan and facts are re-bound here from this run's own
-    sources, not trusted from the receipts."""
-    receipts = {mid: tuning.load_receipt(out / "receipts" / f"tuning_{mid}.json") for mid in ready}
-    inner = tuning.load_receipt(out / "receipts" / "inner.json")
-    if any(inner["models"].get(mid) != receipts[mid]["content_hash"] for mid in ready):
-        raise Refusal(_CONFLICT, "inner.json does not bind every ready model's tuning receipt", {"reason": "inner_receipt_mismatch"})
+    sources, not trusted from the receipts. Returns None."""
+    inner = receipts.load_receipt(out / "receipts" / "inner.json")
+    if not set(ready) <= set(inner["models"]):
+        raise Refusal(_CONFLICT, "inner.json does not list every ready model", {"reason": "inner_receipt_mismatch"})
     if not (out / "receipts" / "inner_decisions.json").exists() or not (out / "decisions_inner.parquet").exists():
         raise Refusal(_CONFLICT, "inner decisions are missing or not bound to inner.json", {"reason": "inner_decisions_missing"})
-    idec = tuning.load_receipt(out / "receipts" / "inner_decisions.json")
+    idec = receipts.load_receipt(out / "receipts" / "inner_decisions.json")
     if idec.get("stage") != "inner_decisions" or idec.get("inputs") != inner["inputs"] or idec.get("scope") != inner["scope"]:
         raise Refusal(_CONFLICT, "inner decisions are missing or not bound to inner.json", {"reason": "inner_decisions_mismatch"})
     # A hash-valid receipt can still carry the wrong shapes: refuse them here rather than raise a builtin exception below.
-    if not (isinstance(idec.get("models"), list) and isinstance(idec.get("tuning"), dict) and isinstance(idec.get("c"), dict)):
+    if not isinstance(idec.get("models"), list):
         raise Refusal(_CONFLICT, "inner decisions are missing or not bound to inner.json", {"reason": "inner_decisions_mismatch"})
-    # Subset semantics: the inner stage may have tuned models the outer excluded (a missing or partial 2025 refit), so the
-    # receipt may cover a superset of the ready models; every ready model must match on tuning and c.
+    # Subset semantics: the inner stage may have scored models the outer excluded (a missing or partial 2025 refit), so the
+    # receipt may cover a superset of the ready models; every ready model must be among them.
     if not set(ready) <= set(idec.get("models", [])) \
-            or any(idec.get("tuning", {}).get(mid) != inner["models"][mid] or idec.get("c", {}).get(mid) != receipts[mid]["c"] for mid in ready) \
             or decisions._file_sha256(out / "decisions_inner.parquet") != idec.get("decisions_sha256"):
         raise Refusal(_CONFLICT, "inner decisions are missing or not bound to inner.json", {"reason": "inner_decisions_mismatch"})
-    if "scope" not in inner or inner["scope"] != scope: raise Refusal(_CONFLICT, "inner.json was tuned on a different event scope", {"reason": "scope_mismatch"})
+    if "scope" not in inner or inner["scope"] != scope: raise Refusal(_CONFLICT, "inner.json was scored on a different event scope", {"reason": "scope_mismatch"})
     evidence = inner.get("equivalence")
     if not isinstance(evidence, dict) or not all(_equivalence_ok(evidence.get(mid)) for mid in ready):
         raise Refusal(_CONFLICT, "inner.json lacks the fast-path equivalence evidence for a ready model", {"reason": "inner_equivalence_missing"})
-    inputs_inner, now = tuning.load_receipt(out / "receipts" / "inputs_inner.json"), json.loads(json.dumps({**body, "models": inner_models}))
+    inputs_inner, now = receipts.load_receipt(out / "receipts" / "inputs_inner.json"), json.loads(json.dumps({**body, "models": inner_models}))
     if any(inputs_inner.get(k) != now[k] for k in _BOUND): raise Refusal(_CONFLICT, "inputs_inner.json was bound to different inputs", {"reason": "inner_inputs_mismatch"})
     if inputs_inner.get("plan") != inner_plan: raise Refusal(_CONFLICT, "inputs_inner.json was bound to a different inner plan", {"reason": "inner_plan_mismatch"})
     if inputs_inner.get("facts") != inner_facts: raise Refusal(_CONFLICT, "inputs_inner.json was bound to different inner facts", {"reason": "inner_facts_mismatch"})
     inner_now = json.loads(json.dumps({"tables": inner_tables, "production": inner_production}))
     if inner["inputs"] != inputs_inner["content_hash"] or any(inputs_inner.get(k) != inner_now[k] for k in ("tables", "production")):
-        raise Refusal(_CONFLICT, "inner.json was tuned on different inner tables", {"reason": "inner_tables_mismatch"})
-    return receipts
+        raise Refusal(_CONFLICT, "inner.json was scored on different inner tables", {"reason": "inner_tables_mismatch"})
 
 
 def _no_ready():
@@ -387,9 +378,9 @@ def _unbound_outer(ready):
             raise Refusal(_CONFLICT, "2025 predictions are not bound for a ready model with no 2025 rows", {"reason": "outer_predictions_unbound"})
 
 
-def _model_state(c):
+def _model_state():
     edges = pd.DataFrame({"event_date": pd.Series([], dtype="datetime64[ns]"), "edge": pd.Series([], dtype=float)})
-    return {"c": float(c), "scored": {"as_is": [], "retuned": []}, "edges": edges}
+    return {"scored": {"as_is": []}, "edges": edges}
 
 
 def _rows(mid, book, arm, dec, taken, events, taken_mid=None, secured=None, sessions=None):
@@ -417,13 +408,12 @@ def _rows(mid, book, arm, dec, taken, events, taken_mid=None, secured=None, sess
     return frame.assign(model_id=mid, book=book, arm_or_rule=arm)
 
 
-def _month_scores(mid, table, events, chunk, labels, start_m, st, *, arms=None):
-    """Pass A for one model and calendar month: simulate once and score every (arm, name), with the pool of rows and
+def _month_scores(mid, table, events, chunk, labels, start_m, st):
+    """Pass A for one model and calendar month: simulate once and score every ("as_is", name), with the pool of rows and
     labels known before the month (R6). Returns the scored frames by (arm, name) and the ids with no simulation."""
     pool = build_pool(table[table["event_date"] < start_m], _printed(labels, start_m.date().isoformat()))
     sims = shortvol.simulate(chunk, events, pool)
-    scored = {(arm, name): shortvol.score_events(chunk, events, sims, name, alpha=ALPHA, c=c)
-              for arm, c in (arms or (("as_is", 1.0), ("retuned", st["c"]))) for name in shortvol.NAMES}
+    scored = {("as_is", name): shortvol.score_events(chunk, events, sims, name, alpha=ALPHA) for name in shortvol.NAMES}
     return scored, {str(e) for e in events["event_id"] if sims.get(e) is None}
 
 
@@ -431,7 +421,7 @@ def _kept(frame, bad):
     return frame[~frame["event_id"].astype(str).isin(bad)]
 
 
-def _month(mid, events, scored, bad, chunk, start_m, st, *, arms=None, emit_from=None, sessions=None, gate=None):
+def _month(mid, events, scored, bad, chunk, start_m, st, *, emit_from=None, sessions=None, gate=None):
     """Pass B for one model and calendar month: drop the ``bad`` ids from the events, the scored frames and the straddle
     inputs, then steps 7a-7d on Pass A's frames. Warm-up months (before OUTER[0]) apply the same mask (they feed history)
     but only add history and emit no rows. ``sessions`` (the Amendment 2 account dates) is None in the synthetic run: then the
@@ -440,16 +430,15 @@ def _month(mid, events, scored, bad, chunk, start_m, st, *, arms=None, emit_from
     output = start_m >= (pd.Timestamp(OUTER[0]) if emit_from is None else emit_from)
     events = _kept(events, bad)
     ids, frames = set(events["event_id"].astype(str)), []
-    for arm, c in (arms or (("as_is", 1.0), ("retuned", st["c"]))):
-        for name in shortvol.NAMES:
-            st["scored"][arm].append(_kept(scored[(arm, name)], bad))
-            if not output: continue
-            decided = shortvol.decide(pd.concat(st["scored"][arm], ignore_index=True))
-            mine = decided[decided["event_id"].astype(str).isin(ids) & (decided["structure"] == name)]
-            taken_mid = shortvol.score(chunk, events, mine, name, ALPHA, c=c, mid_marks=True)  # Amendment 1 sensitivity marks
-            secured = None if sessions is None else shortvol.secured(chunk, events, mine, name, c)
-            frames.append(_rows(mid, "short_vol", arm, mine, shortvol.score(chunk, events, mine, name, ALPHA, c=c), events, taken_mid=taken_mid,
-                                secured=secured, sessions=sessions))
+    for name in shortvol.NAMES:  # short vol is as-is only (Amendment 6)
+        st["scored"]["as_is"].append(_kept(scored[("as_is", name)], bad))
+        if not output: continue
+        decided = shortvol.decide(pd.concat(st["scored"]["as_is"], ignore_index=True))
+        mine = decided[decided["event_id"].astype(str).isin(ids) & (decided["structure"] == name)]
+        taken_mid = shortvol.score(chunk, events, mine, name, ALPHA, mid_marks=True)  # Amendment 1 sensitivity marks
+        secured = None if sessions is None else shortvol.secured(chunk, events, mine, name)
+        frames.append(_rows(mid, "short_vol", "as_is", mine, shortvol.score(chunk, events, mine, name, ALPHA), events, taken_mid=taken_mid,
+                            secured=secured, sessions=sessions))
     first = None
     for rule in straddle.RULES:
         dec = straddle.decide(events, st["edges"], rule, chunk)
@@ -464,13 +453,13 @@ def _month(mid, events, scored, bad, chunk, start_m, st, *, arms=None, emit_from
     return frames
 
 
-def _outer(src, out, ready, receipts, plan, ids, facts_all, labels):
+def _outer(src, out, ready, plan, ids, facts_all, labels):
     """The outer stage: per ladder chunk and calendar month, decide, then read that month's labels (R6). Publishes decisions."""
     gate = src.gate
     exits, pools, sessions = _exits(src), _pool_tables(ready), _sessions(src)
     dates = pd.to_datetime(plan["event_date"])
     quarter, month = dates.dt.to_period("Q").astype(str).to_numpy(), dates.dt.to_period("M").to_numpy()
-    total, state = len(set(month)), {mid: _model_state(receipts[mid]["c"]) for mid in ready}
+    total, state = len(set(month)), {mid: _model_state() for mid in ready}
     frames, done, started, skipped, fresh, digest, dropped = [], 0, time.monotonic(), {}, [], hashlib.sha256(), set()
     _log(f"outer start months={total} models={len(ready)} gate={'G_PROD' if gate else 'none'}")
     for label, chunk in ladder.ladder_chunks(src.admitted, plan, src.load_index):
@@ -496,9 +485,8 @@ def _outer(src, out, ready, receipts, plan, ids, facts_all, labels):
                 got =readers.read_labels(src.fetch, src.admitted, start=start_m, end=(period + 1).start_time, event_ids=ids)
                 fresh.append(got)
                 labels = pd.concat([labels, got])
-    inputs_hash = tuning.load_receipt(out / "receipts" / "inputs_outer.json")["content_hash"]
+    inputs_hash = receipts.load_receipt(out / "receipts" / "inputs_outer.json")["content_hash"]
     body = {"stage": "outer", "models": list(ready), "ladder_skipped": skipped, "scope": _scope(ids), "inputs": inputs_hash,
-            "tuning": {mid: receipts[mid]["content_hash"] for mid in ready}, "c": {mid: receipts[mid]["c"] for mid in ready},
             "labels": content_hash(_label_rows(fresh)), "common_dropped": _common_dropped(ready),
             "scoreability_dropped": len(dropped), "ladder": "sha256:" + digest.hexdigest()}
     if gate is not None: body["gate"] = gprod.receipt_body(gate)
@@ -506,14 +494,14 @@ def _outer(src, out, ready, receipts, plan, ids, facts_all, labels):
     return rows, skipped
 
 
-def _inner_decisions(src, out, ready, receipts, plan, facts_all, labels, inputs_hash, scope):
+def _inner_decisions(src, out, ready, plan, facts_all, labels, inputs_hash, scope):
     """Publishes the inner stage's decisions (``decisions_inner.parquet``, receipt ``inner_decisions``) for the pre-registered
     verdict, which reads 2024. A second pass over the inner plan, the same per-chunk, per-month loop as ``_outer``: it costs a
-    second simulation of the inner window. Retuned rows use each model's frozen c from its tuning receipt. ``labels`` is read-only."""
+    second simulation of the inner window. ``labels`` is read-only."""
     exits, pools = _exits(src), _pool_tables(ready)
     dates = pd.to_datetime(plan["event_date"])
     quarter, month = dates.dt.to_period("Q").astype(str).to_numpy(), dates.dt.to_period("M").to_numpy()
-    total, state = len(set(month)), {mid: _model_state(receipts[mid]["c"]) for mid in ready}
+    total, state = len(set(month)), {mid: _model_state() for mid in ready}
     frames, done, started, skipped, digest, dropped = [], 0, time.monotonic(), {}, hashlib.sha256(), set()
     _log(f"inner-decisions start months={total} models={len(ready)}")
     for label, chunk in ladder.ladder_chunks(src.admitted, plan, src.load_index):
@@ -528,12 +516,11 @@ def _inner_decisions(src, out, ready, receipts, plan, facts_all, labels, inputs_
             dropped |= bad
             for mid in ready:
                 month_frames += _month(mid, at[mid], scored[mid][0], bad, chunk, start_m, state[mid], emit_from=INNER_EMIT_FROM)
-            frames += [f.assign(in_sample=f["arm_or_rule"] == "retuned") for f in month_frames]  # only the retuned arm uses the chosen c
+            frames += month_frames
             done += 1
             rate = done / max(time.monotonic() - started, 1e-9)
             _log(f"inner-decisions month {period} {done}/{total} rate={rate:.2f}/s eta={(total - done) / rate:.0f}s scoreability_dropped={len(dropped)} rss={_rss_mb():.0f}MB")
     body = {"stage": "inner_decisions", "models": list(ready), "scope": scope, "inputs": inputs_hash,
-            "tuning": {mid: receipts[mid]["content_hash"] for mid in ready}, "c": {mid: receipts[mid]["c"] for mid in ready},
             "emit_from": INNER_EMIT_FROM.date().isoformat(), "scoreability_dropped": len(dropped),
             "ladder_skipped": skipped, "ladder": "sha256:" + digest.hexdigest()}
     return decisions.publish(out, frames, body, stem="decisions_inner", receipt="inner_decisions")
@@ -587,7 +574,6 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
             "production": production["binding"], "scope": scope, "plan": content_hash(_plan_rows(plan)),
             "facts": content_hash(facts_rows), "labels": content_hash(_label_rows([labels])), "snapshot": src.snapshot_id,
             "crush_table_hash": src.crush_table_hash}
-    receipts = {}
     if stage == "outer":  # preflight: a refusal here leaves no outer input receipt, and no chunk is built
         if not ready: raise _no_ready()
         _, inner_bound, inner_production = _prepare(src, "inner", ids)  # the inner window's bindings, to match inputs_inner.json
@@ -597,23 +583,22 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
         inner_models = _models_body(inner_bound["bound"], inner_ready)  # inner bindings only: the outer year is not in inputs_inner.json
         inner_plan = content_hash(_plan_rows(inner_window))
         inner_facts = content_hash(_facts_rows(survivors, {str(e) for e in inner_window["event_id"]}))
-        receipts = _outer_gate(out, ready, scope, body, inner_tables, inner_production["binding"], inner_plan, inner_facts, inner_models)
+        _outer_gate(out, ready, scope, body, inner_tables, inner_production["binding"], inner_plan, inner_facts, inner_models)
         _unbound_outer(ready)
     inputs_receipt = _receipt(out / "receipts" / f"inputs_{stage}.json", body, "inputs_receipt_changed")
     if not ready: raise _no_ready()
     if stage == "inner":
-        hashes, rows, skipped, by_model, common, non_trades, missing_facts, ladder_hash, checked = _inner(src, out, ready, plan, facts_all, labels)
+        models, rows, skipped, by_model, common, non_trades, missing_facts, ladder_hash, checked = _inner(src, out, ready, plan, facts_all, labels)
         _receipt(out / "receipts" / "inner.json",
-                 {"stage": "inner", "models": hashes, "events": rows, "events_by_model": by_model, "ladder": ladder_hash,
+                 {"stage": "inner", "models": models, "events": rows, "events_by_model": by_model, "ladder": ladder_hash,
                   "excluded": excluded, "scope": scope, "inputs": inputs_receipt["content_hash"],
                   "ladder_skipped": skipped, "common_dropped": common, "non_trades": non_trades, "missing_facts": missing_facts,
                   "equivalence": checked}, "inner_receipt_changed")
-        tuned = {mid: tuning.load_receipt(out / "receipts" / f"tuning_{mid}.json") for mid in ready}
-        inner_decisions_rows = _inner_decisions(src, out, ready, tuned, plan, facts_all, labels, inputs_receipt["content_hash"], scope)
+        inner_decisions_rows = _inner_decisions(src, out, ready, plan, facts_all, labels, inputs_receipt["content_hash"], scope)
         _log(f"stage={stage} end elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB "
              f"ladder_skipped={skipped} common_dropped={common} non_trades={non_trades} missing_facts={missing_facts} inner_decisions_rows={inner_decisions_rows}")
     else:
-        rows, skipped = _outer(src, out, ready, receipts, plan, ids, facts_all, labels)
+        rows, skipped = _outer(src, out, ready, plan, ids, facts_all, labels)
         _log(f"stage={stage} end elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB ladder_skipped={skipped}")
     _log(f"funnel admitted={len(src.admitted['events'])} paired={len(_common_ids(ready) & stage_ids)} excluded: "
          + " ".join(f"{reason}={len(ids_)}" for reason, ids_ in sorted(src.exclusions.items())) + f" common_dropped={_common_dropped(ready)}")
@@ -634,15 +619,12 @@ def _load_facts(src, wanted):
     return pd.concat([facts_all.drop(columns=list(_FACTS)), numeric], axis=1)
 
 
-_AS_IS = (("as_is", 1.0),)
-
-
 def _synthetic_scores(src, ready, plan, facts_all, labels):
     """As-is scoring of the synthetic tables over the inner plan, with the static inner labels only (no outer read)."""
     exits, pools = _exits(src), _pool_tables(ready)
     dates = pd.to_datetime(plan["event_date"])
     quarter, month = dates.dt.to_period("Q").astype(str).to_numpy(), dates.dt.to_period("M").to_numpy()
-    total, state = len(set(month)), {mid: _model_state(1.0) for mid in ready}
+    total, state = len(set(month)), {mid: _model_state() for mid in ready}
     frames, done, started, skipped, digest, dropped = [], 0, time.monotonic(), {}, hashlib.sha256(), set()
     declined = {mid: {name: [0, 0] for name in shortvol.NAMES} for mid in ready}  # width declines: [declined, candidates] per short-vol unit
     _log(f"synthetic start months={total} models={len(ready)}")
@@ -653,7 +635,7 @@ def _synthetic_scores(src, ready, plan, facts_all, labels):
         for period in sorted({m for m, q in zip(month, quarter) if q == label}):
             start_m, month_frames = period.start_time, []
             at = {mid: events[mid][events[mid]["event_date"].dt.to_period("M") == period] for mid in ready}
-            scored = {mid: _month_scores(mid, pools[mid], at[mid], chunk, labels, start_m, state[mid], arms=_AS_IS) for mid in ready}
+            scored = {mid: _month_scores(mid, pools[mid], at[mid], chunk, labels, start_m, state[mid]) for mid in ready}
             for mid in ready:  # Pass A rows, before the shared mask: only a width_declined row is counted as a width decline (other non-scored reasons are other non-trades or missing facts)
                 for name in shortvol.NAMES:
                     f = scored[mid][0][("as_is", name)]
@@ -664,7 +646,7 @@ def _synthetic_scores(src, ready, plan, facts_all, labels):
             bad |= set().union(*ids) - set.intersection(*ids)
             dropped |= bad
             for mid in ready:
-                month_frames += _month(mid, at[mid], scored[mid][0], bad, chunk, start_m, state[mid], arms=_AS_IS, emit_from=pd.Timestamp(INNER[0]))
+                month_frames += _month(mid, at[mid], scored[mid][0], bad, chunk, start_m, state[mid], emit_from=pd.Timestamp(INNER[0]))
             frames += month_frames
             done += 1
             rate = done / max(time.monotonic() - started, 1e-9)
@@ -691,7 +673,7 @@ def _replay_equal(out, inputs_hash, ladder_hash, frames_hash, declined_hash):
     """The recorded replay verdict if it was written for this run's inputs, ladder, scored frames and decline counts, else None (X7 not run)."""
     path = out / "receipts" / "synthetic_replay.json"
     if not path.exists(): return None
-    loaded = tuning.load_receipt(path)
+    loaded = receipts.load_receipt(path)
     ok = loaded["inputs"] == inputs_hash and loaded["ladder"] == ladder_hash and loaded.get("frames") == frames_hash and loaded.get("declined") == declined_hash
     return loaded["equal"] if ok and isinstance(loaded["equal"], bool) else None
 
@@ -705,7 +687,7 @@ def _write_t11(out, text):
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, out / "t11_synthetic.md")
-        tuning._fsync_dir(out)
+        receipts._fsync_dir(out)
     finally:
         tmp.unlink(missing_ok=True)
 
