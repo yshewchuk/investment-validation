@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
+from scipy import stats
 
 from engine.v2.ops.errors import OpsError
 from experiments.size_width_errmodel import (
@@ -152,3 +155,93 @@ def test_t1_markdown_reports_both_calibration_outcomes():
     assert md.endswith("\n")
     md_fail = t1_markdown(model, cal_fail)
     assert "Calibration: FAIL (fake_not_calibrated)" in md_fail
+
+
+def test_calibrate_hand_values():
+    model = {"L": math.log(2), "b": 1.0, "s": 0.0, "mean_log_y": 0.0}
+    label = np.array([1.0, 2.0, 3.0, 4.0])
+    forecast = np.array([2.0, 2.0, 5.0, 3.0])
+    z = np.zeros((2, 4))
+    # Fake forecast is 2*y, so its error against y is exactly y.
+    cal = calibrate(model, forecast, label, z)
+    assert cal["rmse_m0"] == pytest.approx(math.sqrt(6 / 4))
+    assert cal["mae_m0"] == pytest.approx(1.0)
+    assert cal["rmse_fake"] == pytest.approx(math.sqrt(30 / 4))
+    assert cal["mae_fake"] == pytest.approx(2.5)
+    assert cal["rmse_rel"] == pytest.approx(math.sqrt(30 / 4) / math.sqrt(6 / 4) - 1)
+    assert cal["mae_rel"] == pytest.approx(1.5)
+    assert cal["ok"] is False
+    assert cal["reason"] == "fake_not_calibrated"
+
+
+def test_calibrate_averages_rmse_per_draw():
+    model = {"L": 0.0, "b": 0.0, "s": 1.0, "mean_log_y": 0.0}
+    label = np.ones(4)
+    forecast = np.full(4, 2.0)
+    # Draw 1: fake = exp(0) = 1, error 0. Draw 2: fake = exp(log 3) = 3, error 2.
+    z = np.array([[0.0, 0.0, 0.0, 0.0], [math.log(3)] * 4])
+    cal = calibrate(model, forecast, label, z)
+    # Mean of per-draw RMSEs is (0 + 2) / 2 = 1, not sqrt(mean of squares) = sqrt(2).
+    assert cal["rmse_fake"] == pytest.approx(1.0)
+    assert cal["mae_fake"] == pytest.approx(1.0)
+    assert cal["rmse_m0"] == pytest.approx(1.0)
+    assert cal["mae_m0"] == pytest.approx(1.0)
+    assert cal["rmse_rel"] == pytest.approx(0.0)
+    assert cal["mae_rel"] == pytest.approx(0.0)
+    assert cal["ok"] is True
+
+
+def test_fit_hand_oracle():
+    n = 300
+    ly = np.tile([-1.0, -1.0, 1.0, 1.0], 75) * 0.5
+    y = np.exp(ly)
+    e = np.tile([-1.0, 1.0, -1.0, 1.0], 75) * 0.1
+    f = np.exp(0.3 + 0.7 * ly + e)
+    model = fit(f, y)
+    assert model["L"] == pytest.approx(0.3)
+    assert model["b"] == pytest.approx(0.7)
+    assert model["s"] == pytest.approx(0.1 * math.sqrt(300 / 298))
+    assert model["n"] == n
+    assert model["mean_log_y"] == pytest.approx(0.0, abs=1e-12)
+    assert model["skew"] == pytest.approx(0.0, abs=1e-9)
+    assert model["excess_kurtosis"] == pytest.approx(-2.0)
+
+
+def test_fit_skew_and_kurtosis_match_scipy():
+    rng = np.random.default_rng(1)
+    n = 1000
+    y = np.exp(rng.normal(1.0, 0.5, n))
+    ly = np.log(y)
+    f = np.exp(0.1 + 0.5 * (ly - np.mean(ly)) + rng.standard_exponential(n) * 0.3)
+    model = fit(f, y)
+    slope, intercept = np.polyfit(ly, np.log(f), 1)
+    resid = np.log(f) - (slope * ly + intercept)
+    assert model["skew"] == pytest.approx(stats.skew(resid), rel=1e-6)
+    assert model["excess_kurtosis"] == pytest.approx(stats.kurtosis(resid), rel=1e-6)
+    assert model["b"] == pytest.approx(slope)
+    assert model["s"] == pytest.approx(resid.std(ddof=2))
+
+
+def test_min_events_boundary():
+    def rows(n):
+        rng = np.random.default_rng(5)
+        ly = rng.normal(0.0, 0.5, n)
+        f = np.exp(0.3 + 0.7 * ly + 0.1 * rng.normal(size=n))
+        return f, np.exp(ly)
+
+    f, y = rows(MIN_EVENTS)
+    assert fit(f, y)["n"] == 300
+    f, y = rows(MIN_EVENTS - 1)
+    assert refusal(lambda: fit(f, y)) == "m0_inputs_insufficient"
+
+
+def test_t1_markdown_cells():
+    model = {"L": 0.3, "b": 0.7, "s": 0.2, "n": 2000, "mean_log_y": 0.0,
+             "dropped": {"nonpositive_forecast": 3, "nonpositive_label": 5},
+             "skew": 0.1234, "excess_kurtosis": -0.5}
+    calibration = {"ok": True, "reason": None, "rmse_rel": 0.012, "mae_rel": -0.034}
+    lines = t1_markdown(model, calibration).splitlines()
+    assert "| 0.3000 | 0.7000 | 0.2000 | 2000 |" in lines
+    assert ("Dropped: nonpositive_forecast=3, nonpositive_label=5; "
+            "residual skew=0.1234, excess kurtosis=-0.5000.") in lines
+    assert "Calibration: PASS rmse_rel=+0.012, mae_rel=-0.034" in lines
