@@ -120,3 +120,43 @@ def test_t10_notes_name_the_marks_each_verdict_reads(tmp_path):
     assert "T10 reads the mid marks" in headline and "T10 here reads the harsh fills" not in headline
     assert "T10 here reads the harsh fills (rung-2 zero-bid legs at alpha 0): reported only, not a verdict basis." in harsh
     assert "T10 reads the mid marks" not in harsh
+
+
+def test_month_straddle_rows_carry_breakeven_endpoints_for_g_prod_and_r_l(monkeypatch):
+    """Pins the Amendment 6b endpoints on the straddle rows of ``_month``: the G_PROD gate arm and both R_L rules carry
+    ``ends``, so their pnl_dollars_a0 / pnl_dollars_a1 are finite. Stubbed scorers: mid-mark pnl_per_share -0.2 at alpha 0
+    and 0.4 at alpha 1, one lot, so the dollars are -20.0 and 40.0 (x CONTRACT_MULTIPLIER 100 x 1 lot)."""
+    events = pd.DataFrame({"event_id": ["E3"], "event_date": pd.to_datetime(["2025-01-15"]), "pred_move": [5.0], "pred_crush": [-12.0],
+                           "pred_abs_move": [5.0], "implied_move": [4.0]})
+    shortvol_cols = ["event_id", "event_date", "structure", "status", "reason"]
+    scored = {("as_is", name): pd.DataFrame(columns=shortvol_cols) for name in driver.shortvol.NAMES}
+    endpoint = {0.0: -0.2, 1.0: 0.4}
+
+    def marks(per_share):
+        return pd.DataFrame({"event_id": ["E3"], "entry_cost": [10.0], "exit_value": [101.5], "rung": [2], "lots": [1],
+                             "pnl_per_share": [per_share], "pnl_dollars": [per_share * 100]})
+
+    def straddle_score(chunk_, events_, dec, alpha, *, drop_unquoted=False, mid_marks=False):
+        return marks(endpoint[alpha]) if mid_marks and alpha in endpoint else marks(0.1)
+
+    def taken(reason):
+        return pd.DataFrame({"event_id": ["E3"], "event_date": pd.to_datetime(["2025-01-15"]), "edge": [1.0], "cutoff": [0.0],
+                             "rel_spread": [0.1], "status": ["taken"], "reason": [reason]})
+
+    monkeypatch.setattr(driver.shortvol, "decide", lambda scored_: pd.DataFrame(columns=shortvol_cols))
+    monkeypatch.setattr(driver.shortvol, "score", lambda *a, **kw: pd.DataFrame(columns=["event_id", "entry_cost", "exit_value", "rung", "lots", "pnl_per_share", "pnl_dollars"]))
+    monkeypatch.setattr(driver.shortvol, "secured", lambda *a, **kw: pd.DataFrame(columns=["event_id", "secured_per_contract"]))
+    monkeypatch.setattr(driver.straddle, "decide", lambda events_, history, rule, chunk_, gate=None: taken("taken"))
+    monkeypatch.setattr(driver.straddle, "score", straddle_score)
+    monkeypatch.setattr(driver.straddle, "history_rows", lambda first, events_: pd.DataFrame(columns=["event_date", "edge"]))
+
+    frames = driver._month("prod", events, scored, set(), {}, pd.Timestamp(driver.OUTER[0]), driver._model_state(),
+                           sessions={}, gate=lambda events_, chunk_: taken("taken"))
+    rows = pd.concat(frames, ignore_index=True)
+    rows = rows[rows["book"] == "straddle"]
+    for arm in (driver.straddle.GATE_RULE, *driver.straddle.RULES):
+        row = rows[rows["arm_or_rule"] == arm]
+        assert len(row) == 1, arm
+        a0, a1 = float(row["pnl_dollars_a0"].iloc[0]), float(row["pnl_dollars_a1"].iloc[0])
+        assert np.isfinite(a0) and np.isfinite(a1), arm
+        assert a0 == pytest.approx(-20.0) and a1 == pytest.approx(40.0), arm
