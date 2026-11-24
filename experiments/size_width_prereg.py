@@ -64,19 +64,29 @@ def check_id_free(experiments_dir=None):
 
 def _planned_hashes(ledger_path):
     """Spec hashes of every PLANNED row for EXP-189, in file order. A missing ledger gives an empty list."""
+    p = Path(ledger_path)
+    if p.exists():
+        try:
+            size = p.stat().st_size
+        except OSError:
+            raise _refuse("ledger_malformed", "ledger is unreadable or malformed") from None
+        if size > 16 << 20:
+            raise _refuse("ledger_malformed", "ledger larger than 16 MiB")
     try:
-        frame = lib.ledger_read(Path(ledger_path))
-    except (lib.LedgerError, ValueError):
+        frame = lib.ledger_read(p)
+    except (lib.LedgerError, ValueError, OSError):
         raise _refuse("ledger_malformed", "ledger is unreadable or malformed") from None
     rows = frame[(frame["id"] == EXPERIMENT_ID) & (frame["stage"] == "planned")]
     return rows["spec_hash"].tolist()
 
 
-def require_preregistration(spec_path=SPEC_PATH, ledger_path=None, run_log_path=None) -> dict:
+def require_preregistration(spec_path=SPEC_PATH, ledger_path=None, run_log_path=None, experiments_dir=None) -> dict:
     """Verify the spec is registered before any run; return a receipt or raise.
 
-    The ledger must hold exactly one PLANNED row for EXP-189 (no amendments are declared), equal to the
-    spec hash. ``lib.LEDGER_PATH`` is read at call time, so tests can monkeypatch it.
+    Right after the spec loads, ``check_id_free(experiments_dir)`` refuses a second EXP-189 directory or
+    spec, before the ledger is read. The ledger must hold exactly one PLANNED row for EXP-189 plus one per
+    declared amendment (none are declared), equal to the spec hash. ``lib.LEDGER_PATH`` is read at call
+    time, so tests can monkeypatch it.
     """
     spec_path = Path(spec_path)
     ledger = lib.LEDGER_PATH if ledger_path is None else ledger_path
@@ -84,6 +94,7 @@ def require_preregistration(spec_path=SPEC_PATH, ledger_path=None, run_log_path=
                else Path(run_log_path))
 
     spec, digest = load_spec(spec_path)
+    check_id_free(experiments_dir)
     expected = len(spec.get("amendments", [])) + 1
     planned = _planned_hashes(ledger)
     if not planned:

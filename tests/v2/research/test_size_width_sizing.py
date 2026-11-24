@@ -68,8 +68,32 @@ def test_unknown_strategy_returns_none():
 
 @pytest.mark.parametrize("k", [0.0, -1.0, float("nan"), float("inf")])
 def test_non_positive_or_non_finite_k_raises(k):
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="positive finite"):
         sizing.k_params("TWIN-P", 2.5, k)
+
+
+# --------------------------------------------------------------------------
+# bounds are inclusive: TWIN-P5 (divisor 1.0) at k = 1 has width = forecast / 100
+# --------------------------------------------------------------------------
+
+
+def test_width_exactly_at_the_floor_is_accepted():
+    # forecast 0.5 gives width 0.005 == WIDTH_MIN
+    result = sizing.k_params("TWIN-P5", 0.5, 1.0)
+    assert result is not None
+    assert result["width_moneyness"] == pytest.approx(0.005)
+
+
+def test_width_exactly_at_the_ceiling_is_accepted():
+    # forecast 15.0 gives width 0.15 == WIDTH_MAX
+    result = sizing.k_params("TWIN-P5", 15.0, 1.0)
+    assert result is not None
+    assert result["width_moneyness"] == pytest.approx(0.15)
+
+
+def test_widths_just_outside_the_bounds_are_declined():
+    assert sizing.k_params("TWIN-P5", 0.49, 1.0) is None
+    assert sizing.k_params("TWIN-P5", 15.1, 1.0) is None
 
 
 # --------------------------------------------------------------------------

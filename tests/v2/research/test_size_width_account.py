@@ -47,8 +47,31 @@ def test_one_winning_trade_mid_beats_primary_on_the_200k_base():
 
 def test_non_finite_exit_value_mid_raises_value_error():
     rows = _one_trade(exit_value_mid=np.inf)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="finite"):
         size_width_account.simulate_account(rows, "mid")
+
+
+def test_one_trade_final_equity_matches_the_hand_computed_literal():
+    # By hand, under POLICY (start 200,000, cap 0.66, target share 0.25):
+    #   headroom = 0.66 * 200,000 = 132,000; want = 0.25 * 132,000 / 5,000 = 6.6; floor -> 6 contracts.
+    #   entry: 6 * 1.0 * 100 = 600 paid, so cash = 199,400.
+    #   primary exit 1.5: 6 * 150 = 900 back, final = 200,300 (pnl 300 = 6 * (150 - 100)).
+    #   mid exit 2.0:     6 * 200 = 1,200 back, final = 200,600 (pnl 600 = 6 * (200 - 100)).
+    primary = size_width_account.simulate_account(_one_trade(), "primary")
+    mid = size_width_account.simulate_account(_one_trade(), "mid")
+    assert primary["final_equity"] == pytest.approx(200300.0)
+    assert mid["final_equity"] == pytest.approx(200600.0)
+
+
+def test_nat_exit_date_raises_value_error():
+    rows = _one_trade(exit_date=None)
+    with pytest.raises(ValueError, match="valid entry_date"):
+        size_width_account.simulate_account(rows, "primary")
+
+
+def test_bad_mark_raises_value_error():
+    with pytest.raises(ValueError, match="mark must be"):
+        size_width_account.simulate_account(_one_trade(), "bogus")
 
 
 def test_bad_date_raises_value_error():

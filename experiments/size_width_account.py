@@ -17,6 +17,8 @@ secured_per_contract = base.secured_per_contract
 
 def simulate_account(rows, mark):
     """Metrics of one account over the TAKEN ``rows``; ``mark`` "mid" walks the exit_value_mid marks instead of the primary ones."""
+    if mark not in ("mid", "primary"):
+        raise ValueError("mark must be 'mid' or 'primary'")
     start = POLICY["start_equity"]
     if rows.empty:
         return {"wanted": 0, "funded": 0, "final_equity": start, "total_return": 0.0, "max_drawdown": 0.0, "peak_open": 0}

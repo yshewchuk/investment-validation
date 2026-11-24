@@ -184,3 +184,58 @@ def test_real_spec_is_exp_189_with_the_design_grid_and_account_equity():
     assert digest == lib.spec_hash(lib.load_spec(REAL_SPEC))
     assert list(spec["grid"]["k"]) == list(size_width_sizing.GRID)
     assert spec["account"]["start_equity"] == size_width_account.START_EQUITY
+
+
+# --------------------------------------------------------------------------
+# require_preregistration: id check, ledger bound, amendments, read-only
+# --------------------------------------------------------------------------
+
+
+def _own_experiments(case):
+    """A tmp experiments dir holding exactly one EXP-189_* directory."""
+    exps = case / "exps"
+    (exps / "EXP-189_x").mkdir(parents=True)
+    return exps
+
+
+def test_two_exp_189_dirs_refuse_even_with_a_correct_planned_row(tmp_path):
+    spec = _write_real_spec(tmp_path)
+    ledger = _write_ledger(tmp_path / "LEDGER.csv", [_planned_row(_digest(spec))])
+    exps = tmp_path / "exps"
+    (exps / "EXP-189_a").mkdir(parents=True)
+    (exps / "EXP-189_b").mkdir()
+    assert refusal(lambda: size_width_prereg.require_preregistration(
+        spec_path=spec, ledger_path=ledger, run_log_path=_run_log_path(tmp_path),
+        experiments_dir=exps)) == "experiment_id_conflict"
+
+
+def test_ledger_larger_than_16_mib_is_ledger_malformed(tmp_path):
+    spec = _write_real_spec(tmp_path)
+    ledger = _write_ledger(tmp_path / "LEDGER.csv", [_planned_row(_digest(spec))])
+    with open(ledger, "r+b") as f:
+        f.truncate(17 << 20)
+    assert ledger.stat().st_size == 17 << 20
+    exps = _own_experiments(tmp_path)
+    assert refusal(lambda: size_width_prereg.require_preregistration(
+        spec_path=spec, ledger_path=ledger, run_log_path=_run_log_path(tmp_path),
+        experiments_dir=exps)) == "ledger_malformed"
+
+
+def test_declared_amendment_with_one_planned_row_is_ambiguous(tmp_path):
+    spec = _write_real_spec(tmp_path, amendments=["a"])
+    ledger = _write_ledger(tmp_path / "LEDGER.csv", [_planned_row(_digest(spec))])
+    exps = _own_experiments(tmp_path)
+    assert refusal(lambda: size_width_prereg.require_preregistration(
+        spec_path=spec, ledger_path=ledger, run_log_path=_run_log_path(tmp_path),
+        experiments_dir=exps)) == "planned_row_ambiguous"
+
+
+def test_successful_check_leaves_the_ledger_bytes_unchanged(tmp_path):
+    spec = _write_real_spec(tmp_path)
+    ledger = _write_ledger(tmp_path / "LEDGER.csv", [_planned_row(_digest(spec))])
+    before = ledger.read_bytes()
+    receipt = size_width_prereg.require_preregistration(
+        spec_path=spec, ledger_path=ledger, run_log_path=_run_log_path(tmp_path),
+        experiments_dir=_own_experiments(tmp_path))
+    assert receipt["spec_hash_checked"] is True
+    assert ledger.read_bytes() == before
