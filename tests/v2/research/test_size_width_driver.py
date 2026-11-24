@@ -1,5 +1,7 @@
 """EXP-189 driver: synthetic runs only. The pricing seam is stubbed on size_pnl_shortvol (every event is declined, so no account
 is walked) and the pool is stubbed as the EXP-188 driver tests stub it; the sources and chunks are the EXP-188 fixtures."""
+import json
+
 import pandas as pd
 import pytest
 
@@ -11,6 +13,7 @@ from experiments import size_pnl_receipts as receipts
 from experiments import size_pnl_shortvol as sv
 from experiments import size_width_driver as driver
 from experiments import size_width_fake as fake
+from experiments import size_width_report as report
 from experiments import size_width_tuning as tuning
 from experiments.size_pnl_shortvol import NAMES, Refusal
 from experiments.size_width_sizing import GRID
@@ -319,6 +322,24 @@ def test_outer_freezes_the_width_one_taken_rows_and_counts_the_2025_trades(tmp_p
     assert (rest["status"] == "undetermined").all() and (rest["reason"] == "thin_history").all()
     outer = receipts.load_receipt(out / "receipts" / "outer_summary.json")
     assert outer["results"]["production"]["2025"]["account"]["trades"] == 2  # E3 and E4 both have sessions inside 2025
+
+
+# ---- end to end: the report reads what the driver writes ---------------------------
+
+def test_the_report_reads_the_receipts_the_driver_writes(tmp_path, m0, taking, monkeypatch):
+    ids = ["E1", "E2", "E3", "E4"]  # 2023/2024 events feed the inner stage; E3 and E4 are 2025 (outer)
+    use_chunks(monkeypatch, [("2023Q3", chunk("E1")), ("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path, event_ids=ids, prereg=OK)
+    use_chunks(monkeypatch, [("2023Q3", chunk("E1")), ("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+    driver.run(sources(), "outer", tmp_path, event_ids=ids, prereg=OK)
+    recommendation = report.assemble(tmp_path)["recommendation"]
+    assert isinstance(recommendation, str)
+    text = (tmp_path / "REPORT.md").read_text(encoding="utf-8")
+    for heading in ("### T2 chosen factors", "### T3 curves per structure", "### T5 production versus arms",
+                    "### T6 per-structure", "### T7 success table"):
+        assert heading in text
+    assert "SMOKE RUN" in text
+    json.loads((tmp_path / "proposed_rule.json").read_text(encoding="utf-8"))
 
 
 # ---- stats and declined share -----------------------------------------------------
