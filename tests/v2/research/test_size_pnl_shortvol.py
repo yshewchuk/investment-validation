@@ -11,7 +11,8 @@ from engine.fills import FillModel
 from engine.forecast_sizing import FORECAST_SIZED, forecast_params
 from engine.pnl_sim import expected_pnl
 from engine.portfolio import CONTRACT_MULTIPLIER
-from engine.structures import CALL, PUT, STRUCTURES
+from engine.score import _mean_relative_spread
+from engine.structures import CALL, PUT, STRUCTURES, ChainSnapshot, price_structure
 from experiments import size_pnl_ladder as lad
 from experiments import size_pnl_shortvol as sv
 from experiments.size_pnl_pool import build_pool
@@ -69,8 +70,8 @@ def taken(chunk, *eids, name="CND-PS", alpha=0.5):
     for eid in eids:
         cost = NAN
         if eid in pos:
-            legs, _ = sv.resolve(chunk, pos[eid], name, PRED)
-            entered = None if legs is None else sv.entry_legs(chunk, legs, FillModel(alpha))
+            priced, legs, _ = sv.resolve_priced(chunk, pos[eid], name, PRED, FillModel(alpha))
+            entered = None if legs is None else sv.entry(priced)
             if entered is not None:
                 cost = entered[0]
         costs.append(cost)
@@ -293,7 +294,7 @@ def test_score_events_entry_quotes_and_cost(pool):
     out = run(chunk_of(("A", {})), events_for("A"), pool).iloc[0]
     assert out["entry_cost"] == pytest.approx(2 * 1.36 - 2 * 1.09)  # BUY 94, 106 minus SELL 97, 103
     assert out["width"] == pytest.approx(0.03)
-    legs, _ = sv.resolve(chunk_of(("A", {})), 0, "CND-PS", PRED)  # every leg, references included
+    _priced, legs, _ = sv.resolve_priced(chunk_of(("A", {})), 0, "CND-PS", PRED, FillModel(0.5))  # every leg, refs incl.
     mids = [1.0 + 0.01 * (leg["strike"] - 100) ** 2 for leg in legs]  # the 0.2 spread over the mid, per leg
     assert out["rel_spread"] == pytest.approx(np.mean([0.2 / mid for mid in mids]))
 
@@ -541,5 +542,56 @@ def test_secured_returns_only_taken_rows():
     chunk = chunk_of(("A", {}))
     decisions = taken(chunk, "A").assign(status="not_taken")
     assert len(sv.secured(chunk, events_for("A"), decisions, "CND-PS")) == 0
+
+
+# ---- production pricing: chain snapshot, resolve, cost and spread (A6-2a) ---
+
+def test_chain_snapshot_carries_only_this_events_puts():
+    chunk = chunk_of(("A", {}), ("B", {}))
+    snap = sv.chain_snapshot(chunk, 1)
+    assert isinstance(snap, ChainSnapshot) and snap.session is None
+    assert set(snap.rows["right"]) == {"P"} and list(snap.rows["strike"]) == [float(k) for k in range(80, 121)]
+    assert snap.spot == 100.0 and snap.event_date == pd.Timestamp("2024-03-15")
+    assert (snap.rows["expiry"] == pd.Timestamp("2024-03-15")).all() and (snap.rows["dte"] == 30).all()
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_resolve_legs_are_price_structures_legs(name):
+    chunk = chunk_of(("A", {}))
+    legs, reason = sv.resolve(chunk, 0, name, PRED)
+    priced = price_structure(STRUCTURES[name](**forecast_params(name, PRED)), sv.chain_snapshot(chunk, 0),
+                             FillModel(0.5))
+    assert reason is None and len(legs) == len(priced.legs)
+    for leg, want in zip(legs, priced.legs):
+        assert (leg["name"], leg["side"], leg["qty"]) == (want.name, want.side, want.qty)
+        assert leg["strike"] == pytest.approx(want.strike)
+
+
+def test_cost_and_spread_are_production_on_all_resolved_legs():
+    # Reference legs (qty 0) get a 0.6 spread and traded legs 0.2, so the reference legs move the mean.
+    name = next(n for n in NAMES if any(leg.qty == 0 for leg in sv.resolve_priced(
+        chunk_of(("A", {})), 0, n, PRED, FillModel(0.5))[0].legs))
+    refs = [leg.strike for leg in sv.resolve_priced(chunk_of(("A", {})), 0, name, PRED, FillModel(0.5))[0].legs
+            if leg.qty == 0]
+
+    def wide(k):
+        mid = 1.0 + 0.01 * (k - 100) ** 2
+        half = 0.3 if any(np.isclose(k, r) for r in refs) else 0.1
+        return mid - half, mid + half
+
+    priced, legs, reason = sv.resolve_priced(chunk_of(("A", {}), entry=wide), 0, name, PRED, FillModel(0.5))
+    assert reason is None and legs is not None
+    cost, rel = sv.entry(priced)
+    assert cost == pytest.approx(priced.cost)
+    assert rel == pytest.approx(_mean_relative_spread(priced))
+    traded = [leg for leg in priced.legs if leg.qty > 0]
+    assert rel != pytest.approx(np.mean([(leg.ask - leg.bid) / (0.5 * (leg.bid + leg.ask)) for leg in traded]))
+
+
+def test_crossed_entry_quote_on_a_traded_strike_is_unusable_not_raised(pool):
+    # FillModel raises ValueError on bid > ask; resolve_priced maps that to a reason, not an exception.
+    chunk = chunk_of(("A", {}), entry=lambda k: (2.0, 1.0) if k == 94 else quote(k))
+    assert sv.resolve_priced(chunk, 0, "CND-PS", PRED, FillModel(0.5)) == (None, None, "entry_quote_unusable")
+    assert run(chunk, events_for("A"), pool).loc[0, "reason"] == "entry_quote_unusable"
 
 
