@@ -1,6 +1,7 @@
 import pandas as pd
 import pytest
 
+from experiments import size_pnl_ladder as lad
 from experiments import size_pnl_shortvol as sv
 from experiments import size_width_fallback as fbm
 from experiments.size_pnl_pool import build_pool
@@ -9,7 +10,7 @@ from experiments.size_width_account import simulate_account
 from experiments.size_width_band import PHIS, rho_ladder, write_bands
 from experiments.size_width_fallback import FallbackSweep, accounts, floor_ok, recover, recovery, split_trades, t9
 from experiments.size_width_sweep import ALPHA, E_ARM, Sweep, scaled
-from tests.v2.research.test_size_pnl_shortvol import _tables, chunk_of, events_for
+from tests.v2.research.test_size_pnl_shortvol import _tables, chunk_of, events_for, put_legs, rec
 
 DRAW = 200
 NAME = "CND-PS"
@@ -366,6 +367,60 @@ def test_t9_counts_by_hand(tmp_path, monkeypatch):
     # the taken stats come from the no-fallback base, which takes no NAME trade in WINDOW (see the accounts test)
     assert row["taken_trades"] == 0 and row["taken_ret"] is None
     assert row["taken_trades"] == len(base.rows([(NAME, 1.0)], WINDOW))
+
+
+# ---- T9 taken side with a non-zero base baseline ------------------------------
+# Dense ladder (strikes 80..120 step 1): CND-PS at PRED 6.0 resolves at k = 1 with legs 94 / 97 / 103 / 106.
+# Entry at mid: BUY 94 and 106 at 1.36, SELL 97 and 103 at 1.09, so cost = 2 * 1.36 - 2 * 1.09 = 0.54 per share.
+# Exit locked at (1.0, 1.0): 2 * 1.0 - 2 * 1.0 = 0.0, so ret = 0.0 / 0.54 - 1 = -1.0.
+# lots(0.54) = floor(10_000 / (0.54 * 100)) = floor(10_000 / 54) = floor(185.18) = 185.
+# pnl_dollars_mid = -0.54 * 100 * 185 = -9990.0.
+DENSE = range(80, 121)
+DENSE_PRIOR = [f"D{i}" for i in range(6)]
+DENSE_CUR = [f"E{i}" for i in range(6)]
+DENSE_PNL_MID = -9990.0  # -0.54 * 100 * 185
+# N = the number of E events the no-fallback base takes for NAME in WINDOW. From a run: base takes E2..E5, each with
+# entry_cost 0.54, exit_value_mid 0.0, pnl_dollars_mid -9990.0 (matching DENSE_PNL_MID).
+DENSE_TAKEN_N = 4
+
+
+def _mixed_scene():
+    """D / E events on the dense ladder, P / C events on the coarse ladder, all in one chunk; mcap 20e9 (ge_10B)."""
+    strikes = {**{e: DENSE for e in DENSE_PRIOR + DENSE_CUR}, **{e: COARSE for e in PRIOR + CUR}}
+    ids = DENSE_PRIOR + PRIOR + DENSE_CUR + CUR
+    chunk = lad._pack([rec(e, 100.0, put_legs(strikes=strikes[e])) for e in ids], {})
+    prior = events_for(*DENSE_PRIOR, *PRIOR, date="2024-05-10")
+    cur = events_for(*DENSE_CUR, *CUR, date="2024-06-10")
+    sessions = {e: (pd.Timestamp("2024-05-15"), pd.Timestamp("2024-05-25")) for e in DENSE_PRIOR + PRIOR}
+    sessions.update({e: (pd.Timestamp("2024-06-11"), pd.Timestamp("2024-06-21")) for e in DENSE_CUR + CUR})
+    return chunk, prior, cur, sessions
+
+
+def test_t9_taken_side_has_a_nonzero_base_baseline(tmp_path, monkeypatch):
+    _small_window(monkeypatch)
+    assert DENSE_TAKEN_N is not None, "set DENSE_TAKEN_N from one run of base.rows([(NAME, 1.0)], WINDOW)"
+    scene = _mixed_scene()
+    fb = _run(_fb(tmp_path), scene)
+    base = _run(Sweep(), scene)
+    # the base takes NAME only on the dense E events: the coarse P / C events are declined without fallback
+    base_rows = base.rows([(NAME, 1.0)], WINDOW)
+    assert len(base_rows) == DENSE_TAKEN_N > 0
+    assert set(base_rows["event_id"]) == {"E2", "E3", "E4", "E5"}
+    assert base_rows["entry_cost"].tolist() == pytest.approx([0.54] * 4)
+    assert (base_rows["exit_value_mid"] == 0.0).all()
+    assert base_rows["pnl_dollars_mid"].tolist() == pytest.approx([DENSE_PNL_MID] * DENSE_TAKEN_N)
+    rows = [r for r in t9(fb, base, 0.9, WINDOW) if r["structure"] == NAME]
+    assert len(rows) == 1
+    row = rows[0]
+    # taken side: from the base sweep, non-zero count, hand values
+    assert row["taken_trades"] == DENSE_TAKEN_N
+    assert row["taken_ret"] == pytest.approx(-1.0)
+    assert row["taken_pnl"] == pytest.approx(DENSE_PNL_MID)
+    # recovered side: the fallback RECOVERS the coarse C events (trials) but the gate does not TAKE them
+    # (the dense events' scores raise the cutoff), so recovered has 0 trades
+    assert {t["event_id"] for t in fb.trials if t["rho"] is not None} >= set(CUR)
+    assert row["recovered"] == 6 and row["declined"] == 6
+    assert row["recovered_trades"] == 0 and row["recovered_ret"] is None
 
 
 def test_t9_groups_the_trials_by_market_cap_tier(tmp_path, monkeypatch):
