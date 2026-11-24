@@ -5,7 +5,6 @@ import pandas as pd
 import pytest
 
 from experiments import size_pnl_receipts as receipts
-from experiments import size_width_account as account
 from experiments import size_width_tuning as tuning
 from experiments.size_pnl_shortvol import NAMES, Refusal
 from experiments.size_width_sweep import _TAKEN, E_ARM, INNER, Sweep
@@ -51,16 +50,29 @@ def _no_constants(name):
 
 # ---- unit score -----------------------------------------------------------
 
-def test_unit_score_matches_the_account_and_the_quarter_se():
-    rows = frame(trade("a", "CND-PS", "2023-08-01", "2023-08-20"),
-                 trade("b", "CND-PS", "2024-02-01", "2024-02-20"),
-                 trade("c", "CND-PS", "2024-06-03", "2024-06-20"))
+def test_unit_score_matches_the_hand_computed_one_trade_return():
+    # By hand (start 200,000, cap 0.66, target share 0.25; cost 1.0, mid 1.5, secured 5,000 per contract):
+    #   headroom = 0.66 * 200,000 = 132,000; want = 0.25 * 132,000 / 5,000 = 6.6; floor -> 6 contracts.
+    #   pnl = 6 * (1.5 - 1.0) * 100 = 300; final = 200,300; ret = 300 / 200,000 = 0.0015.
+    rows = frame(trade("a", "CND-PS", "2024-01-02", "2024-01-20", cost=1.0, exit_value=1.5, mid=1.5, secured=5000.0))
     score = tuning.unit_score(rows, INNER)
-    q = account.quarter_returns(rows, tuning._quarters(INNER))
-    assert len(q) == 6
-    assert score["ret"] == pytest.approx(account.simulate_account(rows, "mid")["total_return"])
+    assert score["ret"] == pytest.approx(0.0015)
+    assert score["trades"] == 1
+
+
+def test_unit_score_se_is_the_sample_sd_over_the_six_window_quarters():
+    # INNER quarters are 2023Q3..2024Q4 (n = 6). By hand, with cost 1.0, mid 1.5, secured 5,000 per contract:
+    #   trade a: entry 2023-08-01, exit 2023-08-20 -> 6 contracts, gain1 = 6 * 0.5 * 100 = 300.
+    #   trade b: entry 2024-02-01, exit 2024-02-20, equity 200,000 + 300 = 200,300 -> headroom 132,198,
+    #            want 6.6099 -> 6 contracts, gain2 = 300.
+    #   quarter returns: 2023Q3 = gain1 / 200,000; 2023Q4 = 0; 2024Q1 = gain2 / 200,300; 2024Q2..Q4 = 0.
+    rows = frame(trade("a", "CND-PS", "2023-08-01", "2023-08-20", cost=1.0, exit_value=1.5, mid=1.5, secured=5000.0),
+                 trade("b", "CND-PS", "2024-02-01", "2024-02-20", cost=1.0, exit_value=1.5, mid=1.5, secured=5000.0))
+    q = [300 / 200000, 0.0, 0.0, 300 / 200300, 0.0, 0.0]
+    score = tuning.unit_score(rows, INNER)
     assert score["se"] == pytest.approx(np.std(q, ddof=1) / np.sqrt(6))
-    assert score["trades"] == 3
+    assert score["ret"] == pytest.approx(600 / 200000)
+    assert score["trades"] == 2
 
 
 # ---- choose ---------------------------------------------------------------
@@ -159,6 +171,7 @@ def test_run_inner_writes_receipts_replays_and_refuses_a_changed_body(tmp_path):
     tuning.run_inner(Sweep(), tmp_path, "h1")  # an identical body replays
     with pytest.raises(Refusal) as exc:
         tuning.run_inner(_sweep_cnd_at_15(), tmp_path, "h1")
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert exc.value.details["reason"] == "tuning_receipt_changed"
 
 
@@ -190,6 +203,7 @@ def test_frozen_refuses_a_receipt_for_b_copied_to_the_a_path(tmp_path):
     _write_at(tmp_path, "A", _body("B", k=1.5), arm_field="B")
     with pytest.raises(Refusal) as exc:
         tuning.frozen(tmp_path, "A", "h1")
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert exc.value.details["reason"] == "tuning_receipt_changed"
 
 
@@ -197,6 +211,7 @@ def test_frozen_refuses_a_receipt_with_the_wrong_window(tmp_path):
     _write_at(tmp_path, "A", _body("A"), window="2024")
     with pytest.raises(Refusal) as exc:
         tuning.frozen(tmp_path, "A", "h1")
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert exc.value.details["reason"] == "tuning_receipt_changed"
 
 
@@ -206,6 +221,7 @@ def test_frozen_refuses_a_unit_k_off_the_grid(tmp_path):
     _write_at(tmp_path, "A", body)
     with pytest.raises(Refusal) as exc:
         tuning.frozen(tmp_path, "A", "h1")
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert exc.value.details["reason"] == "tuning_receipt_changed"
 
 
@@ -214,6 +230,7 @@ def test_run_outer_refuses_a_missing_receipt_before_any_evaluation(tmp_path, mon
     monkeypatch.setattr(tuning, "evaluate", lambda *a, **k: calls.append(a) or {})
     with pytest.raises(Refusal) as exc:
         tuning.run_outer(Sweep(), tmp_path, ["A", "B"], "h1")
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert exc.value.details["reason"] == "tuning_receipt_missing"
     assert calls == []
 
@@ -222,6 +239,7 @@ def test_run_outer_refuses_receipts_bound_to_other_inputs(tmp_path):
     tuning.run_inner(Sweep(), tmp_path, "h1")
     with pytest.raises(Refusal) as exc:
         tuning.run_outer(Sweep(), tmp_path, ["A"], "h2")
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert exc.value.details["reason"] == "tuning_receipt_changed"
 
 
@@ -252,8 +270,20 @@ def test_evaluate_combines_the_structures_into_one_account():
     for n in ("CND-PS", "TWIN-P"):
         sw.taken[(n, 1.0)] = [frame(trade(f"{n}-1", n, "2024-02-01", "2024-02-10"),
                                     trade(f"{n}-2", n, "2024-03-01", "2024-03-10"))]
+    # By hand (cost 1.0, mid 2.0 -> 200 back per contract, secured 1,000 per contract, cap 0.66, target share 0.25, start 200,000).
+    # Each structure trades 2024-02-01 -> 02-10 and 2024-03-01 -> 03-10.
+    #   02-01: headroom 132,000 -> want 33 -> 33 contracts (cash 196,700); the other structure: headroom 99,000 -> want 24.75 -> 24
+    #          contracts (cash 194,300).
+    #   02-10 exits: +33 * 200 + 24 * 200 = +11,400 -> cash 205,700.
+    #   03-01: headroom 135,762 -> 33 contracts (cash 202,400); then headroom 102,762 -> want 25.69 -> 25 contracts (cash 199,900).
+    #   03-10 exits: +33 * 200 + 25 * 200 = +11,600 -> final 211,500; pnl 11,500; total_return 0.0575; 4 funded of 4.
+    # CND-PS alone: 33 contracts on 02-01 (cash 196,700); exit +6,600 -> 203,300; 33 on 03-01 (cash 200,000);
+    #   exit +6,600 -> final 206,600; 2 funded of 2.
     out = tuning.evaluate(sw, {n: 1.0 for n in NAMES}, INNER)
     assert out["account"]["trades"] == 4
     assert out["account"]["funded"] == 4
+    assert out["account"]["final_equity"] == pytest.approx(211500.0)
+    assert out["account"]["total_return"] == pytest.approx(0.0575)
+    assert out["structures"]["CND-PS"]["final_equity"] == pytest.approx(206600.0)
     assert out["structures"]["CND-PS"]["funded"] == 2 and out["structures"]["CND-PS"]["trades"] == 2
     assert out["structures"]["BFLY-P"]["trades"] == 0

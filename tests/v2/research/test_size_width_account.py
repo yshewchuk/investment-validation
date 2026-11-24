@@ -124,3 +124,17 @@ def test_quarter_returns_compound_on_the_equity_at_each_quarter_start():
     gain_2 = size_width_account.simulate_account(rows, "mid")["final_equity"] - (200000.0 + gain_1)
     got = size_width_account.quarter_returns(rows, quarters)  # trade 1 exits in Q1, trade 2 in Q2
     assert got == pytest.approx([gain_1 / 200000.0, gain_2 / (200000.0 + gain_1), 0.0])
+
+
+def test_quarter_returns_fill_the_contiguous_range_after_the_window():
+    quarters = pd.period_range("2024-07-01", periods=2, freq="Q")  # 2024Q3, 2024Q4
+    rows = pd.DataFrame([
+        {"entry_date": "2024-12-02", "exit_date": "2025-01-15", "entry_cost": 1.0, "exit_value": 1.5,
+         "exit_value_mid": 2.0, "secured_per_contract": 5000.0},  # exits 2025Q1
+        {"entry_date": "2025-06-02", "exit_date": "2025-07-15", "entry_cost": 1.0, "exit_value": 1.5,
+         "exit_value_mid": 2.0, "secured_per_contract": 5000.0},  # exits 2025Q3
+    ], columns=COLUMNS)
+    got = size_width_account.quarter_returns(rows, quarters)
+    assert len(got) == 5  # 2024Q3, 2024Q4, 2025Q1, 2025Q2, 2025Q3
+    assert got[3] == 0.0  # 2025Q2 carries no funded pnl but stays in the contiguous range
+    assert got[4] > 0.0
