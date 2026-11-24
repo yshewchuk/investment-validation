@@ -73,21 +73,21 @@ def test_margin_just_over_fails():
     row = sws.success_table(PROD, {"A": _arm()}, be)["A"]
     assert row["breakeven"]["margin_ok"] is False
     assert row["passed"] is False
-    assert "breakeven_margin" in row["fails"]
+    assert row["fails"] == ["breakeven_margin"]
 
 
 def test_breakeven_none_fails():
     be = {"production": _be(0.5), "A": {**_be(0.5), "2025": None}}
     row = sws.success_table(PROD, {"A": _arm()}, be)["A"]
     assert row["passed"] is False
-    assert "breakeven_not_available" in row["fails"]
+    assert row["fails"] == ["breakeven_not_available"]
 
 
 def test_production_breakeven_none_fails():
     be = {"production": {**_be(0.5), "2025": None}, "A": _be(0.5)}
     row = sws.success_table(PROD, {"A": _arm()}, be)["A"]
     assert row["passed"] is False
-    assert "breakeven_not_available" in row["fails"]
+    assert row["fails"] == ["breakeven_not_available"]
 
 
 def test_guard_two_lost_ok():
@@ -102,7 +102,7 @@ def test_guard_three_lost_fails():
     assert row["lost_structures"] == 3
     assert row["guard_ok"] is False
     assert row["passed"] is False
-    assert "guard" in row["fails"]
+    assert row["fails"] == ["guard"]
 
 
 def test_omitted_arm_is_absent():
@@ -116,7 +116,7 @@ def test_e_same_k_fails():
     table = sws.success_table(PROD, {"E": _arm(), "A": _arm()}, be, e_summary)
     assert table["E"]["same_k"] is True
     assert table["E"]["passed"] is False
-    assert "same_k" in table["E"]["fails"]
+    assert table["E"]["fails"] == ["same_k"]
     assert table["A"]["same_k"] is False
     assert table["A"]["passed"] is True
 
@@ -125,6 +125,51 @@ def test_e_passes_without_same_k():
     e_summary = {n: {"same_k": False} for n in NAMES}
     be = {**BE, "E": _be(0.5)}
     assert sws.success_table(PROD, {"E": _arm()}, be, e_summary)["E"]["passed"] is True
+
+
+@pytest.mark.parametrize("e_summary", [None, {}], ids=["none", "empty"])
+def test_e_summary_absent_fails(e_summary):
+    be = {**BE, "E": _be(0.5)}
+    row = sws.success_table(PROD, {"E": _arm()}, be, e_summary)["E"]
+    assert row["passed"] is False
+    assert row["same_k"] is False
+    assert row["fails"] == ["e_summary_missing"]
+
+
+def test_e_summary_partial_fails():
+    e_summary = {n: {"same_k": False} for n in NAMES[:6]}
+    assert len(e_summary) == 6 and len(NAMES) == 7
+    be = {**BE, "E": _be(0.5)}
+    row = sws.success_table(PROD, {"E": _arm()}, be, e_summary)["E"]
+    assert row["passed"] is False
+    assert row["same_k"] is False
+    assert row["fails"] == ["e_summary_missing"]
+
+
+def test_non_e_arm_ignores_e_summary():
+    be = {**BE, "A": _be(0.5)}
+    row = sws.success_table(PROD, {"A": _arm()}, be, None)["A"]
+    assert row["passed"] is True
+    assert row["fails"] == []
+
+
+def test_nan_structure_counts_as_lost():
+    arm = _arm()
+    arm["2025"]["structures"][NAMES[0]]["total_return"] = float("nan")
+    row = sws.success_table(PROD, {"A": arm}, BE)["A"]
+    assert row["lost_structures"] == 1
+    assert row["guard_ok"] is True
+    assert row["passed"] is True
+
+
+def test_nan_structures_over_guard_fail():
+    arm = _arm()
+    for n in NAMES[:3]:
+        arm["2025"]["structures"][n]["total_return"] = float("nan")
+    row = sws.success_table(PROD, {"A": arm}, BE)["A"]
+    assert row["lost_structures"] == 3
+    assert row["passed"] is False
+    assert row["fails"] == ["guard"]
 
 
 def test_recommend_prefers_a_over_c():

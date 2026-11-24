@@ -35,7 +35,7 @@ def _lost(arm, production):
     if "2025" not in arm or "2025" not in production:
         return len(NAMES)
     a, p = arm["2025"]["structures"], production["2025"]["structures"]
-    return sum(a[n]["total_return"] < p[n]["total_return"] for n in NAMES)
+    return sum(not (a[n]["total_return"] >= p[n]["total_return"]) for n in NAMES)
 
 
 def _row(label, arm, production, breakevens, e_summary):
@@ -60,10 +60,19 @@ def _row(label, arm, production, breakevens, e_summary):
     guard_ok = lost <= MAX_LOST
     if not guard_ok:
         fails.append("guard")
-    same_k = bool(e_summary) and label == "E" and any(v["same_k"] for v in e_summary.values())
-    if same_k:
-        fails.append("same_k")
-    passed = all(beats.values()) and margin_ok and guard_ok and not same_k
+    e_ok = True
+    same_k = False
+    if label == "E":
+        complete = (isinstance(e_summary, dict) and set(e_summary) == set(NAMES)
+                    and all(isinstance(v, dict) and isinstance(v.get("same_k"), bool) for v in e_summary.values()))
+        if not complete:
+            e_ok = False
+            fails.append("e_summary_missing")
+        else:
+            same_k = any(v["same_k"] for v in e_summary.values())
+            if same_k:
+                fails.append("same_k")
+    passed = all(beats.values()) and margin_ok and guard_ok and e_ok and not same_k
     return {"beats": beats, "breakeven": {"x": x, "production": base, "margin_ok": margin_ok},
             "lost_structures": lost, "guard_ok": guard_ok, "same_k": same_k, "passed": passed, "fails": fails}
 
