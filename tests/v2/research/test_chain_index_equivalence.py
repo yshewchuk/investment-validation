@@ -183,6 +183,28 @@ def _two_expiry_chain(a_strikes, b_strikes, rights="P"):
     return _concat(a, b)
 
 
+def _selected_rows(snapshot, leg):
+    """Rows matching the priced leg's expiry, right and strike."""
+    rows = snapshot.rows
+    mask = (
+        (rows["expiry"] == leg.expiry).to_numpy()
+        & (rows["right"] == leg.right).to_numpy()
+        & np.isclose(rows["strike"].to_numpy(), leg.strike)
+    )
+    return rows[mask]
+
+
+def _bump_selected_bid(snapshot, first_price):
+    """Raise the bid of the first leg's selected row by half its spread; return the leg name."""
+    leg = first_price.legs[0]
+    sel = _selected_rows(snapshot, leg)
+    assert len(sel) == 1, f"expected one row for leg {leg.name}, got {len(sel)}"
+    i = sel.index[0]
+    rows = snapshot.rows
+    rows.loc[i, "bid"] += (rows.loc[i, "ask"] - rows.loc[i, "bid"]) / 2
+    return leg.name
+
+
 # --------------------------------------------------------------------------
 # 1. registry structures x sessions x fills x chain shapes
 # --------------------------------------------------------------------------
@@ -674,11 +696,14 @@ def test_call_order_does_not_change_results():
 def test_mutation_is_not_checked_with_verify_disabled(monkeypatch):
     monkeypatch.setenv("ENGINE_CHAIN_INDEX_VERIFY", "0")
     priced = snap(make_chain(rights="CP", delta=True), "AMC")
-    price_structure_indexed(straddle_through(), priced, MID)
-    priced.rows.loc[priced.rows.index[0], "bid"] += 1.0
-    got = price_structure_indexed(straddle_through(), priced, MID)  # no ChainSnapshotMutated
+    first = price_structure_indexed(straddle_through(), priced, MID)
+    name = _bump_selected_bid(priced, first)
+    new_bid = _selected_rows(priced, first.legs[0])["bid"].iloc[0]
+    second = price_structure_indexed(straddle_through(), priced, MID)  # no ChainSnapshotMutated
+    assert second.leg(name).bid != first.leg(name).bid
+    assert second.leg(name).bid == new_bid
     # Only expiry/dte are checksummed; the bid change must still price exactly as legacy does.
-    assert got.to_dict() == price_structure(straddle_through(), priced, MID).to_dict()
+    assert second.to_dict() == price_structure(straddle_through(), priced, MID).to_dict()
 
 
 @pytest.mark.parametrize("column", ["expiry", "dte"])
@@ -697,12 +722,16 @@ def test_verify_mode_raises_on_in_place_expiry_or_dte_mutation(column):
 
 def test_verify_mode_does_not_checksum_bid():
     priced = snap(make_chain(rights="CP", delta=True), "AMC")
-    assert price_structure_indexed(straddle_through(), priced, MID).legs
-    priced.rows.loc[priced.rows.index[0], "bid"] += 1.0
+    first = price_structure_indexed(straddle_through(), priced, MID)
+    assert first.legs
+    name = _bump_selected_bid(priced, first)
+    new_bid = _selected_rows(priced, first.legs[0])["bid"].iloc[0]
     # Documented: only expiry and dte are checksummed, so a bid change is not refused.
-    got = price_structure_indexed(straddle_through(), priced, MID)
-    assert got.legs
-    assert got.to_dict() == price_structure(straddle_through(), priced, MID).to_dict()
+    second = price_structure_indexed(straddle_through(), priced, MID)
+    assert second.legs
+    assert second.leg(name).bid != first.leg(name).bid
+    assert second.leg(name).bid == new_bid
+    assert second.to_dict() == price_structure(straddle_through(), priced, MID).to_dict()
 
 
 def test_expiry_mutation_is_checked_by_default(monkeypatch):
