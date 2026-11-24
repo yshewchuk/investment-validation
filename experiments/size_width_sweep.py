@@ -55,6 +55,8 @@ class Sweep:
     """Scored history (it feeds each trailing cutoff), taken rows and decline reasons per (structure, arm); arm is a grid k or E_ARM."""
     def __init__(self, ks=GRID, names=sv.NAMES):
         self.ks, self.names = tuple(ks), tuple(names)
+        if not self.ks or len(set(self.ks)) != len(self.ks) or any(k not in GRID for k in self.ks): raise ValueError(f"ks must be non-empty, unique and in GRID: {self.ks}")
+        if not self.names or len(set(self.names)) != len(self.names) or any(n not in sv.NAMES for n in self.names): raise ValueError(f"names must be non-empty, unique and in sv.NAMES: {self.names}")
         self.scored, self.taken, self.declined = {}, {}, {}
 
     def add_month(self, chunk, events, pool, *, output, sessions, draws=DRAWS):
@@ -107,7 +109,10 @@ class Sweep:
 
     def rows(self, pairs, window):
         """Taken rows of every (structure, arm) in ``pairs`` inside ``window``: trades are selected by event date and must also EXIT inside the window; a trade exiting later belongs to no account of this window, so no later P&L enters a window's objective or evaluation. Empty frame with the columns when none."""
-        frames = [f[pd.to_datetime(f["exit_date"]) < window[1]] for pair in pairs for f in (in_window(g, window) for g in self.taken.get(tuple(pair), []))]
+        taken = [in_window(g, window) for pair in pairs for g in self.taken.get(tuple(pair), [])]
+        for f in taken:
+            if f["exit_date"].isna().any(): raise ValueError("taken rows must carry exit dates")
+        frames = [f[pd.to_datetime(f["exit_date"]) < window[1]] for f in taken]
         frames = [f for f in frames if not f.empty]
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=_TAKEN)
 

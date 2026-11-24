@@ -110,6 +110,13 @@ def test_choose_with_only_edge_ks_scored_defaults_to_one():
     assert tuning.choose({0.5: sc(0.5), 3.0: sc(0.3)}) == {"k": 1.0, "flags": ["k_at_edge", "k_defaulted"]}
 
 
+def test_choose_raw_edge_argmax_is_not_pulled_inside_by_the_tie_rule():
+    # The raw argmax is 3.0 (an edge), so the tie rule must not run on the full grid: 1.0 is within 3.0's SE and would win.
+    assert tuning.choose({3.0: sc(0.10, se=0.03), 2.0: sc(0.09, se=0.001), 1.0: sc(0.075, se=0.0)}) == {"k": 2.0, "flags": ["k_at_edge"]}
+    # A non-edge argmax whose tie-rule pick lands on an edge also takes the interior branch.
+    assert tuning.choose({1.5: sc(0.10, se=0.05), 0.5: sc(0.09, se=0.05)}) == {"k": 1.5, "flags": ["k_at_edge"]}
+
+
 # ---- units and factors ----------------------------------------------------
 
 def test_units_partition_the_structures_per_arm():

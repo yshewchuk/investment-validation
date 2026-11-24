@@ -45,8 +45,9 @@ def choose(scores):
     scored = {k: s for k, s in scores.items() if s["trades"] >= MIN_TRADES}
     if not scored:
         return {"k": 1.0, "flags": ["k_defaulted"]}
+    top = max(scored, key=lambda j: scored[j]["ret"])
     k = _pick(scored)
-    if k not in EDGES:
+    if top not in EDGES and k not in EDGES:
         return {"k": float(k), "flags": []}
     interior = {j: s for j, s in scored.items() if j not in EDGES}
     if not interior:

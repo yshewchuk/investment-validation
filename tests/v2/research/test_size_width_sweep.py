@@ -238,6 +238,23 @@ def test_taken_row_and_scored_row_match_a_hand_derived_condor(monkeypatch):
     assert hit["entry_cost"] == pytest.approx(cost2)
 
 
+@pytest.mark.parametrize("kwargs", [{"ks": ()}, {"ks": (1.0, 1.0)}, {"ks": (99.0,)},
+                                    {"names": ()}, {"names": (NAME, NAME)}, {"names": ("NOT-A-STRUCTURE",)}])
+def test_sweep_refuses_an_ungridded_or_repeated_admission(kwargs):
+    with pytest.raises(ValueError):
+        Sweep(**kwargs)
+
+
+def test_rows_refuses_a_taken_row_with_no_exit_date():
+    row = dict.fromkeys(_TAKEN)
+    row.update({"event_id": "nat", "event_date": pd.Timestamp("2024-12-02"), "structure": NAME, "k": 1.0,
+                "entry_date": pd.Timestamp("2024-12-02"), "exit_date": pd.NaT})
+    sweep = Sweep()
+    sweep.taken[(NAME, 1.0)] = [pd.DataFrame([row], columns=_TAKEN)]
+    with pytest.raises(ValueError, match="exit dates"):
+        sweep.rows([(NAME, 1.0)], WINDOWS["2024"])
+
+
 def test_rows_keep_only_trades_that_exit_inside_the_window():
     def taken(eid, event, exit_):
         row = dict.fromkeys(_TAKEN)
