@@ -117,9 +117,34 @@ def run_inner(sweep, out, inputs_hash):
     return {"tuned": tuned, "results": results}
 
 
+def _valid(arm, receipt):
+    """True when ``receipt`` names EXP-189, ``arm`` and the inner window with a dict body; for A, B and D the body has exactly the units
+    of ``arm``, each with its members and a k on the grid."""
+    if not (receipt.get("experiment") == "EXP-189" and receipt.get("arm") == arm and receipt.get("window") == "2023H2-2024"
+            and isinstance(receipt.get("body"), dict)):
+        return False
+    if arm not in ("A", "B", "D"):
+        return True
+    body = receipt["body"]
+    if set(body) != set(units(arm)):
+        return False
+    for unit, members in units(arm).items():
+        entry = body[unit]
+        if not isinstance(entry, dict) or entry.get("members") != list(members):
+            return False
+        k = entry.get("k")
+        if isinstance(k, bool) or not isinstance(k, (int, float)) or k not in GRID:
+            return False
+    return True
+
+
 def frozen(out, arm, inputs_hash):
-    """The factors of ``arm`` from its receipt. A missing receipt refuses tuning_receipt_missing (load_receipt); one bound to other inputs refuses tuning_receipt_changed."""
+    """The factors of ``arm`` from its receipt. A missing receipt refuses tuning_receipt_missing (load_receipt); one that fails the
+    identity and shape checks, or is bound to other inputs, refuses tuning_receipt_changed. The receipt is validated before its factors are read."""
     receipt = receipts.load_receipt(_path(out, arm))
+    if not _valid(arm, receipt):
+        raise Refusal(_CONFLICT, f"tuning receipt {arm} does not match EXP-189 arm {arm} on the inner window",
+                      {"reason": "tuning_receipt_changed"})
     if receipt["inputs_hash"] != inputs_hash:
         raise Refusal(_CONFLICT, f"tuning receipt {arm} is bound to other inputs", {"reason": "tuning_receipt_changed"})
     return factors(arm, receipt["body"])

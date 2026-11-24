@@ -7,7 +7,7 @@ from engine.pnl_sim import DRAWS
 from experiments import size_pnl_shortvol as sv
 from experiments.size_pnl_pool import build_pool
 from experiments.size_width_sizing import GRID, k_params
-from experiments.size_width_sweep import _TAKEN, E_ARM, Sweep, feed, pick_e, scaled
+from experiments.size_width_sweep import _TAKEN, E_ARM, WINDOWS, Sweep, feed, in_window, pick_e, scaled
 from tests.v2.research.test_size_pnl_shortvol import _tables, chunk_of, events_for
 
 DRAW = 200
@@ -143,6 +143,49 @@ def test_event_absent_from_the_chunk_is_dropped(monkeypatch):
     for frames in [*sweep.scored.values(), *sweep.taken.values()]:
         for frame in frames:
             assert "GHOST" not in set(frame["event_id"])
+
+
+def _row(eid, date, value, *, status="scored", k=None):
+    row = {"event_id": eid, "event_date": pd.Timestamp(date), "structure": NAME, "exp_pnl_sim": value,
+           "status": status, "reason": None}
+    if k is not None:
+        row["k"] = k
+    return row
+
+
+def test_curves_are_window_means_and_none_for_an_empty_window():
+    sweep = Sweep(ks=(1.0, 1.5), names=(NAME,))
+    sweep.scored[(NAME, 1.0)] = [pd.DataFrame([_row("a", "2024-03-01", 0.1), _row("b", "2024-03-02", 0.3),
+                                               _row("u", "2024-03-03", np.nan, status="undetermined")])]
+    sweep.scored[(NAME, 1.5)] = [pd.DataFrame([_row("a", "2024-03-01", 0.2), _row("b", "2024-03-02", 0.4),
+                                               _row("c", "2024-03-03", 0.6)])]
+    sweep.scored[(NAME, E_ARM)] = [pd.DataFrame([_row("a", "2024-03-01", 0.3, k=1.0), _row("b", "2024-03-02", 0.6, k=1.5)])]
+    assert sweep.curves(NAME, WINDOWS["2024"]) == pytest.approx({"1.0": 0.2, "1.5": 0.4, "E": 0.45})
+    assert sweep.curves(NAME, WINDOWS["2025"]) == {"1.0": None, "1.5": None, "E": None}
+
+
+def test_in_window_is_half_open():
+    f = pd.DataFrame([_row("start", "2024-01-01", 0.0), _row("inside", "2024-12-31", 0.0), _row("end", "2025-01-01", 0.0)])
+    assert set(in_window(f, WINDOWS["2024"])["event_id"]) == {"start", "inside"}
+
+
+def test_declined_counts_include_the_decision_gate_outcomes(monkeypatch):
+    monkeypatch.setattr(sv, "MIN_WINDOW", 1)
+    pool = build_pool(*_tables(), floor=None)
+    chunk, prior, cur, sessions = _two_months()
+    sweep = Sweep()
+    sweep.add_month(chunk, prior, pool, output=False, sessions=sessions, draws=DRAW)
+    sweep.add_month(chunk, cur, pool, output=True, sessions=sessions, draws=DRAW)
+
+    sims_p = sv.simulate(chunk, prior, pool, draws=DRAW)
+    sims_c = sv.simulate(chunk, cur, pool, draws=DRAW)
+    hist = pd.concat([sv.score_events(chunk, prior, sims_p, NAME), sv.score_events(chunk, cur, sims_c, NAME)],
+                     ignore_index=True)
+    dec = sv.decide(hist)
+    gone = dec[dec["event_id"].isin(CUR) & (dec["structure"] == NAME) & (dec["status"] != "taken")]
+    expected = {str(r): int(c) for r, c in gone["reason"].fillna("none").value_counts().items()}
+    assert any(reason in expected for reason in ("thin_history", "below_cutoff"))
+    assert sweep.declined[(NAME, 1.0)] == expected
 
 
 class _Recorder:

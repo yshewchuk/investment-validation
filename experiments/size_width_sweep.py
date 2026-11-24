@@ -82,10 +82,11 @@ class Sweep:
         history.append(frame)
         if not output:
             return
-        reasons = self.declined.setdefault(key, {})
-        for reason, count in frame.loc[frame["status"] != "scored", "reason"].fillna("none").value_counts().items():
-            reasons[str(reason)] = reasons.get(str(reason), 0) + int(count)
         decided = sv.decide(pd.concat(history, ignore_index=True))
+        declined = decided[decided["event_id"].isin(ids) & (decided["structure"] == name) & (decided["status"] != "taken")]
+        reasons = self.declined.setdefault(key, {})
+        for reason, count in declined["reason"].fillna("none").value_counts().items():
+            reasons[str(reason)] = reasons.get(str(reason), 0) + int(count)
         mine = decided[decided["event_id"].isin(ids) & (decided["structure"] == name) & (decided["status"] == "taken")]
         if arm == E_ARM:
             kmap = dict(zip(frame["event_id"], frame["k"]))

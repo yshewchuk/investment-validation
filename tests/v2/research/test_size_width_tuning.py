@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from experiments import size_pnl_receipts as receipts
 from experiments import size_width_account as account
 from experiments import size_width_tuning as tuning
 from experiments.size_pnl_shortvol import NAMES, Refusal
@@ -168,6 +169,44 @@ def test_run_inner_bodies_are_strict_json_even_with_empty_curves(tmp_path):
         json.loads(text, parse_constant=_no_constants)
     e_body = json.loads((tmp_path / "receipts" / "tuning_E.json").read_text())["body"]
     assert e_body["CND-PS"]["curve"]["1.0"] is None
+
+
+def _body(arm, k=1.0):
+    return {unit: {"k": k, "flags": [], "members": list(m), "scores": {}} for unit, m in tuning.units(arm).items()}
+
+
+def _write_at(out, arm, body, *, arm_field=None, window="2023H2-2024", inputs_hash="h1"):
+    receipts.write_receipt(out / "receipts" / f"tuning_{arm}.json",
+                           {"experiment": "EXP-189", "arm": arm_field or arm, "inputs_hash": inputs_hash,
+                            "window": window, "body": body})
+
+
+def test_frozen_accepts_a_valid_receipt(tmp_path):
+    _write_at(tmp_path, "A", _body("A", k=1.5))
+    assert tuning.frozen(tmp_path, "A", "h1") == {n: 1.5 for n in NAMES}
+
+
+def test_frozen_refuses_a_receipt_for_b_copied_to_the_a_path(tmp_path):
+    _write_at(tmp_path, "A", _body("B", k=1.5), arm_field="B")
+    with pytest.raises(Refusal) as exc:
+        tuning.frozen(tmp_path, "A", "h1")
+    assert exc.value.details["reason"] == "tuning_receipt_changed"
+
+
+def test_frozen_refuses_a_receipt_with_the_wrong_window(tmp_path):
+    _write_at(tmp_path, "A", _body("A"), window="2024")
+    with pytest.raises(Refusal) as exc:
+        tuning.frozen(tmp_path, "A", "h1")
+    assert exc.value.details["reason"] == "tuning_receipt_changed"
+
+
+def test_frozen_refuses_a_unit_k_off_the_grid(tmp_path):
+    body = _body("A")
+    body["all"]["k"] = 99.0  # not on GRID
+    _write_at(tmp_path, "A", body)
+    with pytest.raises(Refusal) as exc:
+        tuning.frozen(tmp_path, "A", "h1")
+    assert exc.value.details["reason"] == "tuning_receipt_changed"
 
 
 def test_run_outer_refuses_a_missing_receipt_before_any_evaluation(tmp_path, monkeypatch):
