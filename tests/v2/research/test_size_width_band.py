@@ -189,6 +189,99 @@ def test_write_bands_refuses_a_malformed_body(tmp_path):
         assert not (tmp_path / "receipts" / "tuning_band.json").exists()
 
 
+def _good():
+    """A builder output with B, C and anchor curves, plus one structure whose every band is no_positive_peak."""
+    curves = {n: {"B": CURVE, "C": CURVE, "anchor": CURVE} for n in NAMES}
+    curves[NAMES[-1]] = {"B": NEG, "anchor": NEG}
+    return build_bands(curves)
+
+
+def _cell(body, n=NAMES[0], label="B", phi=0.90):
+    return body[n]["curves"][label][str(phi)]
+
+
+def _c_only(b):
+    for entry in b.values():
+        entry["curves"].pop("B", None)
+
+
+def _primary_b_with_c(b):
+    for entry in b.values():
+        entry["primary"] = "B"
+
+
+def _lo_none_hi_kept(b):
+    _cell(b)["lo"] = None  # flags stay []
+
+
+def _lo_above_hi(b):
+    _cell(b)["lo"] = 2.0  # hi is 1.5
+
+
+def _lo_nan(b):
+    _cell(b)["lo"] = float("nan")
+
+
+def _lo_inf(b):
+    _cell(b)["lo"] = float("inf")
+
+
+def _lo_negative(b):
+    _cell(b)["lo"] = -0.5
+
+
+def _no_peak_with_lo(b):
+    _cell(b, NAMES[-1])["lo"] = 0.5  # flags are ["no_positive_peak"]
+
+
+def _unknown_label(b):
+    b[NAMES[0]]["curves"]["D"] = b[NAMES[0]]["curves"]["B"]
+
+
+MUTATIONS = {
+    "c_only_no_b": _c_only,
+    "primary_b_while_c_present": _primary_b_with_c,
+    "lo_none_with_flags_empty": _lo_none_hi_kept,
+    "lo_above_hi": _lo_above_hi,
+    "lo_nan": _lo_nan,
+    "lo_inf": _lo_inf,
+    "lo_negative": _lo_negative,
+    "no_positive_peak_with_lo": _no_peak_with_lo,
+    "unknown_label": _unknown_label,
+}
+
+
+@pytest.mark.parametrize("mutate", list(MUTATIONS.values()), ids=list(MUTATIONS))
+def test_write_bands_refuses_each_malformed_shape(tmp_path, mutate):
+    body = _good()
+    mutate(body)
+    with pytest.raises(ValueError, match="malformed"):
+        write_bands(tmp_path, body, "h1")
+    assert not (tmp_path / "receipts" / "tuning_band.json").exists()
+
+
+# NaN/inf cannot be stored: receipts.write_receipt writes strict JSON, so those cases stay in the write_bands test only.
+STORABLE_MUTATIONS = {name: m for name, m in MUTATIONS.items() if name not in ("lo_nan", "lo_inf")}
+
+
+@pytest.mark.parametrize("mutate", list(STORABLE_MUTATIONS.values()), ids=list(STORABLE_MUTATIONS))
+def test_frozen_bands_refuses_each_malformed_stored_shape(tmp_path, mutate):
+    body = _good()
+    mutate(body)
+    receipts.write_receipt(tmp_path / "receipts" / "tuning_band.json",
+                           {"experiment": "EXP-189", "arm": "band", "inputs_hash": "h1", "window": WINDOW, "body": body})
+    with pytest.raises(Refusal) as exc:
+        frozen_bands(tmp_path, "h1")
+    assert exc.value.details["reason"] == "tuning_receipt_changed"
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+def test_valid_builder_output_with_anchor_and_no_peak_passes_both_paths(tmp_path):
+    body = _good()
+    write_bands(tmp_path, body, "h1")
+    assert frozen_bands(tmp_path, "h1") == body
+
+
 def test_band_range_returns_lo_hi_or_none():
     bands = build_bands({n: {"B": CURVE} for n in NAMES})
     assert band_range(bands, NAMES[0], 0.90) == pytest.approx((1.125, 1.5))

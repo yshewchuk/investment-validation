@@ -65,14 +65,27 @@ def write_bands(out, bands, inputs_hash):
 
 
 def _well_formed(body):
-    """True when ``body`` holds every structure with a B/C primary whose curve has a {lo, hi, flags} dict for every phi."""
+    """True when ``body`` holds every structure with a B curve (plus optional C and anchor), a primary of C when present else B, and a valid cell per label and phi: no_positive_peak alone with None fields, else 0 < lo <= peak_k <= hi with flags [] or ["band_open"]."""
+    def real(x):
+        return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
     try:
         for n in NAMES:
             entry = body[n]
-            curve = entry["curves"][entry["primary"]]
-            if entry["primary"] not in ("B", "C") or any(not {"lo", "hi", "flags"} <= curve[str(p)].keys() for p in PHIS):
+            curves = entry["curves"]
+            if "B" not in curves or not set(curves) <= {"B", "C", "anchor"} or entry["primary"] != ("C" if "C" in curves else "B"):
                 return False
-    except (KeyError, TypeError, AttributeError):
+            for curve in curves.values():
+                for p in PHIS:
+                    cell = curve[str(p)]
+                    if not isinstance(cell, dict) or not isinstance(cell["flags"], list):
+                        return False
+                    if "no_positive_peak" in cell["flags"]:
+                        if cell["flags"] != ["no_positive_peak"] or (cell["lo"], cell["hi"], cell["peak_k"]) != (None, None, None):
+                            return False
+                    elif not (real(cell["lo"]) and real(cell["hi"]) and real(cell["peak_k"])) \
+                            or not 0 < cell["lo"] <= cell["peak_k"] <= cell["hi"] or cell["flags"] not in ([], ["band_open"]):
+                        return False
+    except (KeyError, TypeError, AttributeError, ValueError):
         return False
     return True
 
