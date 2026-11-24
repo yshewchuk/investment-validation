@@ -60,21 +60,26 @@ class Sweep:
         if not self.names or len(set(self.names)) != len(self.names) or any(n not in sv.NAMES for n in self.names): raise ValueError(f"names must be non-empty, unique and in sv.NAMES: {self.names}")
         self.scored, self.taken, self.declined = {}, {}, {}
 
-    def add_month(self, chunk, events, pool, *, output, sessions, draws=DRAWS):
+    def add_month(self, chunk, events, pool, *, output, sessions, draws=DRAWS, sims=None):
         """Simulate once, score every (structure, k) and E, decide on the accumulated history. ``output`` False (burn-in) only adds history.
-        ``sessions`` maps event_id -> (entry_date, exit_date); a missing event leaves NaT dates and the account refuses it."""
+        ``sessions`` maps event_id -> (entry_date, exit_date); a missing event leaves NaT dates and the account refuses it.
+        ``sims``, when given, is a simulation already run on these events, so several sweeps can share one simulation."""
         started = time.time()
-        sims = sv.simulate(chunk, events, pool, draws=draws)
+        sims = sv.simulate(chunk, events, pool, draws=draws) if sims is None else sims
         keep = np.array([sims.get(str(e)) is not None for e in events["event_id"]], dtype=bool)  # unsimulable events are dropped, as EXP-188 does
         events = events[keep]
         ids = set(events["event_id"].astype(str))
         for name in self.names:
-            by_k = {k: sv.score_events(chunk, scaled(events, k), sims, name, alpha=ALPHA) for k in self.ks}
-            for arm, frame in [*by_k.items(), (E_ARM, pick_e(by_k, self.ks))]:
+            for arm, frame in self._frames(chunk, events, sims, name):
                 self._decide(chunk, events, frame, name, arm, ids, output, sessions)
         rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
         print(f"[width_sweep] month events={len(events)} output={output} elapsed={time.time() - started:.1f}s rss={rss:.0f}MiB",
               file=sys.stderr)
+
+    def _frames(self, chunk, events, sims, name):
+        """[(arm, frame)] for one structure: every grid k, then arm E. Subclasses override this."""
+        by_k = {k: sv.score_events(chunk, scaled(events, k), sims, name, alpha=ALPHA) for k in self.ks}
+        return [*by_k.items(), (E_ARM, pick_e(by_k, self.ks))]
 
     def _decide(self, chunk, events, frame, name, arm, ids, output, sessions):
         """Adds ``frame`` to the history of (name, arm) and, when ``output``, decides, prices and records the taken rows."""
