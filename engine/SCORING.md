@@ -243,6 +243,6 @@ Stated so nobody has to rediscover them.
 
 - `price_structure_indexed(structure, snapshot, fill, *, pin=None, closing=False)` equals `price_structure`: same strikes, prices, cash flows and flags, and the same exception types and messages (`LadderTooCoarse` included).
 - Expiry selection runs on a lazily built per-snapshot index (distinct expiries, their dte, memoised rule results); every other step is the legacy pandas code. The index lives with its snapshot.
-- `ChainSnapshot.rows` is treated as immutable once priced through this function; with `ENGINE_CHAIN_INDEX_VERIFY=1` a change to the expiry or dte columns raises `ChainSnapshotMutated`. By default nothing checks it.
-- A snapshot or call outside the proven shape (tz-aware or NaT expiries, several dte per expiry, empty rows, non-numeric selector bounds) is sent whole to `price_structure`.
+- `ChainSnapshot.rows` is treated as immutable once priced through this function; the expiry and dte columns are checksummed on every call and a change raises `ChainSnapshotMutated` (`ENGINE_CHAIN_INDEX_VERIFY=0` disables the check; other columns are not checksummed).
+- A snapshot or call outside the proven shape (tz-aware or NaT expiries, NaN dte, several dte per expiry or one dte shared by expiries, empty rows, non-numeric selector bounds) is sent whole to `price_structure`.
 - `engine/structures.py` and `engine/fills.py` are not modified; nothing in the v14 SIZE closure imports this module (`tests/v2/integration/test_chain_index_closure.py`).

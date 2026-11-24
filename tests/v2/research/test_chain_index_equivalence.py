@@ -671,12 +671,14 @@ def test_call_order_does_not_change_results():
 # --------------------------------------------------------------------------
 
 
-def test_mutation_is_not_checked_without_verify_mode(monkeypatch):
-    monkeypatch.delenv("ENGINE_CHAIN_INDEX_VERIFY", raising=False)
+def test_mutation_is_not_checked_with_verify_disabled(monkeypatch):
+    monkeypatch.setenv("ENGINE_CHAIN_INDEX_VERIFY", "0")
     priced = snap(make_chain(rights="CP", delta=True), "AMC")
     price_structure_indexed(straddle_through(), priced, MID)
     priced.rows.loc[priced.rows.index[0], "bid"] += 1.0
-    price_structure_indexed(straddle_through(), priced, MID)  # no ChainSnapshotMutated
+    got = price_structure_indexed(straddle_through(), priced, MID)  # no ChainSnapshotMutated
+    # Only expiry/dte are checksummed; the bid change must still price exactly as legacy does.
+    assert got.to_dict() == price_structure(straddle_through(), priced, MID).to_dict()
 
 
 @pytest.mark.parametrize("column", ["expiry", "dte"])
@@ -698,20 +700,19 @@ def test_verify_mode_does_not_checksum_bid():
     assert price_structure_indexed(straddle_through(), priced, MID).legs
     priced.rows.loc[priced.rows.index[0], "bid"] += 1.0
     # Documented: only expiry and dte are checksummed, so a bid change is not refused.
-    assert price_structure_indexed(straddle_through(), priced, MID).legs
+    got = price_structure_indexed(straddle_through(), priced, MID)
+    assert got.legs
+    assert got.to_dict() == price_structure(straddle_through(), priced, MID).to_dict()
 
 
-@pytest.mark.parametrize("column", ["expiry", "dte"])
-def test_expiry_or_dte_mutation_is_not_checked_without_verify_mode(monkeypatch, column):
+def test_expiry_mutation_is_checked_by_default(monkeypatch):
     monkeypatch.delenv("ENGINE_CHAIN_INDEX_VERIFY", raising=False)
     priced = snap(make_chain(rights="CP", delta=True), "AMC")
     price_structure_indexed(straddle_through(), priced, MID)
-    first = priced.rows.index[0]
-    if column == "expiry":
-        priced.rows.loc[first, "expiry"] = pd.Timestamp("2026-04-15")
-    else:
-        priced.rows.loc[first, "dte"] += 1
-    price_structure_indexed(straddle_through(), priced, MID)  # no ChainSnapshotMutated
+    priced.rows.loc[priced.rows.index[0], "expiry"] = pd.Timestamp("2026-04-15")
+    with pytest.raises(ChainSnapshotMutated) as excinfo:
+        price_structure_indexed(straddle_through(), priced, MID)
+    assert str(excinfo.value) == "chain snapshot rows changed after the index was built"
 
 
 # --------------------------------------------------------------------------

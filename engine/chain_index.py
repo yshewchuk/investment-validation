@@ -5,8 +5,8 @@ differs: it is answered from a per-snapshot numpy index of the distinct expiries
 memoised rule results). Strike selection, contract lookup, pricing, the ``LadderTooCoarse``
 check and the messages are the same code, so results are bit-identical. The index is built
 lazily, lives with its snapshot, and calls or snapshots outside the proven shape go whole to
-``price_structure``. ``ENGINE_CHAIN_INDEX_VERIFY=1`` raises :class:`ChainSnapshotMutated`
-if the expiry or dte columns change after the index was built.
+``price_structure``. The expiry and dte columns are checksummed on every call; a change raises
+:class:`ChainSnapshotMutated`. ``ENGINE_CHAIN_INDEX_VERIFY=0`` disables the check.
 """
 from __future__ import annotations
 
@@ -196,7 +196,7 @@ def _select_index(structure: Structure, snapshot: ChainSnapshot) -> _ChainIndex 
             return None
     except Exception:
         return None
-    if os.environ.get(_VERIFY_ENV) == "1":
+    if os.environ.get(_VERIFY_ENV) != "0":
         try:
             current = _checksums(snapshot.rows)
         except Exception:
