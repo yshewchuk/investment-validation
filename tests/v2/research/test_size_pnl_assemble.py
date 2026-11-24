@@ -148,8 +148,9 @@ def test_happy_path_writes_every_section_in_order(tmp_path):
     out = build(tmp_path)
     summary = assemble_mod.assemble(out, plan_frame(), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
-    assert summary["report"] == str(out / "REPORT.md") and summary["sections"] == 18 and summary["rows"] > 0  # 10 + marks basis + breakeven note + harsh note (Amendment 1) + accounts (Amendment 2) + the Amendment 6 board-match section + the three G_PROD sections
+    assert summary["report"] == str(out / "REPORT.md") and summary["sections"] == 19 and summary["rows"] > 0  # 10 + marks basis + breakeven note + harsh note (Amendment 1) + accounts (Amendment 2) + the Amendment 6 board-match section + the three G_PROD sections + the Amendment 6 production-audit section
     assert text.startswith("# EXP-188 REPORT")
+    assert "independent books" in text and "### Production audit" in text
     heads = ["### T1", "### T2", "### T3", "### T4", "### T6", "### T7", "### T8", "### T9", "### T10"]
     positions = [next(i for i, line in enumerate(_sections(text)) if line.startswith(h)) for h in heads]
     assert positions == sorted(positions) and len(set(positions)) == len(heads)
@@ -690,8 +691,8 @@ def test_mid_column_adds_the_harsh_sections_after_the_headline_verdicts(tmp_path
     summary = assemble_mod.assemble(out, plan_frame(), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
     harsh = [line for line in _sections(text) if line.startswith(HARSH)]
-    # the 10 headline sections, 4 harsh sections, the marks basis, the breakeven note (no endpoints here), the accounts, the board-match section and the three G_PROD sections
-    assert summary["sections"] == 21
+    # the 10 headline sections, 4 harsh sections, the marks basis, the breakeven note (no endpoints here), the accounts, the board-match section, the three G_PROD sections and the Amendment 6 production-audit section
+    assert summary["sections"] == 22
     assert [line.rsplit(": ", 1)[1] for line in harsh] == ["T4 Short-vol, as is", "T6 Straddle buy rules",
                                                             "T7 Contrasts", "T10 Verdicts"]
     assert text.index(harsh[0]) > text.index("### T10 Verdicts")
