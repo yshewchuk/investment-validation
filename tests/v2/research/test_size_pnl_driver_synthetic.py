@@ -354,8 +354,8 @@ def test_month_scores_and_month_take_arms_and_emit_from(monkeypatch):
     monkeypatch.setattr(driver.shortvol, "score_events", lambda chunk_, events, sims, name, **kw: pd.DataFrame(
         {"event_id": events["event_id"].to_numpy(), "status": "scored", "reason": None}))
     monkeypatch.setattr(driver.straddle, "decide", lambda events, edges, rule, chunk_: pd.DataFrame(
-        {"event_date": events["event_date"].to_numpy(), "edge": np.ones(len(events))}))
-    events = pd.DataFrame({"event_id": ["E1", "E2"], "event_date": pd.to_datetime(["2023-06-10", "2023-06-20"])})
+        {"event_date": events["event_date"].to_numpy(), "edge": np.ones(len(events)), "reason": None}))
+    events = pd.DataFrame({"event_id": ["E1", "E2"], "event_date": pd.to_datetime(["2023-06-10", "2023-06-20"]), "mcap_usd": 20e9})  # in the straddle universe
     table = pd.DataFrame({"event_date": pd.to_datetime(["2023-01-05"])}, index=pd.Index(["H0"]))
     start, st = pd.Timestamp("2023-06-01"), driver._model_state(1.0)
     scored, missing = driver._month_scores("m", table, events, chunk("E1", "E2"), None, start, st, arms=(("as_is", 1.0),))
@@ -383,7 +383,7 @@ def test_month_gate_adds_g_prod_rows_on_output_months_only(monkeypatch):
          "cutoff": np.nan, "rel_spread": 0.1, "status": "not_taken", "reason": "below_cutoff"}))
     monkeypatch.setattr(driver.straddle, "score", lambda *args, **kw: pd.DataFrame(columns=marks))
     events = pd.DataFrame({"event_id": ["E1", "E2"], "event_date": pd.to_datetime(["2023-06-10", "2023-06-20"]),
-                           "pred_move": 5.0, "pred_crush": -15.0})
+                           "pred_move": 5.0, "pred_crush": -15.0, "mcap_usd": 20e9})  # in the straddle universe
     table = pd.DataFrame({"event_date": pd.to_datetime(["2023-01-05"])}, index=pd.Index(["H0"]))
     start = pd.Timestamp("2023-06-01")
 

@@ -13,8 +13,8 @@ import math
 import numpy as np
 import pandas as pd
 
-from engine.entry_rules import MAX_REL_SPREAD, MCAP_FLOOR
-from engine.fills import FillModel
+from engine.fills import BAD_QUOTE_COST_PCT, FillModel
+from engine.score import GATE_MCAP_FLOOR
 from engine.pnl_sim import trailing_cutoff
 from engine.portfolio import CAPITAL_PER_TRADE, CONTRACT_MULTIPLIER
 
@@ -30,6 +30,21 @@ def _num(x):
     if x is None or pd.isna(x):
         return float("nan")
     return float(x)
+
+
+def in_universe(mcap):
+    """Production's STR-THRU universe: market cap at or above engine.score GATE_MCAP_FLOOR (Amendment 5). No spread term: production applies none."""
+    return math.isfinite(_num(mcap)) and _num(mcap) >= GATE_MCAP_FLOOR
+
+
+def bad_quote(chunk, state, i):
+    """True when the straddle's entry cost at the mid mark exceeds BAD_QUOTE_COST_PCT percent of spot (strictly greater, as production).
+
+    The straddle universe is the market-cap floor plus production's BAD_QUOTE ceiling, with no spread term. ``state`` is the
+    ``entry_state`` result for event ``i``, whose ``legs`` are set when the entry is ok."""
+    c, p = state["legs"]
+    cost_pct = entry_cost(chunk, c, p, 0.5) / float(chunk["spot_entry"][i]) * 100.0
+    return cost_pct > BAD_QUOTE_COST_PCT
 
 
 def _edge(pred, implied):
@@ -152,9 +167,11 @@ def decide(events, history, rule, chunk, gate=None):
                 row["reason"] = state["reason"]
             else:
                 rel = state["rel_spread"]
-                row["rel_spread"] = rel
-                if mcap < MCAP_FLOOR or rel > MAX_REL_SPREAD:
+                row["rel_spread"] = rel  # recorded for every ok entry; the spread is not a universe term (Amendment 5)
+                if not in_universe(mcap):
                     row.update(status="not_taken", reason="universe_filter")
+                elif bad_quote(chunk, state, pos[str(ev["event_id"])]):
+                    row.update(status="not_taken", reason="bad_quote")
                 elif rule == GATE_RULE:
                     row["status"], row["reason"] = gate(ev)
                 elif rule == "R_L2":
@@ -172,6 +189,19 @@ def decide(events, history, rule, chunk, gate=None):
                         row["status"], row["reason"] = _verdict(edge >= cut, "below_cutoff")
         rows.append(row)
     return pd.DataFrame(rows, columns=DECISION_COLS)
+
+
+def history_rows(decisions, events):
+    """The (event_date, edge) rows that feed the R_L trailing cutoff (Amendment 5).
+
+    The history universe is the market-cap floor and not BAD_QUOTE: an event whose ``decisions`` reason is ``bad_quote``
+    leaves the history as well as the straddle book. An event whose entry quote is undetermined stays in the history
+    when its mcap qualifies, since its BAD_QUOTE status is unknown.
+    ``decisions`` rows are in the same order as ``events`` (``decide`` emits one row per event, in order)."""
+    in_mcap = events["mcap_usd"].map(in_universe).to_numpy(dtype=bool)
+    not_bad = decisions["reason"].to_numpy() != "bad_quote"
+    mask = in_mcap & not_bad
+    return decisions.loc[mask, ["event_date", "edge"]]
 
 
 def score(chunk, events, decisions, alpha, *, drop_unquoted=False, mid_marks=False):
