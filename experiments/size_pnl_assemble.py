@@ -18,6 +18,7 @@ from experiments import size_pnl_decisions as decisions, size_pnl_receipts as re
 from experiments import size_pnl_account, size_pnl_driver, size_pnl_ladder
 from experiments import size_pnl_synthetic_eval as synthetic_eval
 from experiments import size_pnl_gprod_report as gprod_report
+from experiments import size_pnl_breakeven as breakeven
 from experiments.size_pnl_inputs import PAIRS
 from experiments.size_pnl_shortvol import Refusal
 from experiments.size_pnl_straddle import RULES, GATE_RULE
@@ -31,6 +32,9 @@ LONG_RULE = "R_L"
 AMENDMENT_5_NOTE = ("Amendment 5 (2026-11-23): the straddle universe was changed to production's (market cap at or above engine.score "
                     "GATE_MCAP_FLOOR, no spread term) after the 2025 outputs of the pre-registered run were inspected; the H2 verdict, "
                     "T6 and the straddle T7 rows are computed on E_str and are labelled as run under Amendment 5.")
+MARKS_NOTE = ("the headline marks for every per-trade table, contrast and the T10 verdict are marks_mid (alpha 0.5, every usable leg at the mid, "
+              "rung-3 unchanged); this is a post-hoc revision by the user made after results were seen; the pre-registered primary "
+              "(rung-2 zero-bid legs at alpha 0) is reported as harsh fills, reported only, not a verdict basis; Amendment 1 named marks_mid a sensitivity.")
 # name -> (predicted sign, arm -> legs, arms). A leg is (book, arm_or_rule value, sign); d = sum(sign * (median - mean)).
 # Judgement call: H3 crosses each short-vol arm with the long rule R_L only; R_L2 is not in H3.
 HYPOTHESES = {
@@ -211,7 +215,7 @@ def _load_decisions(out, receipt, name="decisions.parquet"):
             raise _refuse("report_decisions_invalid", f"{name} decodes to more than MAX_DECODED_BYTES")
         # Optional columns, read only when the schema has them. "reason": population() exempts short-vol non-trades (published
         # decisions always carry it). "pnl_dollars_mid": the Amendment 1 sensitivity marks.
-        optional = [c for c in ("reason", "pnl_dollars_mid") if c in parquet.schema_arrow.names]
+        optional = [c for c in ("reason", "pnl_dollars_mid", "pnl_dollars_a0", "pnl_dollars_a1") if c in parquet.schema_arrow.names]  # a0/a1: Amendment 6b breakeven endpoints
         account = [c for c in ACCOUNT_COLS if c in parquet.schema_arrow.names]  # Amendment 2 account columns, when the run stored them
         frame = parquet.read(columns=COLUMNS + optional + account).to_pandas()
     if frame.empty:
@@ -221,6 +225,8 @@ def _load_decisions(out, receipt, name="decisions.parquet"):
         frame = frame.assign(event_id=frame["event_id"].astype(str), event_date=pd.to_datetime(frame["event_date"]),
                              pnl_dollars=pd.to_numeric(frame["pnl_dollars"], errors="raise"))
         if mid: frame = frame.assign(pnl_dollars_mid=pd.to_numeric(frame["pnl_dollars_mid"], errors="raise"))
+        for col in ("pnl_dollars_a0", "pnl_dollars_a1"):
+            if col in optional: frame = frame.assign(**{col: pd.to_numeric(frame[col], errors="raise")})
     if frame["event_date"].isna().any():
         raise _refuse("report_decisions_invalid", f"{name} has a blank event_date")
     if not frame["status"].isin(report.STATUSES).all():
@@ -252,9 +258,9 @@ def _tickers_ok(tickers):
     return isinstance(tickers, Mapping) and all(isinstance(k, str) and k.strip() and isinstance(v, str) and v.strip() for k, v in tickers.items())
 
 
-def _sens(text):
-    """A sensitivity section, titled as Amendment 1 and never as the pre-registered verdict."""
-    return "### Sensitivity (Amendment 1), not the pre-registered verdict: " + text[len("### "):]
+def _harsh(text):
+    """The harsh-fills section (rung-2 zero-bid legs at alpha 0): reported only, never the headline and never a verdict basis."""
+    return "### Harsh fills, reported only, not a verdict basis: " + text[len("### "):]
 
 
 def _inner_title(text):
@@ -262,7 +268,7 @@ def _inner_title(text):
     return "### Inner window (2023H2-2024), not the headline: " + text[len("### "):]
 
 
-def _verdicts(classify_in, missing_years, inner_present=False):
+def _verdicts(classify_in, missing_years, inner_present=False, basis="mid"):
     """The T10 section, with the note that a missing full year makes its verdicts not testable. With inner decisions it pools
     them with the outer ones."""
     verdicts = report.t10_verdicts(classify_in)
@@ -275,6 +281,10 @@ def _verdicts(classify_in, missing_years, inner_present=False):
         verdicts += ("\n\nT10 pools the inner (2023H2-2024) and outer (2025) decisions by the registered rule: predicted sign in every full year "
                      "(2024, 2025; 2023 partial).")
     verdicts += "\n\n" + AMENDMENT_5_NOTE
+    if basis == "mid":
+        verdicts += "\n\n" + "T10 reads the mid marks (post-hoc revision by the user, 2026-11-24); the pre-registered primary-marks verdict is the harsh-fills section."
+    else:
+        verdicts += "\n\n" + "T10 here reads the harsh fills (rung-2 zero-bid legs at alpha 0): reported only, not a verdict basis."
     return verdicts
 
 
@@ -282,7 +292,7 @@ def _account_sections(frame, role_model, label_of, universe):
     """The Amendment 2 sensitivity sections over ``frame``, which holds ALL taken rows of decisions.parquet (model_id already
     labelled), or not_testable when the frame has no secured_per_contract column, or when the frame is non-empty and no taken
     row carries a non-null secured_per_contract. An empty frame that has the column is testable: every account in ``universe``
-    is reported at its empty-account metrics ($100,000). A straddle-only run is testable: its taken straddle rows carry 0.0
+    is reported at its empty-account metrics ($200,000). A straddle-only run is testable: its taken straddle rows carry 0.0
     secured cash, which is non-null. ``universe`` holds every decision row (model_id labelled) and supplies the account keys,
     so a model that takes no trade is still reported."""
     title = "Sensitivity (Amendment 2)"
@@ -344,6 +354,8 @@ def _sections(out, outer, inputs, inner, tickers, stored_gate=None):
             raise _refuse("report_decisions_empty", "no event in decisions.parquet is in the evaluated population")
         undet_e = raw.loc[raw["book"] == "short_vol", "event_id"].nunique() - short["event_id"].nunique()
         undet_str = raw.loc[raw["book"] == "straddle", "event_id"].nunique() - long["event_id"].nunique()
+        if "pnl_dollars_mid" in frame.columns:  # Amendment 6b: the headline marks are the mid marks; the stored primary is kept as harsh fills
+            frame = frame.assign(pnl_dollars_harsh=frame["pnl_dollars"], pnl_dollars=frame["pnl_dollars_mid"])
         frame = frame.assign(taken=frame["status"] == "taken", quarter=frame["event_date"].dt.to_period("Q").astype(str))
         return frame.assign(model_id=frame["model_id"].map(label_of)), undet_e, undet_str  # tables show labels such as M0 or H-sq+H-abs
 
@@ -389,6 +401,7 @@ def _sections(out, outer, inputs, inner, tickers, stored_gate=None):
             f"common_dropped={outer['common_dropped']}, scoreability_dropped={outer['scoreability_dropped']}.")
     sections = [
         _run_section(outer, undet_e, undet_str),
+        f"### Marks basis (post-hoc revision by the user, 2026-11-24)\n\n{MARKS_NOTE}",
         report.t1_roster(_roster_rows(roster, outer_models, inputs, inner, label_of)),
         report.t2_in_e(frame[frame["book"] == "short_vol"][["event_id", "quarter"]].drop_duplicates(), note),
         _not_testable("T3 Forecast calibration", "labels_not_in_decisions"),
@@ -406,17 +419,17 @@ def _sections(out, outer, inputs, inner, tickers, stored_gate=None):
         t2_inner = report.t2_in_e(inner_frame[inner_frame["book"] == "short_vol"][["event_id", "quarter"]].drop_duplicates(), inner_note)
         sections += [_inner_title(text) for text in (t2_inner, t4_as_is, t6, t7)]
     inner_rows = len(inner_raw) if inner_present else 0
-    if "pnl_dollars_mid" not in frame.columns:
-        sections += [_not_testable("Sensitivity (Amendment 1)", "pnl_dollars_mid_not_in_decisions")]
+    if "pnl_dollars_harsh" not in frame.columns:  # the headline fell back to the stored primary marks: no harsh section
+        sections += [_not_testable("Harsh fills (reported only)", "pnl_dollars_mid_not_in_decisions")]
     else:
-        # The Amendment 1 marks: T4-T7 on the outer window, and T10 pooled over the same windows as the primary verdict.
-        mid, _shown_mo, classify_mo = tables(frame.assign(pnl_dollars=frame["pnl_dollars_mid"]), ctx_o)
+        # The harsh (stored primary) marks: T4-T7 on the outer window, and T10 pooled over the same windows, reported only.
+        harsh, _shown_ho, classify_ho = tables(frame.assign(pnl_dollars=frame["pnl_dollars_harsh"]), ctx_o)
         if inner_present:
-            combined_mid = pd.concat([w.assign(pnl_dollars=w["pnl_dollars_mid"]) for w in (inner_frame, frame)])
-            _shown_m, classify_mid = _contrasts(combined_mid, ctx_c["events"], roster, role_model, label_of, outer_models, ctx_c["quarter_of"], tick)
-        else:  # no inner window: the pooled mid frame is the outer one, so reuse its contrasts
-            classify_mid = classify_mo
-        sections += [_sens(text) for text in (*mid, _verdicts(classify_mid, missing_years, inner_present))]
+            combined_harsh = pd.concat([w.assign(pnl_dollars=w["pnl_dollars_harsh"]) for w in (inner_frame, frame)])
+            _shown_h, classify_ho = _contrasts(combined_harsh, ctx_c["events"], roster, role_model, label_of, outer_models, ctx_c["quarter_of"], tick)
+        # no inner window: the pooled harsh frame is the outer one, so its contrasts are reused
+        sections += [_harsh(text) for text in (*harsh, _verdicts(classify_ho, missing_years, inner_present, basis="harsh"))]
+    sections += [breakeven.section(combined)]  # Amendment 6b: breakeven alpha per model, book and year, on the pooled evaluated frame
     if not gate_raw.empty:  # Amendment 3: the G_PROD sections, after the Amendment 1 ones and before the accounts
         sections += gprod_report.sections(gate_raw, frame[frame["book"] == "straddle"], label_of=label_of, role_model=role_model, roster=roster, outer_models=outer_models,
                                           quarter_of=ctx_o["quarter_of"], tick=tick, stored_gate=stored_gate)

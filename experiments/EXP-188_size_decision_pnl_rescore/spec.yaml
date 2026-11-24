@@ -69,10 +69,11 @@ marks:
   - "3 no usable exit quote incl. crossed: structure marked at worst-case payoff, labelled exit_unquoted_worst_case; a locked quote is valid"
 marks_mid_sensitivity:
   amendment: "Amendment 1 (2026-11-22), guides/size_decision_pnl_design.md section 14"
-  label: "sensitivity (Amendment 1), not the pre-registered verdict"
+  label: "headline marks (Amendment 6b, post-hoc revision by the user, 2026-11-24); Amendment 1 named it a sensitivity"
   rule: "identical decisions; exit valuation only: rung-2 legs marked at the run's alpha like rung 1; rung 3 unchanged; both short-vol books and the straddle"
   stored: "decisions.parquet exit_value_mid, pnl_dollars_mid"
-  t10: "the pre-registered T10 verdict uses the primary marks only"
+  t10: "T10 verdict uses the mid marks (Amendment 6b); the pre-registered primary-marks rule is kept under preregistered_original.marks_mid_sensitivity.t10"
+headline_marks: {basis: "marks_mid (alpha 0.5)", harsh: "rung-2 zero-bid legs at alpha 0, reported only, not a verdict basis", breakeven_alpha: "engine.fills.breakeven_alpha on the same taken trades at alpha 0 and alpha 1, lots held at mid; per model, book, year", account_start_equity: 200000}
 g_prod_sensitivity:
   amendment: "Amendment 3 (2026-11-23), guides/size_decision_pnl_design.md section 'Amendment 3'"
   label: "sensitivity (Amendment 3), production gate refit once through 2024, not refit per model (favours M0's forecast scale), not the pre-registered verdict"
@@ -87,6 +88,7 @@ amendments:
   - "Amendment 3 (2026-11-23): G_PROD production-gate STR-THRU sensitivity arm, guides/size_decision_pnl_design.md section 'Amendment 3'"
   - "Amendment 5 (2026-11-23): straddle book uses production's STR-THRU universe (GATE_MCAP_FLOOR, no spread term) and its own paired population E_str, guides/size_decision_pnl_design.md section 17"
   - "Amendment 6 (2026-11-24): production-exact; short vol as-is only, re-tuned arm, c, size_pnl_tuning and T5 removed (post-hoc revision by the user), guides/size_decision_pnl_design.md section 18"
+  - "Amendment 6b (2026-11-24): headline marks = marks_mid, breakeven alpha, cash-secured accounts start at $200,000 (post-hoc revision by the user), guides/size_decision_pnl_design.md section 18, 'Headline marks, breakeven alpha and account size'"
 rung3_sensitivity: "a sensitivity row drops rung 3"
 hypotheses:
   H1: "H1 (short vol): for each matched pair, d = P&L(median-type) - P&L(mean-type) > 0 on the seven put-side short-vol structures."
@@ -155,6 +157,9 @@ preregistered_original:
     clear: "predicted sign in at least 2 of 3 pairs, none clearly opposite; in each used pair predicted sign in at least 75% of quarters and every full year (2024, 2025); both intervals exclude 0; sign holds in both geometry arms (short vol) or both R_L and R_L2 (long vol)"
   marks_mid_sensitivity:
     rule: "identical decisions and c (primary tuning receipt); exit valuation only: rung-2 legs marked at the run's alpha like rung 1; rung 3 unchanged; both short-vol books and the straddle"
+    t10: "the pre-registered T10 verdict uses the primary marks only"
+  primary_marks: "rung-2 zero-bid or wide legs at alpha 0 (marks list, rule 2), primary for every per-trade table, contrast and T10"
+  account_start_equity: 100000
   decisions:
     d5: "re-tune breadth = one scale factor per model pooled over the seven structures"
   hypotheses:

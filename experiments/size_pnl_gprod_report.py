@@ -24,7 +24,7 @@ NOT_AVAILABLE = ("not_available: production's stored walk-forward gate decisions
 COVERAGE_NOTE = ("covered = events with a determined G_PROD decision (taken or not_taken) in E; undetermined (a missing or NaN gate input, "
                  "a thin residual pool) is never counted as no. P&L per covered event counts untaken rows as 0. Contrasts below use the "
                  "covered subset of each pair: the events both members have a determined decision on.")
-CONTRAST_NOTE = "d = median-type minus mean-type for the H2 pairs; M0 minus the named model for the M0 rows. arm primary = primary marks; arm mid = marks_mid."
+CONTRAST_NOTE = "d = median-type minus mean-type for the H2 pairs; M0 minus the named model for the M0 rows. arm primary = harsh marks (reported only); arm mid = marks_mid (the headline basis)."
 AGREEMENT_NOTE = ("Events are M0's determined 2025 G_PROD events in E that production also scored (the stored `scored` set); an M0 event "
                   "production never scored is outside the rate, and production_scored_outside_m0 counts events in E that production scored and M0 has "
                   "no determined 2025 decision for. selected is the stored EXP-187 arm B selected "

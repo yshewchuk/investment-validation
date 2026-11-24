@@ -110,23 +110,25 @@ def test_t10_is_computable_with_inner_2024_and_outer_2025(tmp_path, inner_events
     assert pooled[0]["mean"] == 1.0
 
 
-SENS_T10_TITLE = "### Sensitivity (Amendment 1), not the pre-registered verdict: T10"
-SENS_T7_TITLE = "### Sensitivity (Amendment 1), not the pre-registered verdict: T7"
+HARSH_T10_TITLE = "### Harsh fills, reported only, not a verdict basis: T10 Verdicts"
+HARSH_T7_TITLE = "### Harsh fills, reported only, not a verdict basis: T7 Contrasts"
 
 
-def test_sensitivity_t10_pools_the_inner_window_too(tmp_path, inner_events):
+def test_harsh_t10_pools_the_inner_window_too(tmp_path, inner_events):
     # Same hand derivation as test_t10_is_computable_with_inner_2024_and_outer_2025: the mid column is twice the primary P&L,
     # so every mid difference doubles and the signs and categories are the primary ones. Outer 2025 alone has no full 2024 year,
     # so only the pooled inner rows make them testable.
     out = build_inner(tmp_path, INNER_2024, outer_dates=OUTER_2025, mid=True)
     assemble_mod.assemble(out, plan_frame(TICKERS), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
-    sens = [_cells(line) for line in _section_lines(text, SENS_T10_TITLE) if line.startswith("| H")]
-    assert sens == [["H1", "+1", "clear"], ["H2", "-1", "reversed"], ["H3", "+1", "no_difference"]]
-    assert not all(row[2] == "not_testable" for row in sens)
-    # The sensitivity T7 is the outer window's mid contrast alone: mean 2 (the primary T7 shows 1), so primary values cannot pass.
-    sens7 = next(_cells(line) for line in _section_lines(text, SENS_T7_TITLE) if line.startswith("| H1 | H | as_is |"))
-    assert sens7[3:6] == ["ok", "4", "2"]
+    harsh = [_cells(line) for line in _section_lines(text, HARSH_T10_TITLE) if line.startswith("| H")]
+    assert harsh == [["H1", "+1", "clear"], ["H2", "-1", "reversed"], ["H3", "+1", "no_difference"]]
+    assert not all(row[2] == "not_testable" for row in harsh)
+    # The headline T7 is the outer window's mid contrast alone: mean 2 (the harsh T7 shows the primary 1).
+    headline7 = next(_cells(line) for line in _section_lines(text, "### T7 Contrasts") if line.startswith("| H1 | H | as_is |"))
+    assert headline7[3:6] == ["ok", "4", "2"]
+    harsh7 = next(_cells(line) for line in _section_lines(text, HARSH_T7_TITLE) if line.startswith("| H1 | H | as_is |"))
+    assert harsh7[3:6] == ["ok", "4", "1"]
 
 
 def test_t10_still_refuses_when_a_full_year_is_missing(tmp_path, inner_events):
@@ -275,5 +277,5 @@ def test_without_inner_decisions_the_report_is_unchanged_in_shape(tmp_path):
     out = build(tmp_path)
     summary = assemble_mod.assemble(out, plan_frame(), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
-    assert summary["sections"] == 12  # includes main's Amendment 2 account section
+    assert summary["sections"] == 14  # 11 headline (run, marks basis, T1-T4, T6-T10), the harsh not_testable note, breakeven, and the Amendment 2 accounts
     assert "### Inner window" not in text
