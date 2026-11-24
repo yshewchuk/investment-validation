@@ -127,7 +127,7 @@ def entry_cost(chunk, c, p, alpha):
 
 
 def lots(cost_per_share):
-    """Whole lots as in ``engine/portfolio.py``: round down, floor of one; bad cost -> 1. Returns a float (whole lots; the representable dtype for any positive debit)."""
+    """Whole lots as in ``engine/portfolio.py``: round down, floor of one; bad cost -> 1. Returns a float (as build_book's contracts are float64); exact only below 2**53 lots."""
     cost = float(cost_per_share)
     if not math.isfinite(cost) or cost <= 0:
         return 1.0

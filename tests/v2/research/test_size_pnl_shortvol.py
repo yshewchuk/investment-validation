@@ -166,11 +166,14 @@ def test_score_refuses_a_drifted_factory(monkeypatch):
     assert caught.value.details["reason"] == "factory_default_mismatch"
 
 
+@pytest.mark.parametrize("off", [
+    ExpirySelector(kind="first_post_event", max_dte=30),
+    ExpirySelector(kind="nearest_dte", target_dte=30),
+])
 @pytest.mark.parametrize("index", range(len(STRUCTURES["TWIN-P"]().legs)))
-def test_pinned_refuses_a_leg_expiry_off_the_ladder_selector(monkeypatch, index):
+def test_pinned_refuses_a_leg_expiry_off_the_ladder_selector(monkeypatch, index, off):
     # Only leg ``index`` is moved off the ladder's selector: that one leg alone is refused, and the refusal names it.
     real = STRUCTURES["TWIN-P"]
-    off = ExpirySelector(kind="first_post_event", max_dte=30)
 
     def patched():
         spec = real()
@@ -682,20 +685,26 @@ def test_crossed_entry_quote_on_a_traded_strike_is_unusable_not_raised(pool):
     assert run(chunk, events_for("A"), pool).loc[0, "reason"] == "entry_quote_unusable"
 
 
-def test_penny_quote_publishes_a_float_lot_count_that_round_trips(tmp_path):
-    # The cost is the float cancellation residue of 0.03 + 0.03 - 0.01 - 0.05 (about 5.2e-18, found by search,
-    # not a market price); the test only needs it positive and tiny.
+def test_cancellation_residue_is_a_zero_cost_not_a_debit(pool):
+    # The raw cost is the float cancellation residue of 0.03 + 0.03 - 0.01 - 0.05 (about 5.2e-18, not a market price).
+    # It is within ZERO_RESIDUE of the gross premium, so it is an exact zero: undetermined, never simulated.
     premium = {94: 0.01, 97: 0.03, 103: 0.03, 106: 0.05}
-    chunk = chunk_of(("A", {}), entry=lambda k: (premium.get(k, 1.0),) * 2)
-    scored = sv.score(chunk, events_for("A"), taken(chunk, "A"), "CND-PS", 0.5)
-    row = scored.iloc[0]
-    assert 0 < row["entry_cost"] < 1e-6
-    expected = float(math.floor(CAPITAL_PER_TRADE / (row["entry_cost"] * 100)))
-    assert row["lots"] == expected
-    assert row["lots"] == pytest.approx(CAPITAL_PER_TRADE / (5.204170427930421e-18 * 100), rel=1e-9)
-    assert isinstance(row["lots"], float) and row["lots"] > 2 ** 63
-    path = tmp_path / "x.parquet"
-    scored.to_parquet(path)
-    pd.testing.assert_frame_equal(pd.read_parquet(path), scored)
+    chunk, events = chunk_of(("A", {}), entry=lambda k: (premium.get(k, 1.0),) * 2), events_for("A")
+    out = run(chunk, events, pool).iloc[0]
+    assert out["entry_cost"] == 0.0
+    assert out["status"] == "undetermined" and out["reason"] == "entry_not_debit"
+    scored_decisions = taken(chunk, "A")
+    with pytest.raises(ValueError, match="not a debit"):
+        sv.score(chunk, events, scored_decisions.assign(entry_cost=0.0), "CND-PS", 0.5)
+
+
+def test_debit_of_a_nanodollar_against_penny_premiums_is_not_zeroed():
+    # The same penny premiums plus a real 1e-9 debit on the 94 buy: 1e-9 is far above ZERO_RESIDUE * gross (~1e-13),
+    # so the cost is kept as a debit and not zeroed.
+    premium = {94: 0.01, 97: 0.03, 103: 0.03, 106: 0.05}
+    chunk = chunk_of(("A", {}), entry=lambda k: (premium.get(k, 1.0) + (1e-9 if k == 94 else 0.0),) * 2)
+    priced, _legs, _ = sv.resolve_priced(chunk, 0, "CND-PS", PRED, FillModel(0.5))
+    cost = sv.entry(priced)[0]
+    assert cost == pytest.approx(1e-9, abs=1e-12) and cost > 0
 
 

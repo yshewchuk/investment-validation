@@ -365,7 +365,7 @@ def test_tiny_cost_reported_diff_passes_the_driver_check(pool):
     # The reported max_abs_diff is on the bound's scale (return diff times min(1, cost)), so a 1e-9 debit reports a tiny price error.
     got = check_equivalence(pool, [_item(SPREAD, 1e-9)], draws=DRAW)
     assert got["max_abs_diff"] <= pool_mod.TOLERANCE
-    assert driver._equivalence_ok({"checked": 1, "max_abs_diff": got["max_abs_diff"]})
+    assert driver.equivalence_ok({"checked": 1, "max_abs_diff": got["max_abs_diff"]})
 
 
 def test_cost_at_least_one_keeps_the_absolute_bound(pool, monkeypatch):

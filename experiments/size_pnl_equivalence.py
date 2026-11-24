@@ -2,7 +2,8 @@
 
 ``build_sample`` draws a fixed sample of simulable events over the real ladder chunk, one structure per event,
 spread across ``NAMES``. ``check_chunk`` holds the linear fast path to ``expected_pnl`` on that sample and
-refuses above 1e-9 (``check_equivalence``). Pure functions: no I/O, no ledger.
+refuses above 1e-9 (``check_equivalence``); its ``max_abs_diff`` is the return difference scaled by min(1, entry cost).
+Pure functions: no I/O, no ledger.
 """
 import math
 

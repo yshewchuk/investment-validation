@@ -32,6 +32,10 @@ _OUT_COLS = ["event_id", "structure", "entry_cost", "exit_value", "rung", "lots"
              "pnl_dollars"]
 _CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
 _CLOSE = {BUY: SELL, SELL: BUY}
+# A net premium within 1e-12 of the gross premium traded is float cancellation residue of an exact zero (a double carries
+# ~1e-16 relative), not a debit; real cents-level quotes give a net of at least a cent against a gross of at most hundreds
+# of dollars (ratio >= 1e-5), so no real debit is lost. Not a market rule.
+ZERO_RESIDUE = 1e-12
 
 
 class Refusal(ValueError):
@@ -166,12 +170,17 @@ def simulate(chunk, events, pool, *, draws=DRAWS):
 def entry(priced):
     """(entry cost per share, mean relative spread), or None when the entry cost is not finite.
 
-    The cost is production's ``StructurePrice.cost``. The spread is production's ``_mean_relative_spread``
-    over all resolved legs, reference legs included, as the board computes it.
+    The cost is production's ``StructurePrice.cost``. A cost within ``ZERO_RESIDUE`` of the gross premium traded
+    (sum of ``|cash_flow|`` over the legs) is float cancellation residue of an exact zero, so it is returned as 0.0.
+    The spread is production's ``_mean_relative_spread`` over all resolved legs, reference legs included, as the
+    board computes it.
     """
     cost = priced.cost
     if not math.isfinite(cost):
         return None
+    gross = sum(abs(leg.cash_flow) for leg in priced.legs)
+    if abs(cost) <= ZERO_RESIDUE * gross:
+        cost = 0.0
     rel = _mean_relative_spread(priced)
     return cost, (math.nan if rel is None else rel)
 
