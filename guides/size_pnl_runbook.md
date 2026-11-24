@@ -1,6 +1,6 @@
 # EXP-188 runbook (SIZE decision-level P&L re-score, inner and outer stages)
 
-Operating steps for `experiments/EXP-188_size_decision_pnl_rescore/run.py --stage inner|outer`. Design:
+Operating steps for `experiments/EXP-188_size_decision_pnl_rescore/run.py --stage inner|outer` (the report stage is the last section). Design:
 `guides/size_decision_pnl_design.md`. Only the supervisor runs these steps (one heavy job at a time, never
 beside the v14 run, container 12 GiB). Agents never run them.
 
@@ -58,7 +58,7 @@ time from stderr before scheduling the full run.
 ## Outer stage
 
 Run `--stage outer` without `--event-ids`, against the same `--out-dir` as the completed inner run. It refuses
-before any chunk is built unless `inner.json` exists and match this run
+before any chunk is built unless `inner.json` exists and matches this run
 (`inner_receipt_mismatch`, `scope_mismatch`, `inner_inputs_mismatch`, `inner_tables_mismatch`). It warms the
 history from 2024-07, decides each 2025 month before reading that month's labels, and writes
 `receipts/inputs_outer.json`, `receipts/outer.json` and `decisions.parquet` (model, book, arm or rule, structure,

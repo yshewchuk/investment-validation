@@ -13,7 +13,7 @@ ROWS = (
     ("4", "ladder_too_coarse", "price_structure raises LadderTooCoarse on any leg collision",
      "fixed; falls out of row 3, local check deleted, decline is a non-trade at P&L 0"),
     ("5", "Zero-floor re-check", "none: production trades what price_structure returns",
-     "fixed; delete the negative-floor drop, count negative_floor_taken as a diagnostic"),
+     "fixed; the negative-floor drop is deleted, a negative-floor structure trades as production would (no diagnostic count is produced)"),
     ("6", "Entry cost not a debit", "engine/pnl_sim.py expected_pnl returns None for entry_cost <= 0",
      "fixed; cost <= 0 is undetermined, MIN_DEBIT deleted"),
     ("7", "exp_pnl_sim", "engine/pnl_sim.py expected_pnl, ResidualPool, DRAWS",
