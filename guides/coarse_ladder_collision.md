@@ -112,7 +112,7 @@ registry rather than over the two families that happened to be noticed.
 
 ## Were the experiments affected? No — and the reason is structural
 
-The fix is in `engine/structures.py`, the ONE pricing path, so the question is
+The fix is in `engine/structures.py`, the ONE pricing path (a twin, `engine/chain_index.py`, is planned for experiments and must stay bit-identical: `guides/price_structure_index_design.md`), so the question is
 real: a defect there is not confined to the dashboard. It is confined anyway,
 by a difference in how the two paths size a structure.
 
