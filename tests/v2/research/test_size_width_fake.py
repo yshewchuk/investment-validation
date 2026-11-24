@@ -362,10 +362,14 @@ def test_units_c_is_b_and_frozen_checks_the_arm_c_shape(tmp_path):
         assert caught.value.details["reason"] == "tuning_receipt_changed", name
 
 
+def test_write_tuning_c_is_private_and_not_a_public_entry():
+    assert not hasattr(fake, "write_tuning_c")
+
+
 def test_write_tuning_c_refuses_an_uncalibrated_fake_and_writes_nothing(tmp_path, monkeypatch):
     _small_draws(monkeypatch)
     with pytest.raises(Refusal) as caught:
-        fake.write_tuning_c(tmp_path, {}, "h", C_MODEL, {"ok": False, "reason": "fake_not_calibrated"}, 2)
+        fake._write_tuning_c(tmp_path, {}, "h", C_MODEL, {"ok": False, "reason": "fake_not_calibrated"}, 2)
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.details["reason"] == "fake_not_calibrated"
     assert not (tmp_path / "receipts" / "tuning_C.json").exists()
@@ -385,7 +389,7 @@ def test_run_fake_refuses_a_reduced_draw_count_before_calibration_and_writes_not
 
 def test_write_tuning_c_refuses_a_reduced_draw_count_with_an_ok_calibration_and_writes_nothing(tmp_path):
     with pytest.raises(Refusal) as caught:
-        fake.write_tuning_c(tmp_path, {}, "h", C_MODEL, {"ok": True}, 2)
+        fake._write_tuning_c(tmp_path, {}, "h", C_MODEL, {"ok": True}, 2)
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.details["reason"] == "fake_draws_not_protocol"
     assert not (tmp_path / "receipts" / "tuning_C.json").exists()
@@ -401,10 +405,36 @@ BAD_MODELS = {
 @pytest.mark.parametrize("name", list(BAD_MODELS))
 def test_write_tuning_c_refuses_a_malformed_fake_model_and_writes_nothing(name, tmp_path):
     with pytest.raises(Refusal) as caught:
-        fake.write_tuning_c(tmp_path, {}, "h", BAD_MODELS[name], {"ok": True}, 20)
+        fake._write_tuning_c(tmp_path, {}, "h", BAD_MODELS[name], {"ok": True}, 20)
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.details["reason"] == "fake_model_invalid"
     assert not (tmp_path / "receipts" / "tuning_C.json").exists()
+
+
+GOOD_FAKE_MODEL = {"L": 1.0, "b": 0.8, "s": 0.2, "mean_log_y": 1.0, "n": 300}
+
+
+def test_fake_model_ok_accepts_the_good_model_and_s_zero():
+    assert tuning.fake_model_ok(GOOD_FAKE_MODEL) is True
+    assert tuning.fake_model_ok({**GOOD_FAKE_MODEL, "s": 0.0}) is True
+
+
+@pytest.mark.parametrize("model", [
+    {**GOOD_FAKE_MODEL, "n": 299},
+    {**GOOD_FAKE_MODEL, "n": True},
+    {**GOOD_FAKE_MODEL, "n": 300.0},
+    {**GOOD_FAKE_MODEL, "s": -0.1},
+    {**GOOD_FAKE_MODEL, "s": None},
+    {**GOOD_FAKE_MODEL, "L": True},
+    {**GOOD_FAKE_MODEL, "L": float("inf")},
+    {**GOOD_FAKE_MODEL, "b": float("nan")},
+    {**GOOD_FAKE_MODEL, "mean_log_y": "1.0"},
+    *[{k: v for k, v in GOOD_FAKE_MODEL.items() if k != key} for key in ("L", "b", "s", "mean_log_y", "n")],
+    None,
+    [1.0, 0.8, 0.2, 1.0, 300],
+], ids=lambda m: repr(m)[:60])
+def test_fake_model_ok_refuses_each_malformed_model(model):
+    assert tuning.fake_model_ok(model) is False
 
 
 @pytest.mark.parametrize("name", list(BAD_MODELS))

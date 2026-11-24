@@ -103,7 +103,8 @@ def calibration(model, table, labels, n=N_DRAWS):
     return errmodel.calibrate(model, inner["pred_move"].to_numpy(dtype=float), label, z_matrix(ids, n))
 
 
-def write_tuning_c(out, body, inputs_hash, model, cal, n):
+def _write_tuning_c(out, body, inputs_hash, model, cal, n):
+    """Only run_fake calls this, with the calibration it computed for the same model."""
     if cal.get("ok") is not True:
         raise Refusal("EXPERIMENT_IDENTITY_CONFLICT", "tuning C refused: the fake forecast is not calibrated to M0",
                       {"reason": "fake_not_calibrated"})
@@ -137,7 +138,7 @@ def run_fake(months, table, labels, model, sessions, out, inputs_hash, *, n=N_DR
         _say(f"draw {d + 1}/{n} elapsed={elapsed:.1f}s eta={elapsed / (d + 1) * (n - d - 1):.1f}s "
              f"rate={(d + 1) / max(elapsed, 1e-9) * 60:.1f}draws/min rss={_rss():.0f}MiB")
     body = tune_c(per_draw)
-    write_tuning_c(out, body, inputs_hash, model, cal, n)
+    _write_tuning_c(out, body, inputs_hash, model, cal, n)
     _say(f"stage end elapsed={time.time() - started:.1f}s status=ok rss={_rss():.0f}MiB")
     return {"status": "ok", "body": body, "calibration": cal, "pooled": pool_draws(per_draw)}
 
