@@ -241,10 +241,8 @@ Stated so nobody has to rediscover them.
 
 ## 10. Chain-index twin (`engine/chain_index.py`)
 
-Pricing a structure through the twin is bit-identical to `engine.structures.price_structure` and faster on repeated work.
-
 - `price_structure_indexed(structure, snapshot, fill, *, pin=None, closing=False)` equals `price_structure`: same strikes, prices, cash flows and flags, and the same exception types and messages (`LadderTooCoarse` included).
-- `resolve_structure(structure, snapshot, *, pin=None) -> Resolution` locates and quote-validates every leg (no fill); `price_resolution(resolution, snapshot, fill, *, closing=False) -> StructurePrice` prices it. `pin=` also takes a `Resolution` (identity-checked on ticker and structure; `ValueError`).
-- The index is built lazily per snapshot and lives with it. `ChainSnapshot.rows` is immutable once priced through the twin; `ENGINE_CHAIN_INDEX_VERIFY=1` checks this and raises `ChainSnapshotMutated`.
-- A snapshot or call outside the proven shape (NaN/float32 strikes, tz-aware expiries, several dte per expiry, non-numeric selector params, ...) is sent whole to `price_structure`.
-- `engine/structures.py` and `engine/fills.py` are not modified; nothing in the v14 SIZE closure imports the twin (`tests/v2/integration/test_chain_index_closure.py`). Retirement trigger: the v14-bound experiments end; then `price_structure` wraps the twin.
+- Expiry selection runs on a lazily built per-snapshot index (distinct expiries, their dte, memoised rule results); every other step is the legacy pandas code. The index lives with its snapshot.
+- `ChainSnapshot.rows` is treated as immutable once priced through this function; with `ENGINE_CHAIN_INDEX_VERIFY=1` a change to the expiry or dte columns raises `ChainSnapshotMutated`. By default nothing checks it.
+- A snapshot or call outside the proven shape (tz-aware or NaT expiries, several dte per expiry, empty rows, non-numeric selector bounds) is sent whole to `price_structure`.
+- `engine/structures.py` and `engine/fills.py` are not modified; nothing in the v14 SIZE closure imports this module (`tests/v2/integration/test_chain_index_closure.py`).

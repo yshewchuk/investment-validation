@@ -28,7 +28,7 @@ BLOCKED_ENTRIES = (
 )
 V14_ENTRIES = ["experiments/v2_magnitude_search.py", "experiments/v2_prediction.py"]
 SCAN_DIRS = ("engine", "experiments", "ops", "tools")
-ALLOWED_IMPORTERS = {"engine/chain_index.py", "tools/bench_chain_index.py"}
+ALLOWED_IMPORTERS = {"engine/chain_index.py"}
 
 
 @pytest.mark.parametrize("entries", BLOCKED_ENTRIES, ids=["size-search", "size-panel", "v14"])

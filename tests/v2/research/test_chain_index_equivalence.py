@@ -16,12 +16,7 @@ import pandas as pd
 import pytest
 
 from engine import chain_index as ci
-from engine.chain_index import (
-    ChainSnapshotMutated,
-    price_resolution,
-    price_structure_indexed,
-    resolve_structure,
-)
+from engine.chain_index import ChainSnapshotMutated, price_structure_indexed
 from engine.fills import BEST, MID, WORST, FillModel
 from engine.structures import (
     BUY,
@@ -141,7 +136,7 @@ def _same(legacy, twin):
 
 
 def assert_same(structure, snapshot_factory, fill, **kw):
-    """Legacy and twin must agree cold, warm, and through resolve/price_resolution."""
+    """Legacy and twin must agree on a cold call and on a warm repeat on the same snapshot."""
     closing = kw.get("closing", False)
     pin = kw.get("pin")
     legacy_snap = snapshot_factory()
@@ -151,9 +146,6 @@ def assert_same(structure, snapshot_factory, fill, **kw):
     _same(legacy, cold)
     warm = outcome(lambda: price_structure_indexed(structure, twin_snap, fill, pin=pin, closing=closing))
     _same(legacy, warm)
-    if legacy[0] == "ok":
-        resolution = resolve_structure(structure, twin_snap, pin=pin)
-        _same(legacy, ("ok", price_resolution(resolution, twin_snap, fill, closing=closing)))
     return legacy
 
 
@@ -222,7 +214,7 @@ def test_battery_is_not_vacuous():
     assert outcome(lambda: price_structure_indexed(put_condor(), priced, MID))[0] == "ok"
     assert outcome(lambda: price_structure_indexed(straddle_through(), snap(rows.copy(), "BMO"), MID))[0] == "ok"
     # The index actually serves this call; it is not silently falling back to legacy.
-    assert ci._select_index(straddle_through(), priced, None, 100.0) is not None
+    assert ci._select_index(straddle_through(), priced) is not None
 
 
 # --------------------------------------------------------------------------
@@ -260,7 +252,7 @@ def test_coarse_ladder_raises_ladder_too_coarse_in_both_paths():
 
 
 # --------------------------------------------------------------------------
-# 3. pinned closes and resolution pins
+# 3. pinned closes
 # --------------------------------------------------------------------------
 
 
@@ -313,31 +305,6 @@ def test_duplicate_pin_name_last_wins():
     legacy = assert_same(structure, lambda: snap(chain.copy(), "AMC"), MID, pin=pin)
     assert legacy[0] == "ok"
     assert legacy[1].legs[0].strike == entry.legs[0].strike + 1.0
-
-
-@pytest.mark.parametrize("structure", [straddle_through(), put_condor(), ctr5()])
-def test_resolution_pin_equals_legacy_legs_pin(structure):
-    chain = make_chain()
-    entry = price_structure(structure, snap(chain.copy(), "AMC"), MID)
-    legacy = outcome(lambda: price_structure(structure, snap(chain.copy(), "AMC"), MID, pin=entry.legs))
-    twin_snap = snap(chain.copy(), "AMC")
-    resolution = resolve_structure(structure, twin_snap)
-    twin = outcome(lambda: price_structure_indexed(structure, twin_snap, MID, pin=resolution))
-    _same(legacy, twin)
-
-
-def test_resolution_pin_for_other_ticker_or_structure_raises_value_error_first():
-    chain = make_chain()
-    resolution = resolve_structure(straddle_through(), snap(chain.copy(), "AMC"))
-    # No spot anywhere: a StructureError would appear if the identity check ran later.
-    other_ticker = ChainSnapshot(ticker="U", obs_date=OBS, event_date=EVENT,
-                                 rows=chain.drop(columns="spot"), spot=None, session="AMC")
-    with pytest.raises(ValueError):
-        price_structure_indexed(straddle_through(), other_ticker, MID, pin=resolution)
-    with pytest.raises(ValueError):
-        resolve_structure(straddle_through(), other_ticker, pin=resolution)
-    with pytest.raises(ValueError):
-        price_structure_indexed(put_condor(), snap(chain.copy(), "AMC"), MID, pin=resolution)
 
 
 def test_closing_without_pin_matches_legacy():
@@ -536,18 +503,36 @@ def test_expiry_unit_of_returned_timestamp_matches_legacy(unit):
     assert legacy[0] == "ok"  # _same already compares leg.expiry.unit against legacy's
 
 
-def test_index_serves_eligible_shapes_and_refuses_ineligible_ones():
-    base = make_chain()
-    int_strike = snap(SHAPES["int64-strike"](base))
-    unit_s = snap(make_chain(expiry_unit="s"))
-    nan_strike = snap(SHAPES["nan-strike"](base))
-    tz_aware = snap(SHAPES["tz-aware-expiry"](base))
-    dup_dte = snap(SHAPES["two-dte-one-expiry"](base))
-    assert ci._index_for(int_strike) is not None
-    assert ci._index_for(unit_s) is not None
-    assert ci._index_for(nan_strike) is None
-    assert ci._index_for(tz_aware) is None
-    assert ci._index_for(dup_dte) is None
+INDEX_ELIGIBILITY = [
+    ("int64-strike", True),
+    ("float32-strike", True),
+    ("nan-strike", True),
+    ("string-right", True),
+    ("expiry-unit-s", True),
+    ("expiry-unit-us", True),
+    ("expiry-unit-ns", True),
+    ("tz-aware-expiry", False),
+    ("nat-expiry", False),
+    ("nan-dte", False),
+    ("two-dte-one-expiry", False),
+    ("shared-dte", False),
+    ("empty", False),
+]
+
+
+def _eligibility_rows(shape):
+    if shape == "expiry-unit-ns":
+        return make_chain(expiry_unit="ns")
+    return SHAPES[shape](make_chain())
+
+
+@pytest.mark.parametrize("shape,eligible", INDEX_ELIGIBILITY, ids=[s for s, _ in INDEX_ELIGIBILITY])
+def test_index_eligibility(shape, eligible):
+    rows = _eligibility_rows(shape)
+    assert_same(straddle_through(), lambda: snap(rows.copy(), "AMC"), MID)
+    priced = snap(rows.copy(), "AMC")
+    index = ci._index_for(priced)
+    assert (index is not None) is eligible, f"{shape}: index built={index is not None}"
 
 
 # --------------------------------------------------------------------------
@@ -644,14 +629,6 @@ def test_call_order_does_not_change_results():
 # --------------------------------------------------------------------------
 
 
-def test_verify_mode_raises_on_in_place_mutation():
-    priced = snap(make_chain(rights="CP", delta=True), "AMC")
-    assert price_structure_indexed(straddle_through(), priced, MID).legs
-    priced.rows.loc[priced.rows.index[0], "bid"] += 1.0
-    with pytest.raises(ChainSnapshotMutated):
-        price_structure_indexed(straddle_through(), priced, MID)
-
-
 def test_mutation_is_not_checked_without_verify_mode(monkeypatch):
     monkeypatch.delenv("ENGINE_CHAIN_INDEX_VERIFY", raising=False)
     priced = snap(make_chain(rights="CP", delta=True), "AMC")
@@ -660,32 +637,60 @@ def test_mutation_is_not_checked_without_verify_mode(monkeypatch):
     price_structure_indexed(straddle_through(), priced, MID)  # no ChainSnapshotMutated
 
 
+@pytest.mark.parametrize("column", ["expiry", "dte"])
+def test_verify_mode_raises_on_in_place_expiry_or_dte_mutation(column):
+    priced = snap(make_chain(rights="CP", delta=True), "AMC")
+    assert price_structure_indexed(straddle_through(), priced, MID).legs
+    first = priced.rows.index[0]
+    if column == "expiry":
+        priced.rows.loc[first, "expiry"] = pd.Timestamp("2026-04-15")
+    else:
+        priced.rows.loc[first, "dte"] += 1
+    with pytest.raises(ChainSnapshotMutated):
+        price_structure_indexed(straddle_through(), priced, MID)
+
+
+def test_verify_mode_does_not_checksum_bid():
+    priced = snap(make_chain(rights="CP", delta=True), "AMC")
+    assert price_structure_indexed(straddle_through(), priced, MID).legs
+    priced.rows.loc[priced.rows.index[0], "bid"] += 1.0
+    # Documented: only expiry and dte are checksummed, so a bid change is not refused.
+    assert price_structure_indexed(straddle_through(), priced, MID).legs
+
+
+@pytest.mark.parametrize("column", ["expiry", "dte"])
+def test_expiry_or_dte_mutation_is_not_checked_without_verify_mode(monkeypatch, column):
+    monkeypatch.delenv("ENGINE_CHAIN_INDEX_VERIFY", raising=False)
+    priced = snap(make_chain(rights="CP", delta=True), "AMC")
+    price_structure_indexed(straddle_through(), priced, MID)
+    first = priced.rows.index[0]
+    if column == "expiry":
+        priced.rows.loc[first, "expiry"] = pd.Timestamp("2026-04-15")
+    else:
+        priced.rows.loc[first, "dte"] += 1
+    price_structure_indexed(straddle_through(), priced, MID)  # no ChainSnapshotMutated
+
+
 # --------------------------------------------------------------------------
-# 11. resolutions
+# 11. routing: expiry selection really goes through the index
 # --------------------------------------------------------------------------
 
 
-def test_price_resolution_requires_the_snapshot_it_was_resolved_on():
-    chain = make_chain(rights="CP", delta=True)
-    first = snap(chain.copy(), "AMC")
-    second = snap(chain.copy(), "AMC")
-    resolution = resolve_structure(straddle_through(), first)
-    with pytest.raises(ValueError):
-        price_resolution(resolution, second, MID)
+def test_price_structure_indexed_routes_expiry_through_index(monkeypatch):
+    calls = {"n": 0}
+    original = ci._ChainIndex._expiry_rule
 
+    def counted(self, sel, event_date, session):
+        calls["n"] += 1
+        return original(self, sel, event_date, session)
 
-def test_resolution_legs_carry_opening_side_and_closing_flips_them():
-    structure = put_condor()
-    chain = make_chain(rights="P", delta=False)
-    priced = snap(chain.copy(), "AMC")
-    resolution = resolve_structure(structure, priced)
-    assert [leg.side for leg in resolution.legs] == [spec.side for spec in structure.legs]
-    closing = price_resolution(resolution, priced, MID, closing=True)
-    assert closing.legs[0].side != resolution.legs[0].side
-    entry = price_structure(structure, snap(chain.copy(), "AMC"), MID)
-    legacy_close = outcome(lambda: price_structure(structure, snap(chain.copy(), "AMC"), MID,
-                                                   pin=entry.legs, closing=True))
-    _same(legacy_close, ("ok", closing))
+    monkeypatch.setattr(ci._ChainIndex, "_expiry_rule", counted)
+    priced = snap(make_chain(spacing=1.0, rights="CP", delta=True), "AMC")
+    price_structure_indexed(put_condor_strike(), priced, MID)
+    first = calls["n"]
+    assert first > 0
+    price_structure_indexed(put_condor_strike(), priced, MID)
+    assert calls["n"] == first  # identical second call on the same snapshot: memo hit
 
 
 # --------------------------------------------------------------------------
@@ -693,17 +698,18 @@ def test_resolution_legs_carry_opening_side_and_closing_flips_them():
 # --------------------------------------------------------------------------
 
 
-def test_planted_atm_defect_is_detected(monkeypatch):
-    original = ci._ChainIndex.select_strike
+def test_planted_expiry_defect_is_detected(monkeypatch):
+    original = ci._ChainIndex._expiry_rule
 
-    def shifted(self, sel, *args, **kwargs):
-        result = original(self, sel, *args, **kwargs)
-        return result + 0.01 if sel.kind == "atm" else result
+    def last_expiry(self, sel, event_date, session):
+        result = original(self, sel, event_date, session)
+        return self.ts[-1] if result is not None else result
 
-    monkeypatch.setattr(ci._ChainIndex, "select_strike", shifted)
-    rows = make_chain()
+    monkeypatch.setattr(ci._ChainIndex, "_expiry_rule", last_expiry)
+    rows = make_chain()  # four distinct expiries
     with pytest.raises(AssertionError):
-        assert_same(straddle_through(), lambda: snap(rows.copy(), "AMC"), MID)
+        # Fresh snapshot, so the index and its memo are built under the planted rule.
+        assert_same(_struct(_leg("a")), lambda: snap(rows.copy(), "AMC"), MID)
 
 
 # --------------------------------------------------------------------------
