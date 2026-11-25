@@ -71,6 +71,17 @@ def _m0_frame(det, role_model, label_of, in_e):
     return m0_frame.assign(gate_score=m0_frame["gate_score"].where((m0_frame["status"] == "taken") | (m0_frame["reason"] == "below_gate_threshold")))
 
 
+def _m0_inputs(det, role_model, label_of, in_e, stored_gate):
+    """The M0 frame and production's stored selection, shared by the agreement section and the straddle label: the same refusals in the same order."""
+    if stored_gate is None:
+        raise fail(_INVALID, "the run has G_PROD rows: pass --stored-gate (EXP-187's transactions CSV) to run.py --stage report", details={"reason": "stored_gate_required"})
+    if "gate_score" not in det.columns:
+        raise fail(_INVALID, "the decisions predate the gate_score column: rerun the outer stage", details={"reason": "gate_score_missing"})
+    if "reason" not in det.columns:
+        raise fail(_INVALID, "the decisions lack the reason column", details={"reason": "gate_score_missing"})
+    return _m0_frame(det, role_model, label_of, in_e), stored_gate["selected"]
+
+
 def t10_straddle_label(gate_raw, role_model, label_of, outer_models, stored_gate, accepted_gap):
     """The straddle verdicts' label for this run, from the same M0 frame and agreement functions as the M0 section. Call it after
     sections, which refuses a missing stored gate. NOT_COMPUTED when the run has no G_PROD rows or M0 is not in the run; the
@@ -81,21 +92,16 @@ def t10_straddle_label(gate_raw, role_model, label_of, outer_models, stored_gate
         return size_pnl_gate_agreement.NOT_COMPUTED
     det = gate_raw[gate_raw["status"] != "undetermined"]
     det = det.assign(model_id=det["model_id"].map(label_of))
-    m0_frame = _m0_frame(det, role_model, label_of, set(gate_raw["event_id"]))
-    return size_pnl_gate_agreement.straddle_label(m0_frame, stored_gate["selected"], accepted_gap)
+    m0_frame, selected = _m0_inputs(det, role_model, label_of, set(gate_raw["event_id"]), stored_gate)
+    return size_pnl_gate_agreement.straddle_label(m0_frame, selected, accepted_gap)
 
 
 def _agreement(det, role_model, label_of, outer_models, in_e, stored_gate, accepted_gap=None, ladder=None):
     """M0's agreement with production's stored 2025 gate decisions, as a Markdown section (titled by the caller)."""
     if not _m0_in_run(role_model, label_of, outer_models):
         return f"{size_pnl_gate_agreement.HEADING}\n\nnot_available: M0_not_in_run"
-    if stored_gate is None:
-        raise fail(_INVALID, "the run has G_PROD rows: pass --stored-gate (EXP-187's transactions CSV) to run.py --stage report", details={"reason": "stored_gate_required"})
-    if "gate_score" not in det.columns:
-        raise fail(_INVALID, "the decisions predate the gate_score column: rerun the outer stage", details={"reason": "gate_score_missing"})
-    if "reason" not in det.columns:
-        raise fail(_INVALID, "the decisions lack the reason column", details={"reason": "gate_score_missing"})
-    return size_pnl_gate_agreement.section(_m0_frame(det, role_model, label_of, in_e), stored_gate["selected"], accepted_gap=accepted_gap, ladder=ladder)
+    m0_frame, selected = _m0_inputs(det, role_model, label_of, in_e, stored_gate)
+    return size_pnl_gate_agreement.section(m0_frame, selected, accepted_gap=accepted_gap, ladder=ladder)
 
 
 def sections(gate_raw, frame, *, label_of, role_model, roster, outer_models, quarter_of, tick, stored_gate=None, accepted_gap=None, ladder=None):

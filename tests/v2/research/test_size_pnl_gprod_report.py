@@ -332,3 +332,19 @@ def test_t10_straddle_label_on_the_agreement_fixture_is_hand_counted():
     # Both {E1, E2}, union {E1, E2, E3, E4}: 2/4 = 0.50, at the bar. No universe_filter row, so the live domain gives 0.50 too.
     assert gprod_report.t10_straddle_label(_agreement_gate(), ROLE_MODEL, LABEL_OF, set(LABEL_OF), STORED_HAND, None) == (
         "Straddle verdicts (H2, and H3 through its straddle leg): as-run agreement 0.50 meets the 0.5 bar; 0.50 inside the live domain.")
+
+
+@pytest.mark.parametrize("gate, stored, reason", [
+    pytest.param(_agreement_gate(), None, "stored_gate_required", id="stored_gate_none"),
+    pytest.param(_agreement_gate().drop(columns="gate_score"), STORED_HAND, "gate_score_missing", id="gate_score_dropped"),
+    pytest.param(_agreement_gate().drop(columns="reason"), STORED_HAND, "gate_score_missing", id="reason_dropped"),
+])
+def test_section_and_straddle_label_refuse_the_same_m0_inputs_the_same_way(gate, stored, reason):
+    with pytest.raises(OpsError) as section:
+        _run(gate, stored=stored)
+    with pytest.raises(OpsError) as label:
+        gprod_report.t10_straddle_label(gate, ROLE_MODEL, LABEL_OF, set(LABEL_OF), stored, None)
+    for caught in (section, label):
+        assert caught.value.problem.code == "INVALID_EXPERIMENT_SPEC"
+        assert caught.value.problem.details["reason"] == reason
+    assert label.value.problem.message == section.value.problem.message
