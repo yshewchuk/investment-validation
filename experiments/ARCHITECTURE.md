@@ -838,15 +838,15 @@ a scope head. Metadata-only registration seals spec hash, plan, snapshot, cohort
 holdout month/versions, source closure, single-thread numerical policy and the
 installed `threadpoolctl` version (`environment.thread_control`; a changed version
 refuses with EXPERIMENT_IDENTITY_CONFLICT). `run_runup` logs stage lines to stderr. Source
-identity describes on-disk files, not loaded bytecode. Replay needs the original spec
-because the seal retains its hash, not hypothesis text.
+identity describes on-disk files, not loaded bytecode. Replay needs the original spec:
+the seal retains only its hash.
 
 Run validates the exact request and intact registration before accessing any outcome
 slot. Terminal replay still re-prepares metadata only, skipping market payloads and
 comparison. An unrelated scope-head move is safe; changed source/environment, pin,
 scope, cohort or month cannot reuse the seal.
-The comparison runs under `threadpool_limits(1)`; its inner report records its own
-environment identity without a thread policy, while the outer registration owns that
+The comparison runs under `threadpool_limits(1)`; its inner report records
+environment identity without a thread policy; the outer registration owns that
 policy and runner identity. Canonical comparison JSON is stored directly as the native
 report artifact, returned by reference without Markdown export; inner mode/hash stays intact.
 
@@ -931,13 +931,13 @@ The evidence helper separately consumes native history admission and research st
 ## Magnitude search orchestration
 
 `v2_magnitude_search_run` composes public plan, journal, trial and outer APIs. Separate `seal`, `run` and read-only `collect` commands keep explicit ownership; run never migrates or seals implicitly. A distinct driver seal binds plan/ref and full driver source closure; atomic absence guards prevent blessing started library journals. Run and CLI collection
-require that exact binding, without changing the scientific report hash. The same pre-work roster check (unfinished claims, premature selections) gates serial and bounded-worker execution; each fit child stays single-threaded (including MLP), preserving request identity and the parent/child memory contract. Durable inner results reconcile first; completed outer results replay next, before any fresh fitting. Scientific scoring refusals continue only after public reconciliation verifies the
-durable refused terminal; shared/resource failures stop. Freeze precedes all selected outer evaluation, with zero fit retries and unchanged winner policy.
+require that exact binding, without changing the scientific report hash. The same pre-work roster check (unfinished claims, premature selections) gates serial and bounded-worker execution; each fit child stays single-threaded (including MLP), preserving request identity and the parent/child memory contract.
+Freeze precedes all selected outer evaluation, with zero fit retries and unchanged winner policy.
 
-The CLI reuses the bounded staged-input reader, strict duplicate-key decoder, typed spec/reference admission and shared canonical JSON stream. Output is limited by a configured UTF-8 byte budget; an oversized report is discarded without truncation and only the refusal document is written to stdout. Collection preserves the existing outer report identity and uses a read-only
+The CLI reuses the bounded staged-input reader, strict duplicate-key decoder, typed spec/reference admission and shared canonical JSON stream. Output has a configured UTF-8 byte budget (table below). Collection preserves the existing outer report identity and uses a read-only
 SQLite connection. No persisted report framework, scheduler, ledger, final-read or release authority is introduced.
 
-Each invocation revalidates bindings/evidence; there is no cross-call admission cache. The CLI calls `seal_search_run`/`run_search`. Direct engine dependencies are contracts, data, foundation and ops.
+Each invocation revalidates bindings/evidence, with no cross-call admission cache. The CLI calls `seal_search_run`/`run_search`. Direct engine dependencies are contracts, data, foundation and ops.
 
 | Condition | Enforced outcome |
 |---|---|
@@ -973,3 +973,7 @@ EXP-188: `size_pnl_{inputs,outer_inputs}` bind v14 and 2025 forecasts; `size_pnl
 `run_synthetic` publishes decisions, then `t11_synthetic.md` atomically. `size_pnl_assemble.assemble` (`--stage report`) writes `REPORT.md` likewise; the report states independent books (not board P&L) and T5 retired, labels verdicts, and adds the `size_pnl_audit` table; refusals `report_{scope_unsupported,out_dir_invalid,receipt_stage,receipt_chain_mismatch,receipt_malformed,inputs_mismatch,tickers_invalid,ticker_missing,nonfinite_pnl}`, `report_decisions_{missing,mismatch,columns,empty,invalid}`, `tuning_receipt_{missing,unreadable}` (legacy names, any receipt). Amendment 2: `size_pnl_account` loads EXP-134 `margin.py`. `size_pnl_gprod` (G_PROD; `--sources-config` `gate_fold`/`gate_inputs`): `gate_{config_incomplete,binding_invalid}` and `gate_{fold,inputs}_{missing,invalid,sha_mismatch}` refuse `INVALID_EXPERIMENT_SPEC` before the catalog opens; `gate_input_missing`, `gate_input_nan`, `thin_pool` are undetermined, never no; G_PROD rows are the straddle book (E_str; T6, T7, T10).
 
 EXP-190 (design `guides/size_quantile_move_design.md`; no production caller): `size_quantile_prereg` never writes the ledger; it refuses `stage_b_pending` until Stage B is settled (also `planned_row_*`, `spec_*`, `preregistered*`, `experiment_id_conflict`, `ledger_malformed`, `run_log_malformed`). `size_quantile_binding.{bind_grid,bind_b3}` check caller-loaded v14 documents without verifying their hashes: `v14_{grid,selection,report}_mismatch`, `m3_unbound`, `b3_unbound`.
+
+## Fair-value pricer (fill model F)
+
+`fair_value_pricer` (NumPy only): unclamped, zero-dividend American put and European call; no production caller ([design §4](../guides/fair_value_fill_design.md)). NaN (no value): invalid spot, strike or years; unexpired with invalid volatility or rate; put-tree probability outside (0,1). Expired: intrinsic. Only puts floor positive volatility (0.01).

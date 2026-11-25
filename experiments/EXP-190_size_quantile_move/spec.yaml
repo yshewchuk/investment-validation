@@ -104,7 +104,7 @@ failure_semantics:
 
 stage_b:
   status: pending_part_2
-  decisions_recorded_in: "design section 10 (D1, D11-D15, N1-N4, F)"
+  decisions_recorded_in: "design section 10 (D1, D11-D15, N1-N4, F, EQ)"
   rule: "write every Stage B rule here before settled"
 
 amendments: []
