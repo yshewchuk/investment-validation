@@ -4,7 +4,7 @@
 
 ## 1. Why a new fill model
 
-- **EXP-105 diagnostics** (`reports/exp-105_log_diagnostics.md` §8.5, supervisor-local, not tracked): STR-THRU's edge lived in the widest-quoted names. The widest relative-spread quintile (median 0.597) earned +9.87% per trade and supplied 48.9% of summed returns. The whole book earned +4.04% at mid and -1.42% at alpha 0.40; its capital-weighted breakeven alpha is 0.423. Mid is a real price only where quotes are narrow.
+- **EXP-105 diagnostics** (`reports/exp-105_log_diagnostics.md` §8.5, supervisor-local, not tracked): STR-THRU's edge was concentrated in the widest-quoted names, though not confined to them. The widest relative-spread quintile (median 0.597) earned +9.87% per trade and supplied 48.9% of summed returns. The whole book earned +4.04% at mid and -1.42% at alpha 0.40; its capital-weighted breakeven alpha is 0.423. Mid is a real price only where quotes are narrow.
 - **EXP-133** (`guides/exp133_structure_search.md` §4, §6): a vendor mid surface violates no-arbitrage, and searching over strikes harvests it (44.6% of the free search's entries violated it, 1.0% of the incumbent's; 30.8% of TWIN-P5 exits). Its `zero_cost` bug also shows that a refusal applied at one fill price compares different books.
 
 Per-event choices over widths and trades search the same surface.
