@@ -99,7 +99,7 @@ The reference is `engine.structures.price_structure` itself, with `ExpirySelecto
 - `isclose` edges: a target just inside and just outside tolerance, two listed strikes inside one tolerance, duplicate rows for one contract, equidistant strikes in both row orders, `nearest_dte` ties in both orders.
 - Ineligible shapes (section 1) match `price_structure` via the plain path; a seeded property test of 200 random chains per structure.
 - Call-order independence, verify mode (an in-place `rows` edit raises `ChainSnapshotMutated`), `price_resolution` refusing another snapshot (`ResolutionMismatch`, twin only), and a planted-defect control (a deliberately wrong tie rule must fail the battery).
-- **Closure test** (`tests/v2/integration/test_chain_index_closure.py`): `engine/chain_index.py` is absent from `source_closure(root, [...])` for each bound root: `experiments/size_search.py`, `magnitude_search_worker.py`, `size_search_binding.py`, `v2_magnitude_search.py`, `size_pnl_shortvol.py`, `size_width_sweep.py` and the EXP-188 `run.py`; and the content hashes of `engine/structures.py` and `engine/fills.py` equal `origin/main`'s.
+- **Closure test** (`tests/v2/integration/test_chain_index_closure.py`): `engine/chain_index.py` is absent from `source_closure(root, [...])` for the SIZE-search, `size_panel.py` and v14 entry sets, and only listed modules import it. The EXP-188 and EXP-189 runners reach it through `size_pnl_pricing` and `size_width_pricing`. With `CLOSURE_NEUTRAL_BASE` set, every v14 closure file must equal that base.
 
 ## 6. Real-data regression tool
 

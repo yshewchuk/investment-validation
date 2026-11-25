@@ -7,6 +7,7 @@ that closure, so any change to them is still visible to the fingerprint.
 The benchmark under tools/ imports the twin on purpose, and so does
 experiments/size_width_pricing.py (the EXP-189 pricing adapter, the chain-index seam);
 neither is reachable from the v14/SIZE entries, which the closure tests below still assert.
+experiments/size_pnl_pricing.py is the EXP-188 seam: it is likewise not reachable from the v14/SIZE entries.
 """
 from __future__ import annotations
 
@@ -30,7 +31,8 @@ BLOCKED_ENTRIES = (
 )
 V14_ENTRIES = ["experiments/v2_magnitude_search.py", "experiments/v2_prediction.py"]
 SCAN_DIRS = ("engine", "experiments", "ops", "tools")
-ALLOWED_IMPORTERS = {"engine/chain_index.py", "tools/bench_chain_index.py", "experiments/size_width_pricing.py"}
+ALLOWED_IMPORTERS = {"engine/chain_index.py", "tools/bench_chain_index.py", "experiments/size_width_pricing.py",
+                     "experiments/size_pnl_pricing.py"}
 MAX_SOURCE_BYTES = 8 * 1024 * 1024
 
 
