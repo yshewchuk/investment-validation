@@ -110,3 +110,96 @@ New `size_width_*` modules only; `size_pnl_*` is imported unchanged.
 **12.4 Outputs and the adoption rule (pre-stated).** (i) A **recommended tolerance band per structure** at the chosen `phi`. (ii) **The `phi` is chosen from 2023-24 only (2025 never selects it), by this rule fixed now:** the **widest** (smallest) `phi` in {0.80, 0.90, 0.95} whose recovered trades' mean return per trade at `marks_mid` is not below the taken trades', pooled over 2023-24 on the 12.3 factors, with at least 100 recovered trades in 2023-24; none qualifies: `insufficient_recovery`, answer no. (iii) **Fallback adoption, yes or no, names that `phi`:** **yes** iff, at that `phi` and on the factors of 12.3, the `fallback` arm's account at `marks_mid` exceeds the same arm without it in each of 2025, 2023H2 and 2024, **and** its 2025 breakeven alpha is no more than the no-fallback arm's + 0.05. Otherwise no. The 100-trade floor is my judgement call. The board change is the user's separate decision, with the DYN-SV chooser review; EXP-188 is rerun if the widths or the fallback change.
 
 **12.5 Failure semantics.** A non-positive peak: `no_positive_peak` (no band or fallback for that structure). No feasible `rho` in the band: declined as today, counted `fallback_infeasible`. Under 100 recovered trades in 2023-24 for every `phi`: `insufficient_recovery`, answer no. A realised width not computable (a leg missing): left out of T8, counted `deviation_unavailable`, never imputed. The geometry search is dot products on the existing ladder table (R2) with no randomness (R3). The `tuning_band` receipt is atomic and immutable (R4); `fallback` refuses without it (`tuning_receipt_missing`); bands are frozen from 2023-24 and no label or P&L enters the choice of `rho` (R6).
+
+## Amendment 1 (2026-11-25): fair-value fills (model F); post-hoc revision by the user
+
+**Status: design only (user decision 2026-11-25).** No code or `spec.yaml` change here; sections 1-12 are unedited. Where this section conflicts with them, it governs the Amendment 1 run only. **Model F** is `guides/fair_value_fill_design.md` ("F design"); this section states how EXP-189 consumes it and does not restate its pricing. Rules marked "mine" are my judgement calls.
+
+### A1.1 Labelling
+
+- **Post-hoc.** The user chose this revision after the full run under mid fills had been seen (2026-11-25): its 2023-24 tuning and its 2025 results. It is not a pre-registered test, and nothing in it is blind. 2025 was already "2025 NOT blind for widths".
+- **The original stays on record** as EXP-189's only pre-registered result: its spec text, PLANNED row, receipts, report and ledger rows are not edited or deleted. If the two runs recommend differently, both are stated.
+- Every Amendment 1 table and `proposed_rule.json` carries **"POST-HOC (Amendment 1, F fills)"**; 2025 tables also keep "2025 NOT blind for widths".
+
+### A1.2 Scoring
+
+Every arm's primary P&L (production, A-E, the anchor, C's draws, `fallback`) is under F: entry cost `debit_F`, exit value `proceeds_F`, each leg at F's fair value (ORATS `smvVol` or F's fallback smile; intrinsic at expiry; clamped to bid/ask) plus the spread/size concession, at entry and at exit. Every place where sections 3-7 and 12 let `marks_mid` decide something (objective, tie rule, curves, bands, success condition (a), the 2-of-7 guard, `phi` and adoption, T8 returns, T9) reads F. This supersedes, for F only, section 2's "marks only from `engine/fills.py`"; `engine/fills.py` is unchanged and still produces the reported views.
+
+**Reported beside F, same taken set, same lots rule, never deciding or tie-breaking:** **mid** (the original `marks_mid`: alpha 0.5, entry and exit) and **harsh** (the original alpha-0 result, entry and exit), computed by the existing code and rung rules, per trade and in the T5-T6 accounts (each account is walked again, so its funded set may differ). F's three sensitivities (unknown liquidity 0, unknown 1, mid-floored F) are reported per trade and for the seven-structure account.
+
+**F's exit.** F design section 7 applies: a held trade never leaves; a leg with a usable quote but `no_fair_value` or `rate_unknown` takes `V = mid` (`exit_fair_mid`) and pays the concession. An `unpriceable` leg, or a ladder rung 3, marks the **structure** at the defined-risk floor 0.0 (`exit_unquoted_worst_case`). Negative `proceeds_F` is kept and flagged `exit_negative`, not floored (mine, as current marks are not).
+
+### A1.3 Selection and where F enters `exp_pnl_sim`
+
+The machinery is unchanged; F's entry cost goes in.
+
+- `exp_pnl_sim = (simulated exit value - debit_F) / debit_F`. **F enters through the entry cost only.** The **simulated exit uses neither F's concession nor F's fair value**: it stays the current European, zero-rate Black-Scholes mean (`put_means`). `structure_pnl` already takes the entry cost as an argument, so `engine/pnl_sim.py`, `size_pnl_*` and every v14-closure file are unchanged.
+- **Consequence:** the score is optimistic against F-scored exits, by amounts that differ by name and width (F design section 11); rank gating does not remove this. Arm E may therefore favour a `k` whose exit concession is large. The report gives, by arm and chosen `k`, the mean exit concession (exit value at `V` minus `proceeds_F`, over `debit_F`; rung-3 and `unpriceable` exits excluded and counted).
+- **Arm E** picks each event's `k` by `exp_pnl_sim` on `debit_F`, among widths that pass F's guard.
+- **The top-20% trailing cutoff** (`trailing_cutoff`) ranks each arm's own history of those scores. Only scored rows enter it, so F-skipped rows do not.
+- **A, B, D (and C)** still choose `k` by the section 5 account objective, not by mean `exp_pnl_sim`; their trades are gated by the F-based score and cutoff, and the account is F-marked. Burn-in uses F too, and T3's `exp_pnl_sim` curves are F-based.
+- The universe filter (market cap; mean relative spread of the stored quotes) is unchanged.
+
+**The seam (#2884).** `size_width_pricing.load(fills=...)` with a `size_width_fills.Fills` object is the plug point, but as merged it is **not sufficient**: `entry(priced)` gets only a `StructurePrice` whose snapshot has a blank ticker and the expiry as its date, so F cannot find the event's rows, and neither method returns reasons or flags. The code slice widens the seam inside `size_width_*` only, so that entry receives the event and its resolved legs, and reasons and exit flags reach the rows; with `CurrentFills`, outputs stay identical. Rung 3 keeps bypassing the seam. **Mid and harsh must be priced through a separate `CurrentFills` instance** with `repriced=True`: in an F-loaded copy, `entry` returns `debit_F` at every alpha.
+
+**Quotes F prices (mine).** F gets every listed row of each requested expiry, on the entry and exit dates, from the snapshot the sealed inputs pin. Where the snapshot repeats a (right, strike), the adapter keeps the row the ladder keeps (same entry and exit ranking), counted. A resolved leg whose stored bid/ask differ from the ladder chunk's (values the chunk blanks excepted) refuses `f_quote_mismatch`. A snapshot lacking a column F requires refuses; no other snapshot is substituted.
+
+### A1.4 F's guard: a counted non-trade per arm
+
+After the geometry resolves (the existing reasons keep their meaning and come first), F's entry statuses and then its guard apply, once, at entry:
+
+| Reason (counted per structure and arm) | When |
+| --- | --- |
+| `f_unpriceable`, `f_rate_unknown`, `f_no_fair_value` | a leg is not `ok` (F's `undetermined`); with several, the first in this order (mine) |
+| `f_not_a_debit`, `f_fill_over_fair`, `f_spread_over_debit` | F design section 6, first condition that holds; `f_not_a_debit` replaces `entry_not_debit` |
+
+Such a row has no `exp_pnl_sim`, stays out of the cutoff history and is a non-trade (P&L 0) for that arm. **The event stays in the comparison** (mine, as with `ladder_too_coarse`). The result is a function of the resolved legs and entry quotes alone, so arms, controls and draws resolving the same legs get the same answer, and mid, harsh and the sensitivities share the taken set. Different widths have different legs, so arms can differ, and an arm can score better by not trading. T2 and T5 therefore give counts and shares by reason, arm and year, and, against production, the events where exactly one of the two was F-skipped. For E, a failing `k` is infeasible; E can step around the guard where a fixed `k` cannot, so the report gives the share of E's events with at least one F-skipped `k`. When no `k` is feasible, the existing rule (the row of the `k` nearest 1) supplies the reason. `fallback` still retries only `ladder_too_coarse`; a trial `rho` must also pass F's statuses and guard, else the next is tried.
+
+### A1.5 Account
+
+Unchanged policy ($200,000, cap 0.66, `target_share` 0.25, expensive first, every short put secured at strike x 100). The deciding account **funds at F cost**: `debit_F` sets entry cost and lots, `proceeds_F` the exit. The mid and harsh accounts use their own costs.
+
+### A1.6 Unchanged
+
+Arms, `k` grid, `N` and seeds, windows and periods, M0 and the fake's calibration, account rules, edge rule, tie rule, 300-trade and 100-recovery floors, `phi` set, recommendation order, and the success rule and guards, now judged on F P&L. One definition needs care (mine, for the user to override): condition (b) and 12.4's margin are **breakeven alpha**, which is defined on the alpha ladder and has no F value. It keeps its definition and +0.05 margin, computed by ladder repricing of **the arm's F-selected taken set**; it tests that set's fill robustness, not its F return.
+
+### A1.7 F failure states mapped to R1-R6 (adds to section 8)
+
+| Case | EXP-189 result |
+| --- | --- |
+| R1 inputs: F's binding, hash, manifest, column, duplicate-key or unit refusals; `f_quote_mismatch` | refuse `EXPERIMENT_IDENTITY_CONFLICT` with `details.reason`; no partial report; nothing imputed |
+| R1 `rate_unknown` | entry: `f_rate_unknown` non-trade; exit with a usable quote: `exit_fair_mid` |
+| R1 no `smvVol` | not itself a failure when the fallback smile applies: the expiry uses it, source counted and shares printed by year. A row F leaves `no_fair_value` (smile cannot be fitted, a non-fit-set row without `smvVol` on an `smvVol` expiry, tree or spot rule): `f_no_fair_value` at entry, `exit_fair_mid` at exit |
+| R1 unpriceable leg | entry: `f_unpriceable`, or the earlier `entry_quote_unusable`; exit: floor 0.0 |
+| R1 missing size or open interest | not a failure: F's unknown value 0.5, counted per field and year; sensitivities 0 and 1 |
+| R2 | F design chunking; each quote row priced once per quarter chunk and reused across `k`, arms and draws; F's load and the stage run under `bounded_run`; over a limit: `RESOURCE_LIMIT_EXCEEDED`, no partial report |
+| R3 | F has no randomness; results do not depend on which structure or arm asked |
+| R4 | the inputs receipts bind the fill-model id, `fvf_id`, both manifest and every table hash, units, F1's two rate rules and the carry/dividend mode; the same ids bind `months/`, `e_choices/` and tuning receipts through `inputs_hash`; a change refuses at replay |
+| R5 | an `fvf_id` or fill-model id that differs from the spec's refuses; an F spec never runs on `CurrentFills` as primary |
+| R6 | entry uses only entry-date data and an earlier-dated rate row; exit-date rows are never read for a decision; sections 4 and 8 are otherwise unchanged. F design section 11's unverified point-in-time limit applies |
+
+Status, vol-source and liquidity coverage on entry rows is printed **before any outcome is read**, and F design section 8's diagnostics are reported, with better-than-mid and no-arbitrage-violation shares also by arm (a search may favour both).
+
+### A1.8 Borrow and dividends
+
+PR #2910 (open) amends the F design to use ORATS borrow and dividend inputs, consumed by its slice F7, and orders F5 after F7. **If #2910 is merged before the run**, the spec binds an `fvf_id` that includes F7 and a re-ingest carrying those fields, and the run waits for F7's code (the merged document alone prices nothing). **If not**, F runs as built: **risk-free carry and zero dividends**, which spec and report state. The limit: every EXP-189 leg is a put, a missed dividend makes F under-value puts, and the clamp does not bound the error. The choice is fixed when the amended spec is registered; changing it needs a new amendment, hash and PLANNED row.
+
+### A1.9 Registration and run
+
+1. The last code slice adds one `amendments` entry to `spec.yaml` (this section; post-hoc flag and label; fill model F as primary and what it supersedes in `constraints`, `objective` and `success_rule`; the A1.7 R4 bindings, units taken from the re-ingest using no outcome). `preregistered_at` and the original fields stay. The hash changes. **F is selected only by this entry**; without it the code prices as before.
+2. The **supervisor registers a new PLANNED row** with the new hash (the guard then expects two EXP-189 PLANNED rows, the new one last). No agent writes `experiments/LEDGER.csv`. Until then every stage refuses.
+3. **Smoke, 50 tickers, with F timing** (`--no-ledger`, fresh `/tmp` out-dir): all admitted events of the 50 plan tickers with the smallest `sha256("<ticker>|exp189-a1")` (mine; no outcome used), all three stages. Record per stage wall time, peak RSS, F load and pricing time, quote rows priced and their rate, entry coverage, and a full-run estimate, before the full run. No smoke result tunes F or a rule; a rule change needs a new amendment.
+4. **Full rerun of all stages** (inner, outer, report) in a fresh out-dir. No earlier receipt, month file or tuning is reused or deleted.
+
+### A1.10 Split list (code slices; none starts until this section and F4 and F5 are merged, plus F7 when A1.8 requires it)
+
+All edits are in `size_width_*`, EXP-189's directory, its tests, the runbook and the experiments docs. No EXP-188 file, F module (F's own slices own those) or v14-closure file changes. Sizes: non-test code / test lines / doc words.
+
+| Slice | Scope | Size | After |
+| --- | --- | --- | --- |
+| W7a | F adapter: bound loads, per-chunk leg tables, quote rows and `f_quote_mismatch`, widened seam with entry reasons and exit marks and flags; `CurrentFills` identical | ~150 / ~180 / 50 | F4, F5 |
+| W7b | F-primary rows with mid, harsh and sensitivity columns; accounts, objective, fallback, T8 and T9 inputs read F; A1.4 counts; breakeven on the `CurrentFills` ladder | ~150 / ~180 / 40 | W7a |
+| W7c | Report: labels, F-primary tables beside mid and harsh, sensitivities, coverage, counts, concession and F diagnostics | ~150 / ~150 / 60 | W7b |
+| W7d | `spec.yaml` amendment, spec-driven F selection and receipt bindings, driver and F timing, smoke ticker ids, runbook | ~120 / ~140 / 100 | W7c |
+
+W7a-W7c are tested with F selected by injection on synthetic fixtures; only W7d lets a run select it. A slice that would pass the size limit is split again.
