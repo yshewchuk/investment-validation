@@ -2,10 +2,13 @@
 is walked) and the pool is stubbed as the EXP-188 driver tests stub it; the sources and chunks are the EXP-188 fixtures."""
 import json
 
+import numpy as np
 import pandas as pd
 import pytest
 
+from engine import pnl_sim
 from engine.chain_index import price_structure_indexed
+from engine.fills import FillModel
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import OpsError, fail
 from experiments import size_pnl_driver as base
@@ -23,7 +26,8 @@ from experiments.size_pnl_shortvol import NAMES, Refusal
 from experiments.size_width_sizing import GRID
 from experiments.size_width_success import LADDER, breakeven_alpha
 from experiments.size_width_sweep import _TAKEN, RET_COLS, WINDOWS, Sweep
-from tests.v2.research.test_size_pnl_driver import BASE, EVENTS, OK, PLAN_FRAME, chunk, sources, use_chunks
+from tests.v2.research.test_size_pnl_driver import BASE, EVENTS, FACTS, OK, PLAN_FRAME, chunk, sources, use_chunks
+from tests.v2.research.test_size_pnl_shortvol import chunk_of
 
 CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
 NAME = "CND-PS"
@@ -388,6 +392,231 @@ def test_the_report_reads_the_receipts_the_driver_writes(tmp_path, m0, taking, m
         assert heading in text
     assert "SMOKE RUN" in text
     json.loads((tmp_path / "proposed_rule.json").read_text(encoding="utf-8"))
+
+
+# ---- smoke scope: the history is whole, only the events priced are scoped -------------
+
+def test_a_scoped_run_prices_its_ids_from_the_full_pool_history(tmp_path, m0, pricing, monkeypatch):
+    """The scope limits the events priced, never the pool history: E1 (2023-06-10, history outside the scope) feeds the 2024 pool of a run scoped to E2."""
+    real_simulate = driver.PRICING.simulate
+
+    def run(out, ids):
+        pools, priced = [], []
+
+        def simulate(chunk_, events, pool, **kw):
+            priced.append(sorted(events["event_id"]))
+            return real_simulate(chunk_, events, pool, **kw)
+
+        monkeypatch.setattr(driver.PRICING, "simulate", simulate)
+        monkeypatch.setattr(driver, "build_pool", lambda table, labels: pools.append((set(table.index.astype(str)), set(labels.index.astype(str)))))
+        use_chunks(monkeypatch, [("2024Q3", chunk("E1", "E2"))])
+        try:
+            driver.run(sources(), "inner", out, event_ids=ids, prereg=OK)
+        except OpsError:  # a full run's errmodel fit has too few rows (as in the EXP-188 tests); its pools and pricing are recorded before it
+            pass
+        return pools, priced
+
+    scoped_pools, scoped_priced = run(tmp_path / "scoped", ["E2"])
+    full_pools, _ = run(tmp_path / "full", None)
+    assert (tmp_path / "scoped" / "receipts" / "inner_summary.json").exists()
+    assert scoped_priced and all(p == ["E2"] for p in scoped_priced)  # only the scoped id is priced
+    august = ({"E1"}, {"E1"})  # the 2024-08 pool: E1 (2023) in the table, its label printed in 2023; E2's label prints after the month start
+    assert scoped_pools and all(p == august for p in scoped_pools)
+    assert august in full_pools
+
+
+def test_a_scoped_run_drops_nan_fact_history_rows_as_a_full_run_does(tmp_path, m0, pricing, monkeypatch):
+    """The facts exclusion covers the whole history: E1 (2023, outside the scope) has a NaN fact, so both a run scoped to E2 and a full run drop it from the pool history."""
+    real_facts = FACTS.reindex  # the EXP-188 facts, with E1's pre_iv30 missing
+
+    def facts(ids):
+        return real_facts(list(ids)).assign(pre_iv30=lambda f: f["pre_iv30"].where(f.index != "E1"))
+
+    def run(out, ids):
+        pools = []
+        monkeypatch.setattr(driver, "build_pool", lambda table, labels: pools.append((set(table.index.astype(str)), set(labels.index.astype(str)))))
+        use_chunks(monkeypatch, [("2024Q3", chunk("E1", "E2"))])
+        try:
+            driver.run(sources(facts=facts), "inner", out, event_ids=ids, prereg=OK)
+        except OpsError:  # a full run's errmodel fit has too few rows (as in the EXP-188 tests); its pools are recorded before it
+            pass
+        return pools
+
+    scoped_pools = run(tmp_path / "scoped", ["E2"])
+    full_pools = run(tmp_path / "full", None)
+    scoped_tables = {frozenset(t) for t, _ in scoped_pools}
+    full_tables = {frozenset(t) for t, _ in full_pools}
+    assert scoped_tables and full_tables
+    assert all("E1" not in t for t in scoped_tables | full_tables)
+    assert scoped_tables == full_tables  # the same pool table set for the August month in both
+
+
+def test_a_scoped_run_over_admitted_ids_prices_more_than_zero_events_with_the_real_pool(tmp_path, monkeypatch):
+    """End to end with nothing stubbed on the pricing path: the real PRICING, pool and simulation. The M0 table is scoped to the
+    ids of the production frame, so the 2023 history reaches the pool only if the driver reads production whole (the scope
+    limits the events priced, never the history). An independent oracle then re-prices every scored row of S0 and S1 from a
+    hand-built ResidualPool over the history rows H0..H299 alone, with the shortvol exit legs and expected_pnl, and requires the
+    driver's exp_pnl_sim to match it (not just be nonzero)."""
+    rng = np.random.default_rng(189)
+    hist = pd.Timestamp("2023-01-05") + pd.to_timedelta(np.linspace(0, 350, 300).round().astype(int), unit="D")
+    dates = pd.DatetimeIndex(list(hist) + [pd.Timestamp("2024-08-07")] * 2)
+    ids = [f"H{i}" for i in range(300)] + ["S0", "S1"]
+    move = 5.0 + rng.normal(0, 0.05, len(ids))  # the M0 prediction and the production forecast, with small noise
+    crush = -12.0 + rng.normal(0, 0.5, len(ids))
+    frame = pd.DataFrame({"event_id": ids, "pred_abs_move": move, "pred_iv_crush_30": crush, "horizon_sessions": 1,
+                          "abs_move": move + rng.normal(0, 0.5, len(ids)), "crush_pct_iv30": crush + rng.normal(0, 1.0, len(ids)),
+                          "available_as_of_date": [(d + pd.Timedelta(days=1)).date().isoformat() for d in dates]})
+    admitted = readers.Admitted({"events": pd.DataFrame({"event_id": ids, "event_date": dates}), "excluded": {}})
+    plan = pd.DataFrame({"event_id": ids, "ticker": "T", "event_date": dates, "session": "AMC",
+                         "entry_date": dates - pd.Timedelta(days=1), "exit_date": dates + pd.Timedelta(days=1)})
+    facts = pd.DataFrame({"pre_iv30": 40.0, "mcap_usd": 2e10, "implied_move": 5.0}, index=pd.Index(ids, name="event_id"))
+    m0 = pd.DataFrame({"event_date": dates, "pred_move": move, "pred_crush": crush}, index=pd.Index(ids, name="event_id"))
+
+    def fetch(columns, wanted):
+        return frame[frame["event_id"].isin(list(wanted))].copy()
+
+    def model_tables(bound, roster, admitted_, production, **kw):
+        table = m0[m0.index.isin(production["frame"].index)]  # the table is scoped to the production frame's ids, as model_tables is
+        return {_m0_key(roster): {"status": "ready", "table": table, "binding": {"model": "M0"}}}
+
+    monkeypatch.setattr(readers, "model_tables", model_tables)
+    real_simulate, real_score, priced, scored_calls = driver.PRICING.simulate, driver.PRICING.score_events, [], []
+    real_chunk = chunk_of(("S0", {}), ("S1", {}))
+
+    def spy(chunk_, events, pool, **kw):  # a pass-through: records how many events got a non-None simulation
+        sims = real_simulate(chunk_, events, pool, **kw)
+        priced.append(sum(sim is not None for sim in sims.values()))
+        return sims
+
+    def score_spy(chunk_, events, sims, name, *, alpha=0.5):  # a pass-through: records the events, name, alpha and the scored frame
+        result = real_score(chunk_, events, sims, name, alpha=alpha)
+        scored_calls.append((events.copy(), name, alpha, result))
+        return result
+
+    monkeypatch.setattr(driver.PRICING, "simulate", spy)
+    monkeypatch.setattr(driver.PRICING, "score_events", score_spy)
+    use_chunks(monkeypatch, [("2024Q3", real_chunk)])
+    src = sources(admitted=admitted, fetch=fetch, plan_frame=plan, facts=lambda wanted: facts.reindex(list(wanted)))
+    driver.run(src, "inner", tmp_path, event_ids=["S0", "S1"], prereg=OK)  # no smoke_priced_nothing: the run returns
+    assert (tmp_path / "receipts" / "inner_summary.json").exists()
+    assert priced and all(n == 2 for n in priced)  # every simulate call prices both events
+
+    # Independent oracle: a ResidualPool built by hand from the history rows H0..H299 only (strictly earlier than S0 and S1).
+    hand_pool = pnl_sim.ResidualPool(pd.DataFrame(
+        {"event_date": dates[:300], "pred_abs_move": move[:300],
+         "err_move": (frame["abs_move"].to_numpy() - move)[:300],
+         "err_crush": (frame["crush_pct_iv30"].to_numpy() - crush)[:300]}))
+    forecast = dict(zip(ids[300:], move[300:302]))  # the unscaled M0 forecasts of S0 and S1 (k = 1.0)
+    pos = {str(e): i for i, e in enumerate(real_chunk["event_id"])}
+    compared = {"S0": 0, "S1": 0}
+    for events, name, alpha, result in scored_calls:
+        evs = {str(ev["event_id"]): ev for ev in events.to_dict("records")}
+        for row in result.to_dict("records"):
+            eid = str(row["event_id"])
+            if row["status"] != "scored" or eid not in forecast or eid not in evs:
+                continue
+            ev = evs[eid]
+            if not np.allclose(ev["pred_move"], forecast[eid]):  # a scaled (k != 1.0) call: not the M0 forecast
+                continue
+            priced_s, legs, _reason = sv.resolve_priced(real_chunk, pos[eid], name, ev["pred_move"], FillModel(float(row["alpha"])))
+            cost, _rel = sv.entry(priced_s)
+            exits = [{"strike": leg["strike"], "side": sv._CLOSE[leg["side"]], "qty": leg["qty"]} for leg in legs if leg["qty"] > 0]
+            want = pnl_sim.expected_pnl(exit_legs=exits, spot=float(real_chunk["spot_entry"][pos[eid]]), entry_cost=cost,
+                                        pre_iv30=ev["pre_iv30"], pred_abs_move=ev["pred_move"], pred_iv_crush=ev["pred_crush"],
+                                        dte_exit=ev["dte_exit"], event_date=ev["event_date"], pool=hand_pool, key=eid)
+            assert want is not None
+            assert row["exp_pnl_sim"] == pytest.approx(want["exp_pnl_sim"], rel=1e-9, abs=1e-9)
+            compared[eid] += 1
+    assert compared["S0"] > 0 and compared["S1"] > 0
+
+
+def test_a_scoped_outer_reads_every_label_unscoped(tmp_path, m0, taking, monkeypatch):
+    ids = ["E1", "E2", "E3", "E4"]
+    use_chunks(monkeypatch, [("2023Q3", chunk("E1")), ("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path, event_ids=ids, prereg=OK)
+    seen, real = [], readers.read_labels
+
+    def recording(fetch, admitted, **kw):
+        seen.append(kw["event_ids"])
+        return real(fetch, admitted, **kw)
+
+    monkeypatch.setattr(readers, "read_labels", recording)
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+    driver.run(sources(), "outer", tmp_path, event_ids=ids, prereg=OK)
+    assert seen and all(e is None for e in seen)  # the load's pre-2025 read and each 2025 month's read
+
+
+def test_a_scoped_outer_pool_holds_the_labels_of_months_with_no_scoped_event(tmp_path, m0, taking, monkeypatch):
+    """January 2025 (E3) has no scoped event, so its labels must still reach February's pools (primary and fallback pass) and be
+    read before February is frozen; the read covering January is the gap read, and no range is read twice."""
+    ids = ["E1", "E2", "E4"]
+    use_chunks(monkeypatch, [("2023Q3", chunk("E1")), ("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path, event_ids=ids, prereg=OK)
+    events, pools = [], []
+    real_read, real_freeze = readers.read_labels, driver.decisions.freeze_month
+
+    def recording(fetch, admitted, **kw):
+        events.append(("read", pd.Timestamp(kw["start"]), pd.Timestamp(kw["end"])))
+        return real_read(fetch, admitted, **kw)
+
+    def freezing(out_dir, period, frames):
+        events.append(("freeze", period))
+        return real_freeze(out_dir, period, frames)
+
+    monkeypatch.setattr(readers, "read_labels", recording)
+    monkeypatch.setattr(driver.decisions, "freeze_month", freezing)
+    monkeypatch.setattr(driver, "build_pool", lambda table, labels: pools.append((set(table.index.astype(str)), set(labels.index.astype(str)))))
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E4"))])
+    driver.run(sources(), "outer", tmp_path, event_ids=ids, prereg=OK)
+
+    feb, mar = pd.Timestamp("2025-02-01"), pd.Timestamp("2025-03-01")
+    with_e3 = [labels for table, labels in pools if "E3" in table]  # February's pools: rows before February, E3 among them
+    assert with_e3 and all("E3" in labels for labels in with_e3)
+    assert len(with_e3) >= 2  # the primary pass and the fallback pass both build February's pool
+    reads = [(i, e[1], e[2]) for i, e in enumerate(events) if e[0] == "read"]
+    ranges = [(start, end) for _, start, end in reads]
+    assert (pd.Timestamp("2025-01-01"), feb) in ranges  # the gap read of January's labels
+    feb_freeze = events.index(("freeze", pd.Period("2025-02", "M")))
+    for i, start, end in reads:
+        if start < mar and end > feb:  # a read covering February happens only after its freeze
+            assert i > feb_freeze
+    assert len(set(ranges)) == len(ranges)  # no range is read twice
+
+
+def test_require_priced_refuses_only_a_scoped_run_that_priced_nothing():
+    sweep = Sweep()
+    driver._require_priced(sweep, None, "inner")  # a full run never refuses, even at zero
+    with pytest.raises(Refusal) as caught:
+        driver._require_priced(sweep, {"E2"}, "inner")
+    assert caught.value.code == CONFLICT
+    assert caught.value.details == {"reason": "smoke_priced_nothing", "stage": "inner"}
+    sweep.priced = 1
+    driver._require_priced(sweep, {"E2"}, "inner")  # priced > 0: no refusal
+
+
+def test_a_scoped_inner_that_prices_nothing_refuses_before_its_summary(tmp_path, m0, pricing, monkeypatch):
+    monkeypatch.setattr(driver.PRICING, "simulate", lambda chunk_, events, pool, **kw: {})  # every event unsimulable
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(), "inner", tmp_path, event_ids=["E2"], prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "smoke_priced_nothing"
+    assert caught.value.details["stage"] == "inner"
+    assert not (tmp_path / "receipts" / "inner_summary.json").exists()
+
+
+def test_a_scoped_outer_that_prices_nothing_refuses_before_its_summary(tmp_path, m0, taking, monkeypatch):
+    out, ids = tmp_path / "out", ["E1", "E2", "E3", "E4"]
+    use_chunks(monkeypatch, [("2023Q3", chunk("E1")), ("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", out, event_ids=ids, prereg=OK)  # the inner run prices, so its summary exists
+    monkeypatch.setattr(driver.PRICING, "simulate", lambda chunk_, events, pool, **kw: {})
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(), "outer", out, event_ids=ids, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "smoke_priced_nothing"
+    assert caught.value.details["stage"] == "outer"
+    assert not (out / "receipts" / "outer_summary.json").exists()
 
 
 # ---- stats and declined share -----------------------------------------------------

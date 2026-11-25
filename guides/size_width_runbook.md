@@ -31,8 +31,11 @@ python3 experiments/EXP-189_short_vol_width_tuning/run.py --stage report --no-le
   --sources experiments.size_pnl_sources:build_sources --out-dir <smoke-dir>
 ```
 
-Under 300 inner events no error model is fitted (`c_status` is `smoke_no_fake`): tuning C is skipped and tuned arms
-A, B and D run with every unit `k_defaulted` (fewer than 300 trades); arm E also runs. The ids are receipted as `scope`, so a smoke
+The ids limit only the events priced. Pools, the error-model fit and the fake use the whole history, with a full run's
+exclusions (facts included); the fake draws price only the smoke months. `smoke_no_fake` appears only when
+that history has too few pairs. A stage that prices no event in any month refuses `smoke_priced_nothing`. Expect few
+or no trades: the trade bar needs 100 earlier scored rows per structure from the smoke's own sweep (`thin_history`), so
+tuned arms are `k_defaulted` (fewer than 300 trades). The ids are receipted as `scope`, so a smoke
 receipt cannot feed a full run (`inputs_receipt_changed` or `tuning_receipt_changed`). Record RSS and wall time from stderr before the full run.
 
 ## Full run

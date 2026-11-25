@@ -65,6 +65,7 @@ class Sweep:
         if not self.ks or len(set(self.ks)) != len(self.ks): raise ValueError(f"ks must be non-empty and unique: {self.ks}")
         if not self.names or len(set(self.names)) != len(self.names) or any(n not in sv.NAMES for n in self.names): raise ValueError(f"names must be non-empty, unique and in sv.NAMES: {self.names}")
         self.scored, self.taken, self.declined = {}, {}, {}
+        self.priced = 0  # events simulated and kept, summed over every month (the smoke scope's refusal reads it)
 
     def add_month(self, chunk, events, pool, *, output, sessions, draws=DRAWS, sims=None):
         """Simulate once, score every (structure, k) and E, decide on the accumulated history. ``output`` False (burn-in) only adds history.
@@ -76,6 +77,7 @@ class Sweep:
         sims = self.pricing.simulate(chunk, events, pool, draws=draws) if sims is None else sims
         keep = np.array([sims.get(str(e)) is not None for e in events["event_id"]], dtype=bool)  # unsimulable events are dropped, as EXP-188 does
         events = events[keep]
+        self.priced += len(events)
         ids = set(events["event_id"].astype(str))
         for name in self.names:
             for arm, frame in self._frames(chunk, events, sims, name):
