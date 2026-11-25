@@ -78,7 +78,8 @@ Both stages write `<out-dir>/e_choices/<period>.parquet` for every output month.
 - **Marks:** `entry_cost` is the entry mark (debit per share) of any candidate that priced. The rest is filled for
   taken rows only, and is null otherwise: `exit_value`, `exit_value_mid`, `pnl_dollars`, `pnl_dollars_mid`, `lots`,
   `debit_dollars` (`entry_cost` x 100 x `lots`), `secured_per_contract`, and for each alpha in {0.00, 0.25, 0.50, 0.75,
-  1.00} `entry_a*`, `exit_a*`, `pnl_a*` (dollars; entry repriced at that alpha, the breakeven ladder's marks).
+  1.00} `entry_a*` and `exit_a*` (per share) and `pnl_a*` (dollars), with entry repriced at that alpha (the breakeven
+  ladder's marks).
 - **Receipts:** `receipts/e_choices_inner.json` and `e_choices_outer.json` hold stage, `inputs_hash`, scope, and per
   month the file's sha256, rows and taken count. Files and receipts are immutable like `months/`: a rerun with other
   bytes refuses (`month_freeze_changed`; the receipt, `tuning_receipt_changed`). A stage that stops before its

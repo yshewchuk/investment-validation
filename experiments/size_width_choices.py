@@ -91,10 +91,10 @@ def write_month(out, period, frames):
         sha = decisions._file_sha256(tmp)
         try:
             os.link(tmp, final)          # create-only: never replaces an existing month
-            receipts._fsync_dir(directory)
         except FileExistsError:
             pass
         if decisions._file_sha256(final) != sha: raise Refusal(_CONFLICT, f"e_choices month {period} differs from this run's rows", {"reason": "month_freeze_changed"})
+        receipts._fsync_dir(directory)   # on the create and the replay path alike: a crash after the link may have left the entry unsynced
     finally:
         tmp.unlink(missing_ok=True)
     return {"period": str(period), "sha256": sha, "rows": len(frame), "taken": int((frame["status"] == "taken").sum())}
@@ -102,6 +102,9 @@ def write_month(out, period, frames):
 
 def write_receipt(out, stage, inputs_hash, scope, months):
     """The stage's receipt ``receipts/e_choices_<stage>.json`` binding its month files (``months`` from ``write_month``); logs one stderr line."""
+    if len({m["period"] for m in months}) != len(months):
+        repeated = sorted({m["period"] for m in months if sum(n["period"] == m["period"] for n in months) > 1})
+        raise ValueError(f"e_choices receipt {stage}: repeated period(s) {', '.join(map(str, repeated))}")
     rows, taken = sum(m["rows"] for m in months), sum(m["taken"] for m in months)
     body = {"stage": stage, "inputs_hash": inputs_hash, "scope": scope,
             "months": {m["period"]: {"sha256": m["sha256"], "rows": m["rows"], "taken": m["taken"]} for m in months},

@@ -121,14 +121,19 @@ def _frame(value=0.5):
     return choices.choice_rows(decided, None, marks, marks, secured, {})
 
 
-def test_write_month_keeps_the_file_for_the_same_rows_and_refuses_other_bytes(tmp_path):
+def test_write_month_keeps_the_file_for_the_same_rows_and_refuses_other_bytes(tmp_path, monkeypatch):
     out = tmp_path / "out"
     out.mkdir()
+    fsyncs = []
+    monkeypatch.setattr(choices.receipts, "_fsync_dir", fsyncs.append)
     first = choices.write_month(out, PERIOD, [_frame()])
     path = out / "e_choices" / f"{PERIOD}.parquet"
     before = path.read_bytes()
     assert first == {"period": PERIOD, "sha256": first["sha256"], "rows": 2, "taken": 1}
+    assert fsyncs == [out / "e_choices"]
+    fsyncs.clear()
     assert choices.write_month(out, PERIOD, [_frame()]) == first
+    assert fsyncs == [out / "e_choices"]  # the replay path syncs the directory too
     assert path.read_bytes() == before
     with pytest.raises(Refusal) as caught:
         choices.write_month(out, PERIOD, [_frame(value=0.9)])
@@ -156,6 +161,15 @@ def test_write_month_refuses_a_competitor_that_publishes_between_our_write_and_o
     assert caught.value.details["reason"] == "month_freeze_changed"
     assert path.read_bytes() == competitor
     assert [p.name for p in directory.iterdir()] == [path.name]  # our tmp file was removed
+
+
+def test_write_receipt_refuses_a_repeated_period_before_anything_is_written(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    entry = {"period": PERIOD, "sha256": "0" * 64, "rows": 2, "taken": 1}
+    with pytest.raises(ValueError, match=PERIOD):
+        choices.write_receipt(out, "inner", "H", None, [entry, dict(entry)])
+    assert not (out / "receipts" / "e_choices_inner.json").exists()
 
 
 def test_an_empty_month_writes_a_schemed_empty_file(tmp_path):
