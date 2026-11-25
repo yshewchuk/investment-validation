@@ -975,10 +975,13 @@ Library-only, no data-run authority. Inputs: a Tier-1 source root (read-only: ca
 EXP-188: `size_pnl_{inputs,outer_inputs}` bind v14 and 2025 forecasts; `size_pnl_readers` admits keys (`HOLDOUT_ACCESS_DENIED`, `label_availability_missing`); `size_pnl_receipts`: `SYNTHETIC_IN_TUNING`; `size_pnl_synthetic`: `SYNTHETIC_OUT_OF_SCOPE`. `size_pnl_sources.build_sources`: `sources_config_invalid`, `expected_invalid`, `input_unreadable`, `store_missing`, `catalog_unavailable`, `snapshot_{missing,mismatch,metadata_too_large}`, `crush_snapshot_invalid`, `plan_{hash_mismatch,schema_unknown,anchor_mismatch,registration_mismatch,id_mismatch,malformed,too_large,unreadable}`, `selection_missing`; `size_pnl_tables`: `source_{table_missing,value_invalid}`, `plan_frame_empty`, `production_hash_mismatch`. `size_pnl_driver.run`: bad plan, `facts_incomplete`: no receipt; replay: `*_receipt_changed`; outer: `inner_*_mismatch`, `scope_mismatch`, `outer_*`; smoke: `scope`.
 `run_synthetic` publishes decisions, then `t11_synthetic.md` atomically. `size_pnl_assemble.assemble` (`--stage report`) writes `REPORT.md` likewise; the report states independent books (not board P&L) and T5 retired, labels verdicts, and adds the `size_pnl_audit` table; refusals `report_{scope_unsupported,out_dir_invalid,receipt_stage,receipt_chain_mismatch,receipt_malformed,inputs_mismatch,tickers_invalid,ticker_missing,nonfinite_pnl}`, `report_decisions_{missing,mismatch,columns,empty,invalid}`, `tuning_receipt_{missing,unreadable}` (legacy names, any receipt). Amendment 2: `size_pnl_account` loads EXP-134 `margin.py`. `size_pnl_gprod` (G_PROD; `--sources-config` `gate_fold`/`gate_inputs`): `gate_{config_incomplete,binding_invalid}` and `gate_{fold,inputs}_{missing,invalid,sha_mismatch}` refuse `INVALID_EXPERIMENT_SPEC` before the catalog opens; `gate_input_missing`, `gate_input_nan`, `thin_pool` are undetermined, never no; G_PROD rows are the straddle book (E_str; T6, T7, T10).
 
-## Fill model F library
+## Fill model F
 
-No production caller ([design](../guides/fair_value_fill_design.md) §3-4, §10, §13).
+No production caller ([design §4](../guides/fair_value_fill_design.md)). `fair_value_pricer` prices; `fair_value_legs` clamps per quote ([README](README.md)).
 
-`fair_value_pricer` (NumPy only): unclamped, zero-dividend American put and European call. NaN (no value): invalid spot, strike or years; unexpired with invalid volatility or rate; put-tree probability outside (0,1). Expired: intrinsic. Only puts floor positive volatility (0.01).
-
-`fair_value_inputs`: `bind_quotes` (snapshot id), `load_tables` (hash-pinned tables, required unit scales, two rate-rule options), `attach_vol`, `lookup_rate`, `usable_quote`, `entry_coverage` (binds rows; pre-outcome; one stdout emit). Input-check failures refuse `EXPERIMENT_IDENTITY_CONFLICT` with `details.reason`; file/memory caps refuse `RESOURCE_LIMIT_EXCEEDED`; nothing partial returns. Unverified: quote-row origin, same-run tables.
+|Condition|Outcome|
+|-|-|
+|Invalid pricer input|NaN|
+|Missing column, duplicate quote/vol key, invalid `right`/`quote_repaired`|`FairValueRefusal` (`EXPERIMENT_IDENTITY_CONFLICT`), no partial output|
+|`fair_value_inputs` check fails|Same|
+|`fair_value_inputs` cap exceeded|`RESOURCE_LIMIT_EXCEEDED`|
