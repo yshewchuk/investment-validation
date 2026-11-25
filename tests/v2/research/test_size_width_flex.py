@@ -100,19 +100,54 @@ def test_recommending_arm_e_runs_only_production_and_adopts_nothing(stubs):
     assert stubs == [["production"]]
 
 
-def test_mismatched_inner_factors_refuse_before_any_month_is_consumed(stubs):
-    inner = _inner_stage(0.8)
-    inner["production"]["factors"] = _factors(0.9)
-    pulled = []
+def _admission():
+    """A valid (inner, bands, frozen, outer body) for one fixed-factor label, production: admit passes on it."""
+    bands = {n: {"primary": "B", "curves": {}} for n in NAMES}
+    accounts = {w: {"fallback": 0.5, "base": 0.4} for w in ("2023H2", "2024", "2025")}
+    sets = {"production": {"factors": _factors(), "choice": {"phi": 0.8, "flags": []},
+                           "phis": {str(p): {"t9": [], "alpha": {"fallback": 0.84, "base": 0.80}, "accounts": accounts} for p in PHIS}}}
+    t8 = {"quantiles": [], "buckets": [], "declines": [], "deviation_unavailable": 0}
+    return {"inner": {"bands": bands, "t8": dict(t8), "flex": _inner_stage(0.8)}, "bands": bands, "frozen": {"production": _factors()},
+            "outer": {"t8": dict(t8), "flex": {"recommendation": None, "factors_label": "production", "adoption": {"adopt": True}, "sets": sets}}}
 
-    def months():
-        pulled.append(1)  # runs only when the generator is advanced
-        yield from ()
 
+MUTATIONS = {
+    "bands differ": lambda s: s.update(bands={n: {"primary": "C", "curves": {}} for n in NAMES}),
+    "flex empty": lambda s: s["inner"].update(flex=[]),
+    "missing factors": lambda s: s["inner"]["flex"]["production"].pop("factors"),
+    "changed factor": lambda s: s["inner"]["flex"]["production"].update(factors=_factors(0.9)),
+    "missing phi cell": lambda s: s["inner"]["flex"]["production"]["phis"].pop("0.9"),
+    "missing inner account window": lambda s: s["inner"]["flex"]["production"]["phis"]["0.8"]["accounts"].pop("2024"),
+    "non-numeric account value": lambda s: s["inner"]["flex"]["production"]["phis"]["0.8"]["accounts"]["2024"].update(fallback="x"),
+    "missing t8": lambda s: s["inner"].pop("t8"),
+    "outer flex missing": lambda s: s["outer"].pop("flex"),
+    "outer set factors differ": lambda s: s["outer"]["flex"]["sets"]["production"].update(factors=_factors(0.9)),
+    "outer choice differs": lambda s: s["outer"]["flex"]["sets"]["production"].update(choice={"phi": 0.9, "flags": []}),
+    "outer missing the 2025 account": lambda s: s["outer"]["flex"]["sets"]["production"]["phis"]["0.8"]["accounts"].pop("2025"),
+}
+
+
+def test_mismatched_inner_factors_refuse_at_admission():
+    s = _admission()
+    s["inner"]["flex"]["production"]["factors"] = _factors(0.9)
     with pytest.raises(Refusal) as caught:
-        flex.outer({"production": _factors()}, inner, None, months(), 0, object(), None, "H", SESSIONS, None, _stats)
+        flex.admit(s["inner"], s["bands"], s["frozen"], s["outer"])
     assert caught.value.code == CONFLICT and caught.value.details["reason"] == "tuning_receipt_changed"
-    assert pulled == [] and stubs == []
+
+
+def test_a_valid_admission_passes():
+    s = _admission()
+    assert flex.admit(s["inner"], s["bands"], s["frozen"]) is None
+    assert flex.admit(s["inner"], s["bands"], s["frozen"], s["outer"]) is None
+
+
+@pytest.mark.parametrize("name", list(MUTATIONS))
+def test_admit_refuses_each_mutation_of_a_valid_admission(name):
+    s = _admission()
+    MUTATIONS[name](s)
+    with pytest.raises(Refusal) as caught:
+        flex.admit(s["inner"], s["bands"], s["frozen"], s["outer"])
+    assert caught.value.code == CONFLICT and caught.value.details["reason"] == "tuning_receipt_changed"
 
 
 def test_insufficient_recovery_adopts_nothing_with_that_reason(stubs):

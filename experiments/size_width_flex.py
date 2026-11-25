@@ -25,6 +25,49 @@ def target(rec):
     return "production" if rec is None else (rec if rec in LABELS else None)
 
 
+def _accounts_ok(accounts, windows):
+    return all(isinstance(accounts[w][k], (int, float)) and not isinstance(accounts[w][k], bool) for w in windows for k in ("fallback", "base"))
+
+
+def _t8_ok(t8):
+    return all(isinstance(t8[k], list) for k in ("quantiles", "buckets", "declines")) and "deviation_unavailable" in t8
+
+
+def _inner_ok(got, factors):
+    phis, choice = got["phis"], got["choice"]
+    return (got["factors"] == {n: float(factors[n]) for n in NAMES} and (choice["phi"] is None or choice["phi"] in PHIS)
+            and isinstance(choice["flags"], list)
+            and all(isinstance(phis[str(p)]["recovery"], dict) and isinstance(phis[str(p)]["t9"], list)
+                    and _accounts_ok(phis[str(p)]["accounts"], ("2023H2", "2024")) for p in PHIS))
+
+
+def _set_ok(got, inner_label):
+    return (got["factors"] == inner_label["factors"] and got["choice"] == inner_label["choice"]
+            and all(isinstance(got["phis"][str(p)]["t9"], list) and {"fallback", "base"} <= set(got["phis"][str(p)]["alpha"])
+                    and _accounts_ok(got["phis"][str(p)]["accounts"], ("2023H2", "2024", "2025")) for p in PHIS))
+
+
+def admit(inner_summary, bands, frozen, outer_body=None):
+    """Refuses unless the fallback summaries belong to the frozen receipts: the inner summary (and ``outer_body`` when given) holds
+    the tuning_band ``bands`` and the T8 tables, and its flex has each fixed-factor label of ``frozen`` with matching factors and
+    well-formed results; the outer body's sets match the inner labels."""
+    try:
+        flex_in = inner_summary["flex"]
+        labels = {l for l in frozen if l in LABELS}
+        ok = (inner_summary["bands"] == bands and _t8_ok(inner_summary["t8"]) and set(flex_in) == labels
+              and all(_inner_ok(flex_in[l], frozen[l]) for l in labels))
+        if outer_body is not None:
+            fx = outer_body["flex"]
+            ok = ok and (_t8_ok(outer_body["t8"]) and {"recommendation", "factors_label"} <= set(fx)
+                         and isinstance(fx["adoption"], dict) and "adopt" in fx["adoption"]
+                         and isinstance(fx["sets"], dict) and "production" in fx["sets"] and set(fx["sets"]) <= set(flex_in)
+                         and all(_set_ok(fx["sets"][l], flex_in[l]) for l in fx["sets"]))
+    except (KeyError, TypeError, AttributeError, ValueError):
+        ok = False
+    if not ok:
+        raise Refusal("EXPERIMENT_IDENTITY_CONFLICT", "fallback summaries do not match the frozen receipts", {"reason": "tuning_receipt_changed"})
+
+
 def _run(factor_sets, months, total, out, inputs_hash, sessions, pricing, ladder, tag):
     """{label: {phi: FallbackSweep}}; identical factor sets share their sweeps, and each month is simulated once for all of them."""
     built, keys = {}, {label: tuple(float(factors[n]) for n in NAMES) for label, factors in factor_sets.items()}
@@ -59,12 +102,9 @@ def inner(factor_sets, months, total, base, out, inputs_hash, sessions, pricing)
 
 
 def outer(frozen, flex_inner, rec, months, total, base, out, inputs_hash, sessions, pricing, stats):
-    """The 2025 stage on the recommended factors, with the inner phi; refuses before any month if the inner results do not match them."""
+    """The 2025 stage on the recommended factors, with the inner phi (flex_inner was admitted against the frozen factors by admit, before this)."""
     label_t = target(rec)
     labels = ["production"] + ([label_t] if label_t not in (None, "production") else [])
-    for label in labels:
-        if (got := flex_inner.get(label)) is None or got["factors"] != {n: float(frozen[label][n]) for n in NAMES}:
-            raise Refusal("EXPERIMENT_IDENTITY_CONFLICT", "inner fallback results do not match the frozen factors", {"reason": "tuning_receipt_changed"})
     window = WINDOWS["2025"]
     fbs = _run({label: frozen[label] for label in labels}, months, total, out, inputs_hash, sessions, pricing, True, "outer")
     sets = {}

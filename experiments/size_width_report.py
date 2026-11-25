@@ -229,6 +229,10 @@ def assemble(out_dir, *, expected=None, w5_tables=None):
     _check_args(out_dir, expected, w5_tables)
     out = Path(out_dir)
     inner, outer, bodies = _bound(out, expected)
+    has_flex = "flex" in inner or "flex" in outer
+    if has_flex:
+        flex.admit(inner, band.frozen_bands(out, inner["inputs_hash"]), {"production": {n: 1.0 for n in NAMES},
+                   **{arm: tuning.frozen(out, arm, inner["inputs_hash"]) for arm in outer["arms"]}}, outer)
     labels = [label for label in ("production", "A", "B", "C", "D", "E") if label == "production" or label in bodies]
     merged = {label: {**inner["results"][label], **outer["results"][label]} for label in labels}
     stats = {label: {**inner["stats"][label], **outer["stats"][label]} for label in labels}
@@ -247,12 +251,7 @@ def assemble(out_dir, *, expected=None, w5_tables=None):
     head = "\n\n".join([TITLE, NOT_BLIND, *([SMOKE] if inner["smoke"] else [])])
     flat_note = [_flat_note(bodies, rec)] if rec in TUNED else []
     rule_text = "\n\n".join([success.render_rule(rule), *flat_note, EVIDENCE])
-    if w5_tables is None and "flex" in inner and "flex" in outer:
-        if band.frozen_bands(out, inner["inputs_hash"]) != inner["bands"]:
-            raise _conflict("tuning_band differs from the inner summary's bands")
-        w5 = flex.render(inner, outer)
-    else:
-        w5 = PLACEHOLDER if w5_tables is None else w5_tables
+    w5 = w5_tables if w5_tables is not None else flex.render(inner, outer) if has_flex else PLACEHOLDER
     sections = [head, _t1(inner), *_t2({arm: bodies[arm] for arm in TUNED if arm in bodies}, body_E), t3,
                 fake.t4_markdown({n: {float(k): cell for k, cell in row.items()} for n, row in inner["anchor"].items()}).rstrip(),
                 _t5(labels, merged, stats), _t6(labels, merged), success.render_t7(table), rule_text, w5]

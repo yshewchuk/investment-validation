@@ -181,11 +181,11 @@ def _preflight(out, loaded):
     """The outer preflight: the inner summary (with its fallback stage), every arm's frozen factors and the tuning_band receipt."""
     ids, inputs_hash = loaded["ids"], loaded["inputs_hash"]
     inner = receipts.load_receipt(out / "receipts" / "inner_summary.json")
-    if inner["inputs_hash"] != inputs_hash or inner["scope"] != base._scope(ids) or "flex" not in inner:
-        raise Refusal(_CONFLICT, "inner_summary.json is bound to other inputs or scope, or has no fallback stage", {"reason": "tuning_receipt_changed"})
+    if inner["inputs_hash"] != inputs_hash or inner["scope"] != base._scope(ids):
+        raise Refusal(_CONFLICT, "inner_summary.json is bound to other inputs or another scope", {"reason": "tuning_receipt_changed"})
     arms = [a for a in ("A", "B", "C", "D", "E") if a != "C" or inner["c_status"] == "ok"]
     by = {arm: tuning.frozen(out, arm, inputs_hash) for arm in arms}
-    band.frozen_bands(out, inputs_hash)
+    flex.admit(inner, band.frozen_bands(out, inputs_hash), {"production": {n: 1.0 for n in NAMES}, **by})
     return arms, by, inner
 
 

@@ -143,19 +143,21 @@ def _bands():
 
 
 def _flex_stub():
-    """The inner fallback stage of a run with no recovery: production only, phi not chosen (insufficient_recovery)."""
+    """The inner fallback stage of a run with no recovery: the fixed-factor labels of the tuning receipts _tuning_receipts writes
+    (production, A, B, D), phi not chosen (insufficient_recovery)."""
     acc = {w: {"fallback": 0.0, "base": 0.0} for w in ("2023H2", "2024")}
     cell = {"recovery": {"recovered": 0, "recovered_ret": None, "taken_ret": None}, "accounts": acc, "t9": []}
-    return {"production": {"factors": {n: 1.0 for n in NAMES}, "choice": {"phi": None, "flags": ["insufficient_recovery"]},
-                           "phis": {p: cell for p in ("0.8", "0.9", "0.95")}}}
+    one = {"factors": {n: 1.0 for n in NAMES}, "choice": {"phi": None, "flags": ["insufficient_recovery"]},
+           "phis": {p: cell for p in ("0.8", "0.9", "0.95")}}
+    return {label: one for label in ("production", "A", "B", "D")}
 
 
-def _inner_summary(out, inputs_hash="H", c_status="smoke_no_fake"):
+def _inner_summary(out, inputs_hash="H", c_status="smoke_no_fake", bands=None):
     empty = {"2023H2": {}, "2024": {}}
     receipts.write_receipt(out / "receipts" / "inner_summary.json", {
         "stage": "inner", "inputs_hash": inputs_hash, "scope": None, "smoke": False, "c_status": c_status, "model": None,
         "calibration": None, "anchor": {}, "results": {label: dict(empty) for label in ("production", "A", "B", "D", "E")},
-        "stats": {}, "declined": {}, "bands": _bands(),
+        "stats": {}, "declined": {}, "bands": _bands() if bands is None else bands,
         "t8": {"quantiles": [], "buckets": [], "declines": [], "deviation_unavailable": 0}, "flex": _flex_stub()})
 
 
@@ -299,6 +301,18 @@ def test_outer_with_a_missing_tuning_receipt_refuses_before_any_month(tmp_path, 
         driver._outer(src, out, _loaded(src))
     assert caught.value.code == CONFLICT
     assert caught.value.details["reason"] == "tuning_receipt_missing"
+    assert not (out / "months").exists()
+
+
+def test_outer_with_inner_bands_differing_from_the_tuning_band_refuses_before_any_month(tmp_path, m0):
+    src, out = sources(), tmp_path / "out"
+    _inner_summary(out, bands={**_bands(), NAME: {"primary": "B", "curves": {}}})
+    _tuning_receipts(out)
+    _band_receipt(out)
+    with pytest.raises(Refusal) as caught:
+        driver._outer(src, out, _loaded(src))
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "tuning_receipt_changed"
     assert not (out / "months").exists()
 
 
