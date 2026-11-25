@@ -27,7 +27,7 @@ Reading: each strategy wants a different point of the move distribution.
 | `DISTRIBUTION_PREDICTION`, `STR_THRU_DISTRIBUTION` | Histogram classifier; never run on real data | Quantile loss, not bins; no reuse planned |
 | `SUPER_SIZE/STAGE2_DESIGN.md` section 3 | HGB q = 0.1/0.5/0.9, no crossing repair; never run | 7 levels, fixed non-crossing rule, inner-trained calibration |
 
-New: the output is **monotone**, it is judged on **conditional** sharpness (information beyond forecast level), and it connects to strikes, the entry simulation and two filters.
+New: **monotone** output, judged on **conditional** sharpness (information beyond forecast level), connected to trading decisions.
 
 ## 3. Constraints
 
@@ -83,7 +83,7 @@ New: the output is **monotone**, it is judged on **conditional** sharpness (info
 2. **Conditional sharpness:** in each period the within-cell Spearman is positive and the wide tercile's mean `e` exceeds the narrow tercile's; the pooled ticker interval for the Spearman excludes 0.
 3. **Calibration guard:** for each of the two bands, `|coverage - nominal|` is no worse than B0's in at least 5 of 10 quarters.
 
-No magnitude cutoff. The quarter counts are my judgement calls; raw counts are printed. B1, B2, `Q_raw` and S are reported with the same tables; a pooled pinball loss to B1 or B2 is flagged in the headline, not gated. **Fail:** Stage B is not run. A pass for S or `Q_raw` alone is a lead for a new pre-registration.
+No magnitude cutoff; the quarter counts are judgement calls. B1, B2, `Q_raw` and S are reported with the same tables; a pooled pinball loss to B1 or B2 is flagged in the headline, not gated. **Fail:** Stage B is not run. A pass for S or `Q_raw` alone is a lead for a new pre-registration.
 
 ## 6. Stage B: trading (only if A passes)
 
@@ -105,7 +105,7 @@ EXP-188's production-exact machinery as a library (entry rule, per-structure tra
 
 **tau** [D14]: **fixed, not tuned**: 0.40 for the five centre-peaked structures, 0.50 for the TWIN pair, the families of EXP-189 arm D. The 0.40 comes from the post-hoc E-log observation. P&L at {0.25, 0.40, 0.50, 0.60} is printed descriptively and selects nothing. `WIDTH_MIN`/`WIDTH_MAX` declines apply as in production, counted.
 
-**Why LW is needed.** A low quantile mostly narrows every strike, which is the level effect EXP-189 already tunes with a global multiple. LW has W's typical level without its per-event variation; **W counts only if it also beats LW.**
+**Why LW is needed.** A low quantile mostly narrows every strike, a level effect EXP-189 already tunes. LW keeps W's typical level without its per-event variation; **W counts only if it beats LW.**
 
 **Filter and straddle.** F's direction (narrow band kept: twins want an accurate median) is fixed now; the other half is printed. F's and ST's cutoffs use the `trailing_cutoff` window rule: 6 months strictly before the month, at least 100 scores. F is **not** a test of the M0 / E-log gap finding; band width is a different quantity. ST uses EXP-188 Amendment 5's universe, with ST0's rule differing only in the distribution; `G_PROD` is printed labelled "not production-faithful".
 
@@ -135,7 +135,7 @@ The margin and guards are judgement calls. Eight candidates, no multiplicity cor
 | R3, R4 | fixed seeds; the trading draw key is `event_id`, shared across arms; receipts atomic, immutable, bound to inputs; a changed input refuses |
 | R6 causality | fits, selection, calibration, tail and cutoff pools use data available before the fold or month; a month's predictions and decisions are written before its labels are read |
 
-Long loops log stage start and end, done/total, rate, ETA and RSS to stderr at a bounded cadence.
+Progress logging follows AGENTS.md.
 
 ## 8. Limits
 
