@@ -6,6 +6,7 @@ from pathlib import Path
 from engine.v2.foundation import content_hash
 from experiments import size_pnl_receipts as receipts
 from experiments import size_width_band as band
+from experiments import size_width_choices as choices
 from experiments import size_width_errmodel as errmodel
 from experiments import size_width_fake as fake
 from experiments import size_width_flex as flex
@@ -212,6 +213,19 @@ def _bound(out, expected):
     return inner, outer, bodies
 
 
+def _choices(out, inner):
+    """(inner, outer) arm E choice receipts, None where absent; a present one must be its stage, bound to the summaries' inputs and scope."""
+    found = []
+    for stage in ("inner", "outer"):
+        path = out / "receipts" / f"e_choices_{stage}.json"
+        receipt = receipts.load_receipt(path) if path.exists() else None
+        if receipt is not None and (receipt.get("stage") != stage or receipt.get("inputs_hash") != inner["inputs_hash"]
+                                    or receipt.get("scope") != inner["scope"]):
+            raise _conflict(f"e_choices_{stage} receipt differs")
+        found.append(receipt)
+    return found
+
+
 def _check_args(out_dir, expected, w5_tables):
     """Refuses a malformed argument before anything is read: out_dir a path, expected None or a dict of str identity keys, w5_tables None or a str."""
     def bad(what):
@@ -229,6 +243,7 @@ def assemble(out_dir, *, expected=None, w5_tables=None):
     _check_args(out_dir, expected, w5_tables)
     out = Path(out_dir)
     inner, outer, bodies = _bound(out, expected)
+    echoes = _choices(out, inner)
     has_flex = "flex" in inner or "flex" in outer
     if has_flex:
         flex.admit(inner, band.frozen_bands(out, inner["inputs_hash"]), {"production": {n: 1.0 for n in NAMES},
@@ -254,7 +269,8 @@ def assemble(out_dir, *, expected=None, w5_tables=None):
     w5 = w5_tables if w5_tables is not None else flex.render(inner, outer) if has_flex else PLACEHOLDER
     sections = [head, _t1(inner), *_t2({arm: bodies[arm] for arm in TUNED if arm in bodies}, body_E), t3,
                 fake.t4_markdown({n: {float(k): cell for k, cell in row.items()} for n, row in inner["anchor"].items()}).rstrip(),
-                _t5(labels, merged, stats), _t6(labels, merged), success.render_t7(table), rule_text, w5]
+                _t5(labels, merged, stats), *([choices.report_line(*echoes)] if any(e is not None for e in echoes) else []),
+                _t6(labels, merged), success.render_t7(table), rule_text, w5]
     report = out / "REPORT.md"
     report.write_text("\n\n".join(s.rstrip() for s in sections) + "\n", encoding="utf-8")
     (out / "proposed_rule.json").write_text(json.dumps(rule, indent=2, sort_keys=True), encoding="utf-8")
