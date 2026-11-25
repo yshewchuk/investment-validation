@@ -77,8 +77,11 @@ def _require(frame, columns):
 
 
 def _norm(frame, columns):
-    """Str tickers, datetime64[ns] dates and float numbers, with a fresh RangeIndex. Refuses absent columns and unparseable dates."""
+    """Str tickers, datetime64[ns] dates and float numbers, with a fresh RangeIndex. Refuses absent columns, and null or unconvertible keys before any conversion."""
     _require(frame, columns)
+    bad = _bad_key_columns(frame, [c for c in columns if c in QUOTE_KEYS])
+    if bad:
+        raise FairValueRefusal("key_value", "key column is null or does not convert", columns=bad)
     out = {}
     for col in columns:
         raw = pd.Series(frame[col].to_numpy())
@@ -153,10 +156,12 @@ def _admit(blob, kind, rel, total, budget):
 
 
 def _parse(blob, kind, rel):
-    """Decode the needed columns in the single pd.read_parquet call; read or normalisation failure is table_unreadable."""
+    """Decode the needed columns in the single pd.read_parquet call; read failure is table_unreadable, refusals pass through."""
     needed = NEEDED_COLUMNS[kind]
     try:
         return _norm(pd.read_parquet(io.BytesIO(blob), columns=needed), needed)
+    except FairValueRefusal:
+        raise
     except (ValueError, KeyError, OSError, pa.ArrowException) as err:
         raise FairValueRefusal("table_unreadable", "table is not readable parquet", path=rel) from err
 
@@ -164,10 +169,10 @@ def _parse(blob, kind, rel):
 _KEY_CONVERTERS = {"strike": pd.to_numeric, "obs_date": pd.to_datetime, "expiry": pd.to_datetime}
 
 
-def _bad_key_columns(frame):
-    """Quote key columns holding a null, or a strike or date that does not convert (coerced to NaN/NaT)."""
+def _bad_key_columns(frame, columns):
+    """Of the given key columns, those holding a null, or a strike or date that does not convert (coerced to NaN/NaT)."""
     bad = []
-    for col in QUOTE_KEYS:
+    for col in columns:
         raw = frame[col]
         if raw.isna().any():
             bad.append(col)
@@ -188,9 +193,9 @@ def bind_quotes(frame, *, snapshot_id, expected_snapshot_id):
     missing = [c for c in QUOTE_COLUMNS if c not in frame.columns]
     if missing:
         raise FairValueRefusal("required_column", "quote columns are absent", columns=missing)
-    bad = _bad_key_columns(frame)
+    bad = _bad_key_columns(frame, QUOTE_KEYS)
     if bad:
-        raise FairValueRefusal("key_value", "quote key column is null or does not convert", columns=bad)
+        raise FairValueRefusal("key_value", "key column is null or does not convert", columns=bad)
     if frame.duplicated(QUOTE_KEYS).any():
         raise FairValueRefusal("duplicate_key", "duplicate quote key", table="option_chains")
     return frame[QUOTE_COLUMNS].copy()
@@ -271,25 +276,20 @@ def load_tables(root, *, manifest_sha256, file_sha256, vol_scale, rate_scale,
 
 
 def attach_vol(quotes, vols):
-    """smvVol per quote row by VOL_KEYS (both rights share it); NaN when unmatched or a key is null."""
+    """smvVol per quote row by VOL_KEYS (both rights share it); NaN when unmatched. Null or unconvertible keys are refused."""
     left = _norm(quotes, VOL_KEYS)
     merged = left.merge(vols[VOL_KEYS + ["smvVol"]], on=VOL_KEYS, how="left", validate="many_to_one")
-    values = merged["smvVol"].to_numpy(dtype=float, copy=True)
-    values[left.isna().any(axis=1).to_numpy()] = np.nan
-    return pd.Series(values, index=quotes.index, name="smvVol")
+    return pd.Series(merged["smvVol"].to_numpy(dtype=float, copy=True), index=quotes.index, name="smvVol")
 
 
 def lookup_rate(rows, rates):
     """Rate per row: the ticker's row at obs_date, else its latest earlier one within 7 days; then a blend."""
-    _require(rows, ["ticker", "obs_date", "expiry"])
-    valid = (rows["ticker"].notna() & rows["obs_date"].notna()).to_numpy()
-    keep = (rates["ticker"].notna() & rates["obs_date"].notna()).to_numpy()
+    left = _norm(rows, ["ticker", "obs_date", "expiry"])
+    right = _norm(rates, RATE_KEYS + RATE_COLUMNS)
     out = np.full(len(rows), np.nan)
-    left = _norm(rows[valid], ["ticker", "obs_date", "expiry"])
-    right = _norm(rates[keep], RATE_KEYS + RATE_COLUMNS)
     if left.empty or right.empty:
         return pd.Series(out, index=rows.index, name="rate")
-    left["_pos"] = np.flatnonzero(valid)
+    left["_pos"] = np.arange(len(left))
     m = pd.merge_asof(left.sort_values("obs_date", kind="mergesort"), right.sort_values("obs_date", kind="mergesort"),
                       on="obs_date", by="ticker", direction="backward", tolerance=pd.Timedelta(days=RATE_LOOKBACK_DAYS))
     days = np.maximum((m["expiry"] - m["obs_date"]).dt.days.to_numpy(dtype=float), 0.0)

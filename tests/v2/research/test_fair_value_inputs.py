@@ -238,6 +238,27 @@ def test_missing_required_column_refused(tmp_path):
     assert "smvVol" in exc.value.details["columns"]
 
 
+KEY_CASES = [
+    (QUOTE_REL, {"ticker": [None, "AAA", "AAA", "AAA"]}, "ticker"),
+    (RATE_REL, {"ticker": [None, "BBB"]}, "ticker"),
+    (RATE_REL, {"obs_date": pd.to_datetime([None, "2024-01-02"])}, "obs_date"),
+    (QUOTE_REL, {"strike": [None, 110.0, 90.0, 95.0]}, "strike"),
+    (QUOTE_REL, {"expiry": ["not a date"] + ["2024-02-16"] * 3}, "expiry"),
+]
+
+
+@pytest.mark.parametrize("rel,override,column", KEY_CASES,
+                         ids=["quote-null-ticker", "rate-null-ticker", "rate-null-obs-date",
+                              "quote-null-strike", "quote-unparseable-expiry"])
+def test_table_null_or_unconvertible_key_refused(tmp_path, rel, override, column):
+    base = QUOTES if rel == QUOTE_REL else RATES
+    root, file_sha, manifest_sha = _setup(tmp_path, files={rel: base.assign(**override)})
+    with pytest.raises(FairValueRefusal) as exc:
+        _load(root, file_sha, manifest_sha)
+    _refused(exc, "key_value")
+    assert exc.value.details["columns"] == [column]
+
+
 def test_non_parquet_bytes_with_matching_hash_unreadable(tmp_path):
     root, file_sha, manifest_sha = _setup(tmp_path, files={QUOTE_REL: b"not parquet at all"})
     with pytest.raises(FairValueRefusal) as exc:
@@ -515,7 +536,54 @@ def test_attach_vol_unparseable_date_refused(column):
     with pytest.raises(FairValueRefusal) as exc:
         fvi.attach_vol(quotes, _coverage_tables().vols)
     _refused(exc, "key_value")
-    assert exc.value.details["column"] == column
+    assert exc.value.details["columns"] == [column]
+
+
+@pytest.mark.parametrize("column", fvi.VOL_KEYS)
+def test_attach_vol_null_key_refused(column):
+    quotes = pd.DataFrame({"ticker": ["AAA"], "obs_date": ["2024-01-02"], "expiry": ["2024-02-16"],
+                           "strike": [100.0]})
+    quotes[column] = [None]
+    with pytest.raises(FairValueRefusal) as exc:
+        fvi.attach_vol(quotes, _coverage_tables().vols)
+    _refused(exc, "key_value")
+    assert exc.value.details["columns"] == [column]
+
+
+def test_attach_vol_empty_frame_still_works():
+    got = fvi.attach_vol(_chain().iloc[:0], _coverage_tables().vols)
+    assert got.empty and got.name == "smvVol"
+
+
+@pytest.mark.parametrize("column", ["ticker", "obs_date", "expiry"])
+def test_lookup_rate_null_key_refused(lookup_tables, column):
+    rows = _query("AAA", "2024-01-10", 0)
+    rows[column] = None
+    with pytest.raises(FairValueRefusal) as exc:
+        fvi.lookup_rate(rows, lookup_tables)
+    _refused(exc, "key_value")
+    assert exc.value.details["columns"] == [column]
+
+
+def test_lookup_rate_null_ticker_in_rates_refused():
+    rates = _coverage_tables().rates.assign(ticker=[None])
+    with pytest.raises(FairValueRefusal) as exc:
+        fvi.lookup_rate(_query("AAA", "2024-01-10", 0), rates)
+    _refused(exc, "key_value")
+    assert exc.value.details["columns"] == ["ticker"]
+
+
+def test_lookup_rate_missing_rate_column_refused():
+    rates = _coverage_tables().rates.drop(columns=["iRateLt"])
+    with pytest.raises(FairValueRefusal) as exc:
+        fvi.lookup_rate(_query("AAA", "2024-01-10", 0), rates)
+    _refused(exc, "required_column")
+    assert exc.value.details["columns"] == ["iRateLt"]
+
+
+def test_lookup_rate_empty_frame_still_works(lookup_tables):
+    got = fvi.lookup_rate(_query("AAA", "2024-01-10", 0).iloc[:0], lookup_tables)
+    assert got.empty and got.name == "rate"
 
 
 @pytest.mark.parametrize("column", ["ticker", "obs_date", "expiry"])
@@ -534,7 +602,7 @@ def test_lookup_rate_unparseable_date_refused(lookup_tables, column):
     with pytest.raises(FairValueRefusal) as exc:
         fvi.lookup_rate(rows, lookup_tables)
     _refused(exc, "key_value")
-    assert exc.value.details["column"] == column
+    assert exc.value.details["columns"] == [column]
 
 
 def test_usable_quote_rejects_zero_bid_and_ask():
