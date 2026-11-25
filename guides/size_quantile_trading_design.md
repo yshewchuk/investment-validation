@@ -111,7 +111,7 @@ The margin and guards are judgement calls. A pass is a **proposal**; a board cha
 | M3 identity, feature set, grid values | v14 used 2023-2024 | same | chosen on 2023-2024 |
 | F's constants | fixed here | same | same |
 
-For W and WD the 2023H2 condition is in-sample, so it adds little evidence (it can only remove a pass). **2025 is the clean test** for every selection. It is not blind for design: EXP-188 and EXP-189 results from 2025, including E's recommendation, were seen. Independent confirmation is only the forward period.
+For W and WD the 2023H2 condition is in-sample, so it adds little evidence (it can only remove a pass). **2025 is the clean test** for every parameter selection: none is chosen on it. It is **not a clean holdout**: the Stage A gate that lets Stage B run reads 2025 (part 1 §5). Nor is it blind for design: EXP-188 and EXP-189 results from 2025, including E's recommendation, were seen. Independent confirmation is only the forward period.
 
 **Multiplicity.** Per `x`: W, D, WD and N1 for two families (8), F-twin and ST, so **10; 20 candidates** over Q and Q_raw, against 8 in #2869, on top of Stage A's two tries. No correction. Chance passes are likely (the candidates are correlated, so no rate is claimed); the report lists every candidate, passed or not, and names no best one.
 
@@ -140,7 +140,7 @@ Pricing every candidate with a tree is the new cost; the smoke measures it befor
 - F is a model of fills, not a measurement; until real fills calibrate it, its constants are assumptions.
 - Coverage of `smvVol`, dividends and liquidity is unverified; a source mix that changes by year is a confound the by-year diagnostics expose but do not remove.
 - N1 trains on strongly heavy-tailed returns, correlated within event and season.
-- Seven correlated structures and one clean year are weak evidence.
+- Seven correlated structures and one year free of parameter selection are weak evidence.
 
 ## 8. Split list (code slices, only after a Stage A pass)
 
