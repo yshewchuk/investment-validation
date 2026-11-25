@@ -247,7 +247,7 @@ def test_check_id_free_refuses_malformed_sibling_that_mentions_exp_190(tmp_path)
 def test_real_spec_has_the_design_levels_grid_and_pending_stage_b():
     spec, digest = load_spec()
     assert spec["id"] == "EXP-190"
-    assert digest == lib.spec_hash(lib.load_spec(REAL_SPEC))
+    assert digest == _digest(REAL_SPEC)
     assert spec["levels"] == [0.1, 0.25, 0.4, 0.5, 0.6, 0.75, 0.9]
     assert spec["grid"]["axes"] == {"max_leaf_nodes": [7, 15], "min_samples_leaf": [300, 1000]}
     assert spec["grid"]["fixed"] == {
