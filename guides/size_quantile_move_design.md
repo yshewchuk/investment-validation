@@ -34,7 +34,7 @@ Two sealed closures must hash unchanged (Q1 tests both against its merge base):
 - **A, v14 panel:** `source_closure(root, ["experiments/size_panel.py"])`.
 - **B, v14 search:** `source_closure(root, ["experiments/size_search.py", "experiments/magnitude_search_worker.py"])` plus the `engine/models/registry.json` hash, as `experiments/size_search_binding._source_files()` builds it.
 
-Neither imports a new module; `engine/fills.py` and `engine/structures.py` do not change; no EXP-188 or EXP-189 file or spec changes. New code lives in `experiments/size_quantile_*` and one `EXP-190_*` directory. Nothing enters `STRUCTURES`, the registry or the board. No holdout reads: shared population admission first, labels by admitted event key only. `--no-ledger` for non-recorded runs. One heavy job at a time, under `bounded_run`.
+Neither imports a new module; `engine/fills.py` and `engine/structures.py` do not change; no EXP-188 or EXP-189 file or spec changes. New code lives in `experiments/size_quantile_*` and one `EXP-190_*` directory (the shared fill module is `experiments/fair_value_*`). Nothing enters `STRUCTURES`, the registry or the board. No holdout reads: shared population admission first, labels by admitted event key only. `--no-ledger` for non-recorded runs. One heavy job at a time, under `bounded_run`.
 
 ## 4. Target, model, calibration
 
@@ -101,7 +101,7 @@ No magnitude cutoff; quarter counts are mine. B1-B3 and S get the same tables; a
 
 ## 6. Stage B (part 2)
 
-Part 2 specifies fill model **F**, controls (production P0, EXP-189 arm E), quantile-driven arms, selection models and their control, accounts and success rule. Section 10 records its settled decisions.
+Fill model **F** is shared with EXP-189, so it is specified first and on its own: `guides/fair_value_fill_design.md`. Part 2 specifies how Stage B uses it, with controls (production P0, EXP-189 arm E), quantile-driven arms (including EQ, section 10), selection models and their control, accounts and success rule. Section 10 records its settled decisions.
 
 ## 7. Failure semantics (R1-R6)
 
@@ -149,7 +149,14 @@ One `spec.yaml` holds every fixed rule of **both parts**. Its PLANNED row, carry
 | N2 | Its control: the same model **without** quantile features. The gap is the value of the distribution |
 | N3 | Trade-everything pricing: exits priced for every candidate, to train N1/N2 and to report "trade every event" P&L per arm |
 | N4 | Quantile walk-forward reaches back to the earliest year with stored option chains, made precise by section 4's Y0 rule (coverage and training-history floors) |
-| F | **Fair-value marks and spread-aware fills**, default for Stage B scoring, selection and the N1/N2 target; mid and harsh still reported. Per leg: Black-Scholes (American adjustment, dividends, rates) at ORATS `smvVol` (not stored in `option_chains`; part 2 must extract it from cached raw payloads), clamped to [bid, ask]; fill = fair value plus a concession rising with relative spread (and thin size or open interest where available); structure guard on fill-over-fair and on summed spreads over net debit. Form and constants pre-registered, not tuned; calibration from the user's real fills, if provided, stated. Experiment-side only. Missing `smvVol`: a per-expiry smooth smile. Motivation: EXP-105 diagnostics; EXP-133's no-arbitrage caveat |
+| F | **Fair-value marks and spread-aware fills**, default for Stage B scoring, selection and the N1/N2 target; mid and harsh still reported. Per leg: Black-Scholes (American adjustment, rates, dividends or a documented approximation) at ORATS `smvVol` (not stored in `option_chains`; re-ingested from cached raw payloads), clamped to [bid, ask]; fill = fair value plus a concession rising with relative spread (and thin size or open interest where available); structure guard on fill-over-fair and on summed spreads over net debit. Form and constants pre-registered, not tuned; calibration from the user's real fills, if provided, stated. Experiment-side only. Missing `smvVol`: a per-expiry smooth smile. Motivation: EXP-105 diagnostics; EXP-133's no-arbitrage caveat |
+| EQ | New Stage B arm: arm E simulated from the quantile distribution (below) |
+
+**Arm EQ** (settled by the user, 2026-11-25). Per event and structure, take the `k` in arm E's grid {0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0} maximising expected P&L (`exp_pnl_sim`), with moves from the event's own calibrated quantile distribution (section 4's seven levels and tails; for Q_raw, its uncalibrated one), **not** M0 plus `ResidualPool`. Under D12 the pool's paired draws supply only move ranks and crush errors (my reading). F prices selection and scoring, for E and EQ alike. All else is arm E's, from EXP-189's design and amendments at a version Stage B's spec pins: buildability fallback, top-20% trailing selection (on EQ's own earlier scores), funding and accounts.
+
+**EQ minus E**, on events both determine (drops counted), is the distribution's value for width choice, level and shape together. If both Q and Q_raw pass Stage A, EQ runs for each, both counted in the uncorrected multiplicity; if one passes, only for it (my reading). The Stage A gate is unchanged. Report per year and structure at F, mid and harsh, like other arms.
+
+**Clean years.** 2024 is **not** clean (features and grid used 2023-2024). 2025 is clean for EQ's width, selection and model parameters (`k` uses no realised outcome), but is **not a holdout**: the Stage A gate reads it, and E was recommended having seen it.
 
 ## 11. Split list (code slices for part 1; none starts until this design merges)
 

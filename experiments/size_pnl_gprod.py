@@ -13,7 +13,8 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from engine.v2.ops.errors import fail
-from experiments import label_availability, size_pnl_gate_fold as fold, size_pnl_pool as pool, size_pnl_straddle as straddle
+from experiments import label_availability, size_pnl_gate_fold as fold, size_pnl_pool as pool
+from experiments.size_pnl_pricing import STRADDLE as straddle
 
 RULE = straddle.GATE_RULE
 MODEL_COLS = ("pred_abs_move", "pred_abs_move_p10", "pred_abs_move_p90", "pred_abs_move_sd", "forecast_edge")

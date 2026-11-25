@@ -8,7 +8,7 @@ Pure functions: no I/O, no ledger.
 import math
 
 from engine.fills import FillModel
-from experiments import size_pnl_shortvol as shortvol
+from experiments.size_pnl_pricing import SHORTVOL as shortvol
 from experiments.size_pnl_pool import check_equivalence
 
 SAMPLE = 8
