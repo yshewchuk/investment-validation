@@ -360,6 +360,25 @@ def test_decide_records_mcap_usd_on_every_refusal_branch():
     assert out.loc["ghost", "reason"] == "no_ladder_chunk" and out.loc["ghost", "mcap_usd"] == 11e9
 
 
+def test_decide_records_mcap_usd_on_every_no_pair_and_gate_outcome():
+    # The outcomes the test above does not reach: a calls-only record (no_atm_pair), and the gate's own verdicts, each with its own cap.
+    verdicts = {"nt": ("not_taken", "below_gate_threshold"), "gi": ("undetermined", "gate_input_nan")}
+
+    def gate(event):
+        return verdicts[event["event_id"]]
+
+    chunk = lad._pack([rec("na", 100.0, [(1, 100, 2.0, 2.2, 1.0, 1.4, 1)]),  # call at the ATM strike, no put
+                       rec("nt", 100.0, pair(100)), rec("gi", 100.0, pair(100))], {})
+    events = pd.DataFrame([ev("na", 1.0, mcap=2.75e9), ev("nt", 1.0, mcap=6.5e9), ev("gi", 1.0, mcap=3.25e9)])
+    out = sd.decide(events, chunk, gate).set_index("event_id")
+    assert out.loc["na", "status"] == "undetermined" and out.loc["na", "reason"] == "no_atm_pair"
+    assert out.loc["na", "mcap_usd"] == 2.75e9
+    assert out.loc["nt", "status"] == "not_taken" and out.loc["nt", "reason"] == "below_gate_threshold"
+    assert out.loc["nt", "mcap_usd"] == 6.5e9
+    assert out.loc["gi", "status"] == "undetermined" and out.loc["gi", "reason"] == "gate_input_nan"
+    assert out.loc["gi", "mcap_usd"] == 3.25e9
+
+
 def test_five_billion_name_is_in_the_universe():
     # Under the old $10B short-vol floor this name was filtered; production's STR-THRU universe takes it.
     out = sd.decide(pd.DataFrame([ev("five", 1.0, mcap=5e9)]), good("five"), GATE)

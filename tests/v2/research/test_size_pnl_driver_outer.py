@@ -989,6 +989,57 @@ def test_outer_rows_carry_literal_marks_and_forecasts(tmp_path, outer_stubs, mon
         assert (rows["pred_crush"].to_numpy(dtype=float) == crush).all()
 
 
+def test_straddle_rows_publish_each_decisions_own_cap_for_every_status(tmp_path, outer_stubs, monkeypatch):
+    """Every published G_PROD row, refused ones included, carries the literal cap of its own event (a distinct value per event,
+    so a broadcast or a NaN on refused rows fails). The three statuses are mixed, so E5 is a third 2025 event."""
+    events = {**EVENTS, "E5": "2025-03-10"}
+    caps = {"E3": 4.5e9, "E4": 6.25e9, "E5": 2.75e9}  # per-event literal caps
+    verdicts = {"E3": ("taken", None), "E4": ("not_taken", "below_gate_threshold"), "E5": ("undetermined", "gate_input_nan")}
+    dates = pd.to_datetime(list(events.values()))
+    admitted = readers.Admitted({"events": pd.DataFrame({"event_id": list(events), "event_date": dates}), "excluded": {}})
+    plan_frame = pd.DataFrame({"event_id": list(events), "ticker": "T", "event_date": dates, "session": "AMC",
+                               "entry_date": dates - pd.Timedelta(days=1), "exit_date": dates + pd.Timedelta(days=1)})
+    facts = pd.DataFrame({"pre_iv30": 40.0, "mcap_usd": 2e10, "implied_move": 5.0}, index=pd.Index(list(events), name="event_id"))
+    base = pd.concat([BASE, BASE[BASE["event_id"] == "E4"].assign(event_id="E5", available_as_of_date="2025-03-11")])
+
+    def fetch(columns, ids):
+        return base[base["event_id"].isin(list(ids))]
+
+    src = dataclasses.replace(sources(admitted=admitted, plan_frame=plan_frame, facts=lambda ids: facts.reindex(list(ids)), fetch=fetch),
+                              gate=STUB_GATE)
+    _stub_tables(monkeypatch, {"prod": events, "cand": events})
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    driver.run(src, "inner", tmp_path, prereg=OK)
+
+    def mixed_decider(gate_, table, labels, start_m):
+        def decide(events_, chunk_):
+            ids = events_["event_id"].astype(str).to_numpy()
+            return pd.DataFrame({"event_id": ids, "event_date": events_["event_date"].to_numpy(), "edge": 0.5, "rel_spread": 0.1,
+                                 "mcap_usd": [caps[e] for e in ids], "status": [verdicts[e][0] for e in ids],
+                                 "reason": [verdicts[e][1] for e in ids]})[driver.straddle.DECISION_COLS]
+        return decide
+
+    def taken_only_marks(chunk_, events_, dec, alpha, **kw):  # as the real score: marks for taken rows only
+        taken_ids = dec.loc[dec["status"] == "taken", "event_id"].astype(str).to_numpy()
+        return pd.DataFrame({"event_id": taken_ids, "exit_value": 101.5, "rung": 2, "lots": 3, "pnl_dollars": -42.25,
+                             "entry_cost": 10.0, "pnl_per_share": -0.5})
+
+    monkeypatch.setattr(driver.gprod, "month_decider", mixed_decider)
+    monkeypatch.setattr(driver.straddle, "score", taken_only_marks)
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4", "E5"))])
+    driver.run(src, "outer", tmp_path, prereg=OK)
+
+    frame = pd.read_parquet(tmp_path / "decisions.parquet")
+    straddle = frame[(frame["book"] == "straddle") & (frame["arm_or_rule"] == driver.straddle.GATE_RULE)]
+    assert set(straddle["status"]) == {"taken", "not_taken", "undetermined"}
+    for eid, (status, reason) in verdicts.items():
+        rows = straddle[straddle["event_id"].astype(str) == eid]
+        assert len(rows) > 0 and (rows["status"] == status).all()
+        assert rows["reason"].isna().all() if reason is None else (rows["reason"] == reason).all()
+        assert (rows["mcap_usd"].to_numpy(dtype=float) == caps[eid]).all()  # this event's own literal cap, on every row
+    assert set(straddle["event_id"].astype(str)) == set(caps)
+
+
 def test_ladder_content_digest_sees_a_mid_array_change_in_a_large_array():
     """_content hashes ndarrays by value (pd.util.hash_array), not by repr: one mid-array change in a large array changes the digest."""
     a = np.linspace(0.0, 1.0, 5000)

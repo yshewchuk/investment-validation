@@ -33,9 +33,10 @@ def _num(x):
 
 def in_universe(mcap):
     """Production's own STR-THRU domain check (``Scorer._gate_in_domain``), called rather than re-implemented. It declines only a
-    finite market cap below GATE_MCAP_FLOOR. A missing or non-positive market cap passes. The gate's own inputs do not come from
-    this check: they come from the separately built gate_inputs table, and the gate withholds (``gate_input_nan``) only if that
-    table's inputs are non-finite. (In a run, a missing market-cap fact is already dropped by the driver's facts_missing.)
+    finite market cap below GATE_MCAP_FLOOR. A missing or non-positive market cap passes. This check does not set the gate's
+    inputs: those come from the separately built gate_inputs table plus the per-model forecast fields, and the gate can leave a
+    row undetermined for its own reasons (gate_input_missing, gate_input_nan, thin_pool; see size_pnl_gprod._scores).
+    (In a run, a missing market-cap fact is already dropped by the driver's facts_missing.)
     ``self`` and ``request`` are unused by production's method. No spread term (Amendment 5)."""
     m = _num(mcap)
     frame = pd.DataFrame({"mcap_log": [math.log(m) if math.isfinite(m) and m > 0 else float("nan")]})
