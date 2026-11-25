@@ -70,15 +70,25 @@ def _floats(values):
     return pd.to_numeric(series, errors="coerce").to_numpy(dtype=float, na_value=np.nan)
 
 
+def _require(frame, columns):
+    missing = [c for c in columns if c not in frame.columns]
+    if missing:
+        raise FairValueRefusal("required_column", "rows lack required columns", columns=missing)
+
+
 def _norm(frame, columns):
-    """Str tickers, datetime64[ns] dates and float numbers, with a fresh RangeIndex."""
+    """Str tickers, datetime64[ns] dates and float numbers, with a fresh RangeIndex. Refuses absent columns and unparseable dates."""
+    _require(frame, columns)
     out = {}
     for col in columns:
         raw = pd.Series(frame[col].to_numpy())
         if col == "ticker":
             out[col] = raw.astype(str).astype(object).to_numpy()
         elif col in ("obs_date", "expiry"):
-            out[col] = pd.to_datetime(raw).astype("datetime64[ns]").to_numpy()
+            try:
+                out[col] = pd.to_datetime(raw).astype("datetime64[ns]").to_numpy()
+            except (TypeError, ValueError, OverflowError) as err:
+                raise FairValueRefusal("key_value", "date column holds a value that is not a date", column=col) from err
         else:
             out[col] = _floats(frame[col])
     return pd.DataFrame(out)
@@ -151,14 +161,36 @@ def _parse(blob, kind, rel):
         raise FairValueRefusal("table_unreadable", "table is not readable parquet", path=rel) from err
 
 
+_KEY_CONVERTERS = {"strike": pd.to_numeric, "obs_date": pd.to_datetime, "expiry": pd.to_datetime}
+
+
+def _bad_key_columns(frame):
+    """Quote key columns holding a null, or a strike or date that does not convert (coerced to NaN/NaT)."""
+    bad = []
+    for col in QUOTE_KEYS:
+        raw = frame[col]
+        if raw.isna().any():
+            bad.append(col)
+        elif col in _KEY_CONVERTERS:
+            try:
+                if _KEY_CONVERTERS[col](raw, errors="coerce").isna().any():
+                    bad.append(col)
+            except (TypeError, ValueError, OverflowError):
+                bad.append(col)
+    return bad
+
+
 def bind_quotes(frame, *, snapshot_id, expected_snapshot_id):
-    """Check the snapshot binding and quote schema; return the QUOTE_COLUMNS rows as a copy."""
+    """Check the snapshot binding, quote schema and quote keys; return the QUOTE_COLUMNS rows as a copy."""
     ids_ok = all(isinstance(s, str) and s for s in (snapshot_id, expected_snapshot_id))
     if not ids_ok or snapshot_id != expected_snapshot_id:
         raise FairValueRefusal("snapshot_binding", "snapshot ids are missing or differ")
     missing = [c for c in QUOTE_COLUMNS if c not in frame.columns]
     if missing:
         raise FairValueRefusal("required_column", "quote columns are absent", columns=missing)
+    bad = _bad_key_columns(frame)
+    if bad:
+        raise FairValueRefusal("key_value", "quote key column is null or does not convert", columns=bad)
     if frame.duplicated(QUOTE_KEYS).any():
         raise FairValueRefusal("duplicate_key", "duplicate quote key", table="option_chains")
     return frame[QUOTE_COLUMNS].copy()
@@ -249,6 +281,7 @@ def attach_vol(quotes, vols):
 
 def lookup_rate(rows, rates):
     """Rate per row: the ticker's row at obs_date, else its latest earlier one within 7 days; then a blend."""
+    _require(rows, ["ticker", "obs_date", "expiry"])
     valid = (rows["ticker"].notna() & rows["obs_date"].notna()).to_numpy()
     keep = (rates["ticker"].notna() & rates["obs_date"].notna()).to_numpy()
     out = np.full(len(rows), np.nan)
@@ -273,8 +306,10 @@ def usable_quote(bid, ask):
     return np.isfinite(b) & np.isfinite(a) & (b >= 0) & (a > 0) & (b <= a)
 
 
-def entry_coverage(entry_rows, tables, *, emit=print):
-    """Input coverage of ENTRY rows by obs_date year and chain_kind. Reads no outcome column."""
+def entry_coverage(entry_rows, tables, *, snapshot_id, expected_snapshot_id, emit=print):
+    """Input coverage of ENTRY rows by obs_date year and chain_kind. Binds its rows itself via bind_quotes
+    (snapshot id, quote schema, keys) before anything is emitted. Reads no outcome column."""
+    entry_rows = bind_quotes(entry_rows, snapshot_id=snapshot_id, expected_snapshot_id=expected_snapshot_id)
     n = len(entry_rows)
     flags = pd.DataFrame({
         "year": pd.to_datetime(entry_rows["obs_date"]).dt.year.to_numpy() if n else np.zeros(0, dtype=int),

@@ -428,6 +428,23 @@ def test_bind_drops_extra_columns_keeps_index_and_allows_empty():
     assert fvi.bind_quotes(frame.iloc[:0], snapshot_id="s", expected_snapshot_id="s").empty
 
 
+@pytest.mark.parametrize("override,column", [
+    ({"ticker": None}, "ticker"),
+    ({"strike": None}, "strike"),
+    ({"right": None}, "right"),
+    ({"obs_date": None}, "obs_date"),
+    ({"expiry": None}, "expiry"),
+    ({"strike": "abc"}, "strike"),
+    ({"obs_date": "garbage"}, "obs_date"),
+    ({"expiry": "2024-13-45"}, "expiry"),
+])
+def test_bind_bad_key_refused(override, column):
+    with pytest.raises(FairValueRefusal) as exc:
+        fvi.bind_quotes(_chain(override), snapshot_id="s", expected_snapshot_id="s")
+    _refused(exc, "key_value")
+    assert exc.value.details["columns"] == [column]
+
+
 @pytest.fixture
 def lookup_tables(tmp_path):
     root, file_sha, manifest_sha = _setup(tmp_path, files={RATE_REL: LOOKUP_RATES})
@@ -480,19 +497,59 @@ def test_attach_vol_shares_strike_across_rights_and_keeps_order():
     pd.testing.assert_frame_equal(quotes, before)
 
 
+@pytest.mark.parametrize("column", fvi.VOL_KEYS)
+def test_attach_vol_missing_key_column_refused(column):
+    quotes = pd.DataFrame({"ticker": ["AAA"], "obs_date": ["2024-01-02"], "expiry": ["2024-02-16"],
+                           "strike": [100.0]}).drop(columns=[column])
+    with pytest.raises(FairValueRefusal) as exc:
+        fvi.attach_vol(quotes, _coverage_tables().vols)
+    _refused(exc, "required_column")
+    assert exc.value.details["columns"] == [column]
+
+
+@pytest.mark.parametrize("column", ["obs_date", "expiry"])
+def test_attach_vol_unparseable_date_refused(column):
+    quotes = pd.DataFrame({"ticker": ["AAA"], "obs_date": ["2024-01-02"], "expiry": ["2024-02-16"],
+                           "strike": [100.0]})
+    quotes[column] = "not a date"
+    with pytest.raises(FairValueRefusal) as exc:
+        fvi.attach_vol(quotes, _coverage_tables().vols)
+    _refused(exc, "key_value")
+    assert exc.value.details["column"] == column
+
+
+@pytest.mark.parametrize("column", ["ticker", "obs_date", "expiry"])
+def test_lookup_rate_missing_key_column_refused(lookup_tables, column):
+    rows = _query("AAA", "2024-01-10", 0).drop(columns=[column])
+    with pytest.raises(FairValueRefusal) as exc:
+        fvi.lookup_rate(rows, lookup_tables)
+    _refused(exc, "required_column")
+    assert exc.value.details["columns"] == [column]
+
+
+@pytest.mark.parametrize("column", ["obs_date", "expiry"])
+def test_lookup_rate_unparseable_date_refused(lookup_tables, column):
+    rows = _query("AAA", "2024-01-10", 0)
+    rows[column] = "not a date"
+    with pytest.raises(FairValueRefusal) as exc:
+        fvi.lookup_rate(rows, lookup_tables)
+    _refused(exc, "key_value")
+    assert exc.value.details["column"] == column
+
+
 def test_usable_quote_rejects_zero_bid_and_ask():
     assert fvi.usable_quote([0.0], [0.0]).tolist() == [False]
 
 
 def _entry_rows():
-    return fvi.bind_quotes(_chain(
+    return _chain(
         {},                                                                                  # usable, vol, rate
         {"right": "P", "bid": 0.0, "ask": 0.5, "open_interest": 0.0, "bid_size": None},      # bid 0 usable
         {"strike": 110.0, "bid": 2.0, "ask": 1.0, "open_interest": None, "chain_kind": "eod"},  # crossed
         {"expiry": "2024-03-15", "bid": -0.1, "ask": 0.5, "open_interest": None, "chain_kind": None},  # negative bid, no vol
         {"obs_date": "2025-01-02", "bid": 0.5, "ask": 0.0, "open_interest": 10.0},           # ask <= 0
         {"obs_date": "2025-01-02", "right": "P", "bid": None, "ask": 1.0, "open_interest": None},  # NaN bid
-    ), snapshot_id="s", expected_snapshot_id="s")
+    )
 
 
 def _coverage_tables():
@@ -505,7 +562,8 @@ def _coverage_tables():
 
 def test_entry_coverage_counts_by_year_and_chain_kind():
     emitted = []
-    out = fvi.entry_coverage(_entry_rows(), _coverage_tables(), emit=emitted.append)
+    out = fvi.entry_coverage(_entry_rows(), _coverage_tables(), snapshot_id="s", expected_snapshot_id="s",
+                             emit=emitted.append)
     assert len(emitted) == 1 and emitted[0].startswith("[fvf] entry input coverage\n")
     cols = ["year", "chain_kind", "rows", "usable_quote", "smvvol_positive", "rate_found",
             "open_interest_known", "bid_size_known", "ask_size_known"]
@@ -521,10 +579,27 @@ def test_entry_coverage_counts_by_year_and_chain_kind():
 
 def test_entry_coverage_empty_input_still_emits():
     emitted = []
-    out = fvi.entry_coverage(fvi.bind_quotes(_chain().iloc[:0], snapshot_id="s", expected_snapshot_id="s"),
-                             _coverage_tables(), emit=emitted.append)
+    out = fvi.entry_coverage(_chain().iloc[:0], _coverage_tables(), snapshot_id="s", expected_snapshot_id="s",
+                             emit=emitted.append)
     assert out.empty and len(emitted) == 1
     assert list(out.columns)[:3] == ["year", "chain_kind", "rows"] and "rate_found_share" in out.columns
+
+
+@pytest.mark.parametrize("frame,snap,expected,reason", [
+    (_chain(), "a", "b", "snapshot_binding"),
+    (_chain().drop(columns=["bid"]), "s", "s", "required_column"),
+    (_chain().drop(columns=["expiry"]), "s", "s", "required_column"),
+    (_chain({}, {}), "s", "s", "duplicate_key"),
+    (_chain({"obs_date": None}), "s", "s", "key_value"),
+    (_chain({"expiry": "not a date"}), "s", "s", "key_value"),
+], ids=["wrong-id", "missing-bid", "missing-expiry", "duplicate-key", "null-obs-date", "unparseable-expiry"])
+def test_entry_coverage_refuses_before_emit(frame, snap, expected, reason):
+    emitted = []
+    with pytest.raises(FairValueRefusal) as exc:
+        fvi.entry_coverage(frame, _coverage_tables(), snapshot_id=snap, expected_snapshot_id=expected,
+                           emit=emitted.append)
+    _refused(exc, reason)
+    assert emitted == []
 
 
 def test_rate_rules_recorded(tmp_path):
