@@ -76,6 +76,11 @@ def _require(frame, columns):
         raise FairValueRefusal("required_column", "rows lack required columns", columns=missing)
 
 
+def _unique(frame, keys, table, message):
+    if frame.duplicated(keys).any():
+        raise FairValueRefusal("duplicate_key", message, table=table)
+
+
 def _norm(frame, columns):
     """Str tickers, datetime64[ns] dates and float numbers, with a fresh RangeIndex. Refuses absent columns, and null or unconvertible keys before any conversion."""
     _require(frame, columns)
@@ -196,8 +201,9 @@ def bind_quotes(frame, *, snapshot_id, expected_snapshot_id):
     bad = _bad_key_columns(frame, QUOTE_KEYS)
     if bad:
         raise FairValueRefusal("key_value", "key column is null or does not convert", columns=bad)
-    if frame.duplicated(QUOTE_KEYS).any():
-        raise FairValueRefusal("duplicate_key", "duplicate quote key", table="option_chains")
+    keys = _norm(frame, VOL_KEYS)  # normalised, so "100" and 100.0 collide; "right" is taken by position below
+    keys["right"] = frame["right"].to_numpy()
+    _unique(keys, QUOTE_KEYS, "option_chains", "duplicate quote key")
     return frame[QUOTE_COLUMNS].copy()
 
 
@@ -252,10 +258,8 @@ def load_tables(root, *, manifest_sha256, file_sha256, vol_scale, rate_scale,
 
     quotes = pd.concat(frames["quotes"], ignore_index=True)
     rates = pd.concat(frames["rates"], ignore_index=True)
-    if quotes.duplicated(VOL_KEYS).any():
-        raise FairValueRefusal("duplicate_key", "duplicate vol key across quote files", table="quotes")
-    if rates.duplicated(RATE_KEYS).any():
-        raise FairValueRefusal("duplicate_key", "duplicate rate key across rate files", table="rates")
+    _unique(quotes, VOL_KEYS, "quotes", "duplicate vol key across quote files")
+    _unique(rates, RATE_KEYS, "rates", "duplicate rate key across rate files")
     vol = quotes["smvVol"] * vol_k
     quotes["smvVol"] = vol.where(np.isfinite(vol) & (vol > 0))
     median = quotes["smvVol"].median()
@@ -278,7 +282,9 @@ def load_tables(root, *, manifest_sha256, file_sha256, vol_scale, rate_scale,
 def attach_vol(quotes, vols):
     """smvVol per quote row by VOL_KEYS (both rights share it); NaN when unmatched. Null or unconvertible keys are refused."""
     left = _norm(quotes, VOL_KEYS)
-    merged = left.merge(vols[VOL_KEYS + ["smvVol"]], on=VOL_KEYS, how="left", validate="many_to_one")
+    vols = _norm(vols, VOL_KEYS + ["smvVol"])
+    _unique(vols, VOL_KEYS, "quotes", "duplicate vol key in the vol table")
+    merged = left.merge(vols, on=VOL_KEYS, how="left", validate="many_to_one")
     return pd.Series(merged["smvVol"].to_numpy(dtype=float, copy=True), index=quotes.index, name="smvVol")
 
 
@@ -286,6 +292,7 @@ def lookup_rate(rows, rates):
     """Rate per row: the ticker's row at obs_date, else its latest earlier one within 7 days; then a blend."""
     left = _norm(rows, ["ticker", "obs_date", "expiry"])
     right = _norm(rates, RATE_KEYS + RATE_COLUMNS)
+    _unique(right, RATE_KEYS, "rates", "duplicate rate key in the rate table")
     out = np.full(len(rows), np.nan)
     if left.empty or right.empty:
         return pd.Series(out, index=rows.index, name="rate")

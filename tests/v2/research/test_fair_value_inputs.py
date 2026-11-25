@@ -440,6 +440,14 @@ def test_bind_duplicate_key_refused():
     assert exc.value.details["table"] == "option_chains"
 
 
+@pytest.mark.parametrize("override", [{"obs_date": pd.Timestamp("2024-01-02")}, {"strike": "100"}])
+def test_bind_normalised_duplicate_key_refused(override):
+    with pytest.raises(FairValueRefusal) as exc:
+        fvi.bind_quotes(_chain({}, override), snapshot_id="s", expected_snapshot_id="s")
+    _refused(exc, "duplicate_key")
+    assert exc.value.details["table"] == "option_chains"
+
+
 def test_bind_drops_extra_columns_keeps_index_and_allows_empty():
     frame = _chain({}, {"strike": 105.0}).assign(extra=1, junk="x")
     frame.index = [7, 3]
@@ -550,6 +558,39 @@ def test_attach_vol_null_key_refused(column):
     assert exc.value.details["columns"] == [column]
 
 
+def _vol_table(obs):
+    n = len(obs)
+    return pd.DataFrame({"ticker": ["AAA"] * n, "obs_date": obs, "expiry": pd.to_datetime(["2024-02-16"] * n),
+                         "strike": [100.0] * n, "smvVol": [0.25] * n})
+
+
+@pytest.mark.parametrize("obs", [pd.to_datetime(["2024-01-02"] * 2), ["2024-01-02", pd.Timestamp("2024-01-02")]],
+                         ids=["exact-duplicate", "string-vs-timestamp"])
+def test_attach_vol_duplicate_vol_key_refused(obs):
+    with pytest.raises(FairValueRefusal) as exc:
+        fvi.attach_vol(_chain(), _vol_table(obs))
+    _refused(exc, "duplicate_key")
+    assert exc.value.details["table"] == "quotes"
+
+
+@pytest.mark.parametrize("column", fvi.VOL_KEYS)
+def test_attach_vol_null_vol_key_refused(column):
+    vols = _coverage_tables().vols
+    vols[column] = [None]
+    with pytest.raises(FairValueRefusal) as exc:
+        fvi.attach_vol(_chain(), vols)
+    _refused(exc, "key_value")
+    assert exc.value.details["columns"] == [column]
+
+
+def test_attach_vol_missing_smvvol_refused():
+    vols = _coverage_tables().vols.drop(columns=["smvVol"])
+    with pytest.raises(FairValueRefusal) as exc:
+        fvi.attach_vol(_chain(), vols)
+    _refused(exc, "required_column")
+    assert exc.value.details["columns"] == ["smvVol"]
+
+
 def test_attach_vol_empty_frame_still_works():
     got = fvi.attach_vol(_chain().iloc[:0], _coverage_tables().vols)
     assert got.empty and got.name == "smvVol"
@@ -573,12 +614,31 @@ def test_lookup_rate_null_ticker_in_rates_refused():
     assert exc.value.details["columns"] == ["ticker"]
 
 
-def test_lookup_rate_missing_rate_column_refused():
-    rates = _coverage_tables().rates.drop(columns=["iRateLt"])
+@pytest.mark.parametrize("column", fvi.RATE_COLUMNS)
+def test_lookup_rate_missing_rate_column_refused(column):
+    rates = _coverage_tables().rates.drop(columns=[column])
     with pytest.raises(FairValueRefusal) as exc:
         fvi.lookup_rate(_query("AAA", "2024-01-10", 0), rates)
     _refused(exc, "required_column")
-    assert exc.value.details["columns"] == ["iRateLt"]
+    assert exc.value.details["columns"] == [column]
+
+
+def _rate_table(obs, r5=0.05, rl=0.04):
+    n = len(obs)
+    return pd.DataFrame({"ticker": ["AAA"] * n, "obs_date": obs, "iRate5wk": [r5] * n, "iRateLt": [rl] * n})
+
+
+@pytest.mark.parametrize("rows", ["one-row", "empty-rows"])
+@pytest.mark.parametrize("obs", [pd.to_datetime(["2024-01-02"] * 2), ["2024-01-02", pd.Timestamp("2024-01-02")]],
+                         ids=["exact-duplicate", "string-vs-timestamp"])
+def test_lookup_rate_duplicate_rate_key_refused(rows, obs):
+    query = _query("AAA", "2024-01-10", 0)
+    if rows == "empty-rows":
+        query = query.iloc[:0]
+    with pytest.raises(FairValueRefusal) as exc:
+        fvi.lookup_rate(query, _rate_table(obs))
+    _refused(exc, "duplicate_key")
+    assert exc.value.details["table"] == "rates"
 
 
 def test_lookup_rate_empty_frame_still_works(lookup_tables):

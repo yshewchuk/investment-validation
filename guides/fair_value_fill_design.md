@@ -117,7 +117,7 @@ New constants are a **new constants id**. A consumer needs a new spec hash and P
 
 | Rule | Case | Result |
 | --- | --- | --- |
-| R1 inputs | snapshot, manifest or table hash does not bind; manifest absent or reporting unread payloads; required column absent; duplicate quote or vol key; vol unit check fails | refuse `EXPERIMENT_IDENTITY_CONFLICT` with a `details.reason`; no partial output; nothing imputed except the rules written above |
+| R1 inputs | snapshot, manifest or table hash does not bind; manifest absent or reporting unread payloads; required column absent; duplicate quote, vol or rate key; vol unit check fails | refuse `EXPERIMENT_IDENTITY_CONFLICT` with a `details.reason`; no partial output; nothing imputed except the rules written above |
 | R1 per row | missing vol, rate or quote | section 7 statuses, counted; never silent or zero |
 | R2 resources | put tree on unique rows | quarter chunks, each row priced once per run, under the consumer's `bounded_run` limit; over it refuses `RESOURCE_LIMIT_EXCEEDED`, no partial report. Smoke first |
 | R3 determinism | no randomness or clock | values never depend on row order, chunking or requested structures |
