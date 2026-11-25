@@ -596,6 +596,16 @@ def test_attach_vol_empty_frame_still_works():
     assert got.empty and got.name == "smvVol"
 
 
+@pytest.mark.parametrize("bad", [0.0, -1.0, float("inf"), float("-inf")], ids=["zero", "negative", "inf", "-inf"])
+def test_attach_vol_invalid_vol_value_refused(bad):
+    vols = _coverage_tables().vols.assign(smvVol=[bad])
+    with pytest.raises(FairValueRefusal) as exc:
+        fvi.attach_vol(_chain(), vols)
+    _refused(exc, "table_value")
+    assert exc.value.details["table"] == "quotes"
+    assert exc.value.details["columns"] == ["smvVol"]
+
+
 @pytest.mark.parametrize("column", ["ticker", "obs_date", "expiry"])
 def test_lookup_rate_null_key_refused(lookup_tables, column):
     rows = _query("AAA", "2024-01-10", 0)
@@ -644,6 +654,28 @@ def test_lookup_rate_duplicate_rate_key_refused(rows, obs):
 def test_lookup_rate_empty_frame_still_works(lookup_tables):
     got = fvi.lookup_rate(_query("AAA", "2024-01-10", 0).iloc[:0], lookup_tables)
     assert got.empty and got.name == "rate"
+
+
+@pytest.mark.parametrize("empty", [False, True], ids=["one-row", "empty-rows"])
+@pytest.mark.parametrize("column", fvi.RATE_COLUMNS)
+@pytest.mark.parametrize("bad", [0.21, -0.06, float("inf"), float("-inf")], ids=["above", "below", "inf", "-inf"])
+def test_lookup_rate_out_of_bounds_rate_refused(column, bad, empty):
+    rates = _coverage_tables().rates.assign(**{column: [bad]})
+    query = _query("AAA", "2024-01-10", 0)
+    if empty:
+        query = query.iloc[:0]
+    with pytest.raises(FairValueRefusal) as exc:
+        fvi.lookup_rate(query, rates)
+    _refused(exc, "table_value")
+    assert exc.value.details["table"] == "rates"
+    assert exc.value.details["columns"] == [column]
+
+
+@pytest.mark.parametrize("value", [-0.05, 0.20, NAN])
+def test_lookup_rate_boundary_and_nan_rates_accepted(value):
+    rates = _coverage_tables().rates.assign(iRate5wk=[value], iRateLt=[value])
+    got = fvi.lookup_rate(_query("AAA", "2024-01-02", 0), rates)
+    np.testing.assert_allclose(got.to_numpy(), [value], rtol=1e-9)
 
 
 @pytest.mark.parametrize("column", ["ticker", "obs_date", "expiry"])
@@ -711,6 +743,18 @@ def test_entry_coverage_empty_input_still_emits():
                              emit=emitted.append)
     assert out.empty and len(emitted) == 1
     assert list(out.columns)[:3] == ["year", "chain_kind", "rows"] and "rate_found_share" in out.columns
+
+
+def test_entry_coverage_invalid_table_value_refused_before_emit():
+    base = _coverage_tables()
+    tables = fvi.InputTables(vols=base.vols.assign(smvVol=[-1.0]), rates=base.rates, hashes={}, rate_rules={})
+    emitted = []
+    with pytest.raises(FairValueRefusal) as exc:
+        fvi.entry_coverage(_entry_rows(), tables, snapshot_id="s", expected_snapshot_id="s", emit=emitted.append)
+    _refused(exc, "table_value")
+    assert exc.value.details["table"] == "quotes"
+    assert exc.value.details["columns"] == ["smvVol"]
+    assert emitted == []
 
 
 @pytest.mark.parametrize("frame,snap,expected,reason", [

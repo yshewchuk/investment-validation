@@ -81,6 +81,13 @@ def _unique(frame, keys, table, message):
         raise FairValueRefusal("duplicate_key", message, table=table)
 
 
+def _table_values(frame, columns, ok, table):
+    """Refuse a normalised table holding a value the loader never returns; NaN is always accepted."""
+    bad = [c for c in columns if not ok(frame[c].to_numpy(dtype=float)).all()]
+    if bad:
+        raise FairValueRefusal("table_value", "table holds a value outside the loader's rules", table=table, columns=bad)
+
+
 def _norm(frame, columns):
     """Str tickers, datetime64[ns] dates and float numbers, with a fresh RangeIndex. Refuses absent columns, and null or unconvertible keys before any conversion."""
     _require(frame, columns)
@@ -284,6 +291,7 @@ def attach_vol(quotes, vols):
     left = _norm(quotes, VOL_KEYS)
     vols = _norm(vols, VOL_KEYS + ["smvVol"])
     _unique(vols, VOL_KEYS, "quotes", "duplicate vol key in the vol table")
+    _table_values(vols, ["smvVol"], lambda v: np.isnan(v) | (np.isfinite(v) & (v > 0)), "quotes")
     merged = left.merge(vols, on=VOL_KEYS, how="left", validate="many_to_one")
     return pd.Series(merged["smvVol"].to_numpy(dtype=float, copy=True), index=quotes.index, name="smvVol")
 
@@ -293,6 +301,7 @@ def lookup_rate(rows, rates):
     left = _norm(rows, ["ticker", "obs_date", "expiry"])
     right = _norm(rates, RATE_KEYS + RATE_COLUMNS)
     _unique(right, RATE_KEYS, "rates", "duplicate rate key in the rate table")
+    _table_values(right, RATE_COLUMNS, lambda v: np.isnan(v) | ((v >= RATE_BOUNDS[0]) & (v <= RATE_BOUNDS[1])), "rates")
     out = np.full(len(rows), np.nan)
     if left.empty or right.empty:
         return pd.Series(out, index=rows.index, name="rate")
