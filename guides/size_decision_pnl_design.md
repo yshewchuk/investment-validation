@@ -388,7 +388,7 @@ Of 5,479 covered 2025 events, M0's G_PROD took 279 (about 5%); production's walk
 
 ### Straddle fidelity check of the full7 run (2026-11-25)
 
-**Correction to Amendment 5's missing-cap rule.** Production's domain check (`Scorer._gate_in_domain`) declines only a finite market cap below the floor; a missing one passes, and the gate then withholds on its non-finite `mcap_log` input. `in_universe` now calls that method, so the straddle book no longer emits `missing_mcap` (still listed as an E_str reason in section 17). No run result is expected to move: `facts_missing` drops an event with a missing cap before either book. Straddle rows now record `mcap_usd`, which was always NaN. The spec text and hash are unchanged.
+**Correction to Amendment 5's missing-cap rule.** Production's domain check (`Scorer._gate_in_domain`) declines only a finite market cap below the floor; a missing one passes, and the gate then withholds on its non-finite `mcap_log` input. A zero or negative cap passes too (production builds no `mcap_log` from it); `facts` already refuses any present cap below 1e6. `in_universe` now calls that method, so the straddle book no longer emits `missing_mcap` (still listed as an E_str reason in section 17). No run result is expected to move: `facts_missing` drops an event with a missing cap before either book. Straddle rows now record `mcap_usd`: the straddle decision frame lacked the column, so the combined decisions file showed NaN on every straddle row. The spec text and hash are unchanged.
 
 **Measured** (M0, 2025, read-only): the full7 `decisions.parquet` straddle book against EXP-187 arm B's `transactions_f30eefe5ee51.csv`, 1,025 selected events.
 
@@ -411,7 +411,14 @@ Jaccard over M0's covered events, diagnostics only: 0.312 as run; 0.400 if the s
 1. **Stored champion artifact (the live model).** `fit_final` trained on every row of 2020-2026, so 2025 scores would be in-sample. It is not EXP-187's model either (a per-fold refit). Needs: pinning the artifact by sha256 inside a fold payload, relaxing the `train_through <= 2024` refusal, an amendment, a `spec.yaml` change, a new PLANNED row, an in-sample label and a rerun. Not recommended.
 2. **EXP-187's per-fold refit** (`experiments/common.py` `make_registered_gate`, v2-snapshot trades, registered threshold). Out of sample for 2025. Needs: a through-2024 fit on EXP-147's gate dataset (a new `size_pnl_gate_fold` path, or an export of that fold model, with the recipe checked for parity), a new fold and receipt (heavy), an amendment, a new PLANNED row and a rerun. How much of the 301 it recovers is unmeasured: the transactions file holds `gate_proba` (a calibrated win probability), not the predicted `ret`. Per-model band inputs and the restricted analog pool would still differ.
 
-**Open for the user:** keep the live $1B floor and compare agreement inside the live domain, or adopt EXP-187's unfloored universe; and keep the legacy-trades refit or take option 2. No rule, threshold or agreement bar changes here.
+**Settled (user, 2026-11-25; a post-hoc acceptance of the agreement gap, made after these figures were seen).**
+
+1. Keep the live $1B market-cap floor. Agreement is measured inside the live domain, with sub-$1B events leaving both sides: 0.400 as run.
+2. Keep the current G_PROD refit. Neither the stored artifact nor EXP-187's per-fold refit is taken.
+3. The user accepts the remaining gap (0.400 against the 0.5 bar), so G_PROD is the primary straddle rule (slice A6-3a). Straddle verdicts must still be labelled "agreement 0.40 inside the live domain, gap accepted by the user 2026-11-25; not fully production-faithful".
+4. The real straddle test moves to EXP-190 (a distribution-based "move beats the implied move" arm).
+
+No rule, threshold, bar or spec change follows. **The report code does not yet do this** (#2890): the agreement section scores every covered event (0.312 as run) and refuses below the bar without `--accept-gate-gap`, whose text appears only in that section; the straddle verdict rows do not carry the label.
 
 **Slice impact.** Rows 3-4, 10 and 16 route resolution through `price_structure`, which runs about 600,000 times (7 structures x 12 models x ~7,000 events; the straddle adds one per model-event). If the 50-ticker smoke shows it too slow, the fallback is to keep the local resolver and add a runtime parity preflight over a fixed sample against `price_structure` (like the fast-path preflight), refusing on any difference; the audit row then reads "re-implements, held by preflight".
 
