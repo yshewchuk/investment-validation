@@ -1,6 +1,6 @@
 # Per-event quantile model of the earnings move (design, EXP-190, part 1: Stage A)
 
-**Status: design only.** No code, `spec.yaml` or test. Experiment **EXP-190** (user, 2026-11-25; Q1 re-checks the ledger id). This revision supersedes PR #2869. **Part 1** (this file) is the model and Stage A, which does no trading. **Part 2** (`guides/size_quantile_trading_design.md`, a later design PR) is Stage B: fills, trading arms and success rule. **[D1]**-style tags point to section 10.
+**Status: Q1 built.** Experiment **EXP-190** (user, 2026-11-25; Q1 re-checks the ledger id). This revision supersedes PR #2869. **Part 1** (this file) is the model and Stage A, which does no trading. **Part 2** (`guides/size_quantile_trading_design.md`, a later design PR) is Stage B: fills, trading arms and success rule. **[D1]**-style tags point to section 10.
 
 ## 1. Question and evidence
 

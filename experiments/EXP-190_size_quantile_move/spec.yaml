@@ -1,19 +1,14 @@
 id: "EXP-190"
-title: "Per-event quantile model of the earnings move (Stage A: distribution skill)"
-hypothesis: "Can one model give each event a usable distribution of |move|, sharper than production's, and does that help trading decisions?"
+title: "Per-event quantile model of earnings moves (Stage A)"
+hypothesis: "Can one model give each event a sharper usable |move| distribution than production, and help trading?"
 type: distribution_skill
 strategy: "*"
-price_source: "none in Stage A (no trading)"
+price_source: "none in Stage A"
 design: "guides/size_quantile_move_design.md"
-data_snapshot: "sealed SIZE v14 panel and records, read by content hash (bound by Q2)"
-# Set only after part 2 merges (design section 9). The guard refuses until the supervisor registers.
+data_snapshot: "sealed SIZE v14 panel and records, read by content hash, bound by Q2"
 preregistered_at: null
 
 constraints:
-  - "Closure A: source_closure(root, [experiments/size_panel.py]) hashes unchanged"
-  - "Closure B: source_closure(root, [experiments/size_search.py, experiments/magnitude_search_worker.py]) plus engine/models/registry.json hash, unchanged"
-  - "Neither closure imports a new module; engine/fills.py and engine/structures.py do not change"
-  - "No EXP-188 or EXP-189 file or spec changes; new code only in experiments/size_quantile_* and one EXP-190_* directory"
   - "Nothing enters STRUCTURES, the registry or the board"
   - "No holdout reads: shared population admission first, labels by admitted event key only; --no-ledger for non-recorded runs; one heavy job at a time under bounded_run"
 
@@ -26,26 +21,26 @@ features:
   m0_forecast_is_feature: false
   missing: "native NaN"
   row_masks: "v14's"
-  dictionary: "hash binds to the sealed v14 plan; nothing is rebuilt"
+  dictionary: "hash binds to sealed v14 plan; nothing rebuilt"
 
 walk_forward:
-  folds: "annual, refit once per year (each level and configuration)"
+  folds: "annual; refit yearly per level and configuration"
   range: "Y0 through 2025"
-  y0_rule: "earliest year such that in every year Y0..2025 at least chain_share_min of admitted panel events have stored entry and exit option chains, and the panel holds at least training_years_min earlier calendar years of training rows"
+  y0_rule: "earliest year where every year Y0..2025 has at least chain_share_min admitted panel events with stored entry and exit option chains, and panel holds at least training_years_min earlier calendar years of training rows"
   chain_share_min: 0.5
   training_years_min: 3
-  label_rule: "a training row needs its label available before the fold's cutoff (data dates, never computed_at)"
-  check: "Q2 prints per-year counts and Y0 before any fit, and refuses unless the rule reproduces the sealed 2023-2025 training ids"
+  label_rule: "training row needs label available before fold cutoff (data dates, never computed_at)"
+  check: "Q2 prints per-year counts and Y0 before any fit; refuses unless rule reproduces sealed 2023-2025 training ids"
 
 arms:
-  Q: {role: eligible, rule: "one quantile HGB per level and fold, sorted, then causally calibrated (section 4)"}
+  Q: {role: eligible, rule: "one quantile HGB per level and fold, sorted, then causally calibrated"}
   Q_raw: {role: eligible, rule: "one quantile HGB per level and fold, sorted, floored at 0, uncalibrated"}
-  S: {role: reported, can_pass: false, rule: "q = median + scale * z_q, with z_q from earlier standardised out-of-sample residuals; median from absolute_error HGB; scale from out-of-fold residuals of |y - median| in year-blocked expanding folds inside the training rows"}
+  S: {role: reported, can_pass: false, rule: "q = median + scale * z_q, z_q from earlier standardised out-of-sample residuals; median from absolute_error HGB; scale from out-of-fold |y - median| residuals in year-blocked expanding folds within training rows"}
 
 grid:
   axes: {max_leaf_nodes: [7, 15], min_samples_leaf: [300, 1000]}
   fixed: {learning_rate: 0.03, l2_regularization: 10.0, max_iter: 3000, early_stopping: true, validation_fraction: 0.1, n_iter_no_change: 10, tol: 1.0e-07, random_state: 0}
-  selection: "one configuration shared by all levels. For year Y: lowest event-weighted mean 7-level pinball of raw sorted outputs over out-of-sample years Y0..Y-1, counting only labels available before Y's cutoff. Y0 uses leaves 7, leaf 300. Ties: fewer leaves, then larger leaf."
+  selection: "one configuration for all levels. Year Y: lowest event-weighted mean 7-level pinball of raw sorted outputs over out-of-sample years Y0..Y-1, counting labels available before Y's cutoff. Y0 uses leaves 7, leaf 300. Ties: fewer leaves, then larger leaf."
 
 non_crossing: "sort the seven outputs per event; Q_raw is the sorted output floored at 0"
 calibration:
@@ -53,74 +48,63 @@ calibration:
   window_months: 12
   min_events: 500
   method: linear
-  rule: "delta_q is the empirical q-quantile of y - qhat_q over out-of-sample predictions whose labels were available before the month began; apply qhat_q + delta_q, sort, floor at 0. Under min_events: unscored (calibration_burn_in)"
+  rule: "delta_q is empirical q-quantile of y - qhat_q over out-of-sample predictions with labels available before month began; apply qhat_q + delta_q, sort, floor at 0. Under min_events: unscored (calibration_burn_in)"
 distribution_tails:
   min_donors: 50
   floor: 0.5
   interpolation: "inverse CDF linear between knots, per arm from its own predictions"
-  rule: "above p90: quantiles of (y - q90) / max(q90 - q50, floor) over strictly earlier predictions with y > q90 (same window), scaled by the event's width; below p10 likewise with q50 - q10, floored at 0. Thin pool: unscored (tail_pool_thin)"
+  rule: "above p90: quantiles of (y - q90) / max(q90 - q50, floor) over strictly earlier predictions with y > q90 (same window), scaled by event width; below p10 likewise with q50 - q10, floored at 0. Thin pool: unscored (tail_pool_thin)"
 zero_median:
   threshold: 1.0e-09
-  rule: "a ratio over q50 (W / q50) is undetermined when q50 <= threshold: counted zero_median, never 0/0. Quantiles stay valid."
+  rule: "ratio over q50 (W / q50) undetermined when q50 <= threshold: counted zero_median, never 0/0."
 
 baselines:
-  B0: {name: "production forecast + ResidualPool (the bar)", rule: "stored tier-4 pred_abs_move; native full-history pool, strictly earlier; quantiles of max(f + err_move, 0) over the exact rows draw samples: the forecast bucket, or the whole earlier pool when the bucket is under MIN_POOL; a refused draw is unscored"}
-  B1: {name: "M0 with the v14 band", rule: "size_distribution.v1 residual-ratio band (5 forecast buckets, max(f, 0.05) * Q_q(y / max(pool_f, 0.05))), parity-tested at shared levels; earlier M0 donors"}
+  B0: {name: "production forecast + ResidualPool (bar)", rule: "stored tier-4 pred_abs_move; native full-history pool, strictly earlier; quantiles of max(f + err_move, 0) over the exact rows draw samples: forecast bucket, or whole earlier pool when bucket under MIN_POOL; refused draw unscored"}
+  B1: {name: "M0 with v14 band", rule: "size_distribution.v1 residual-ratio band (5 forecast buckets, max(f, 0.05) * Q_q(y / max(pool_f, 0.05))), parity-tested at shared levels; earlier M0 donors"}
   B2: {name: "option-implied", rule: "panel implied_move times trailing earlier quantiles of y / implied_move; null or zero abstains"}
-  B3: {name: "best v14 point model + its own pool", rule: "sealed lead-1 predictions of M3, the v14 MAE winner from the sealed selection record; B0's construction on M3's own strictly earlier residuals (from 2023). If M3 does not use HMOSXLP, the lowest inner-MAE HMOSXLP candidate with stored predictions; a missing year is not_testable"}
+  B3: {name: "best v14 point model, own pool", rule: "sealed lead-1 predictions of M3 (v14 MAE winner, per sealed selection record); B0's construction on M3's own strictly earlier residuals (from 2023). If M3 lacks HMOSXLP, lowest inner-MAE HMOSXLP candidate with stored predictions; missing year: not_testable"}
 
 stage_a:
-  population: "events where the judged arm and B0 both have output; drops counted by reason and year; B1-B3 on common subsets"
+  population: "events where judged arm and B0 both have output; drops counted by reason and year; B1-B3 on common subsets"
   periods: ["2023H2", "2024", "2025"]
   quarters: 10
-  baseline_tables: "B1-B3 and S get the same tables"
-  metrics: "per period, quarter and pooled, per arm: pinball per level and mean; coverage of p25-p75 and p10-p90 (inclusive) and of each level; full-distribution CRPS; raw crossing rate; median width q75 - q25; MAE of p50 beside M0's and M3's"
+  baseline_tables: "B1-B3 and S get same tables"
+  metrics: "per period, quarter, pooled, per arm: pinball per level and mean; coverage of p25-p75 and p10-p90 (inclusive) and each level; full-distribution CRPS; raw crossing rate; median width q75 - q25; MAE of p50 beside M0's and M3's"
   conditional_tests:
     cells: "quarter x B0's bucket index"
     width: "W = q75 - q25"
     error: "e = |y - q50|"
     skipped: "cells under 30 events or with constant e (counted)"
-    residualisation: "ranks of W and of e are each residualised linearly on the rank of q50 within cells; a W residual that is zero (within 1e-9) scores correlation 0 and tercile difference 0"
-    tests: "partial Spearman of W and of L with e within cells, event-weighted, ticker bootstrap, B0's value beside it; W-residual terciles pooled by period (mean e, realised IQR of y, both coverages). Reported only: the same with W / q50, and unconditional width terciles."
+    residualisation: "ranks of W and e each linearly residualised on q50's rank within cells; W residual of zero (within 1e-9) scores correlation 0 and tercile difference 0"
+    tests: "partial Spearman of W and L with e within cells, event-weighted, ticker bootstrap, B0's value beside; W-residual terciles pooled by period (mean e, realised IQR of y, both coverages). Reported only: W / q50 version and unconditional width terciles."
   level_width_L:
     min_events: 500
-    bins: "min(20, n // 100) equal-count bins of earlier q50, per month, from the arm's own out-of-sample (q50, y) pairs"
-    value: "p75 minus p25 of earlier y in the event's q50 bin (end bin outside the edges)"
-    burn_in: "under min_events: the event leaves both comparisons (level_width_burn_in)"
-    tests: "L goes through the same tests on the same events and cells as W"
+    bins: "min(20, n // 100) equal-count bins of earlier q50, per month, from arm's own out-of-sample (q50, y) pairs"
+    value: "p75 minus p25 of earlier y in event's q50 bin (end bin outside edges)"
+    burn_in: "under min_events: event leaves both comparisons (level_width_burn_in)"
+    tests: "L goes through same tests on same events and cells as W"
   pass_rule:
-    - "accuracy: the arm's mean pinball is below B0's in each period and in at least 8 of 10 quarters; for the per-event difference (arm minus B0), the 90% percentile bootstrap intervals by quarter and by ticker lie below 0"
-    - "conditional_sharpness: in each period W's partial Spearman is positive and exceeds L's, and W's wide-minus-narrow tercile difference in mean e is positive and exceeds L's; pooled over periods, the ticker intervals for W's Spearman and for W's minus L's both lie above 0"
-    - "calibration_guard: for each band, |coverage - nominal| is no worse than B0's in at least 5 of 10 quarters"
+    - "accuracy: arm's mean pinball below B0's in each period and in at least 8 of 10 quarters; for per-event difference (arm minus B0), 90% percentile bootstrap intervals by quarter and by ticker lie below 0"
+    - "conditional_sharpness: in each period W's partial Spearman positive and exceeds L's, and W's wide-minus-narrow tercile difference in mean e positive and exceeds L's; pooled over periods, ticker intervals for W's Spearman and W minus L both lie above 0"
+    - "calibration_guard: for each band, |coverage - nominal| no worse than B0's in at least 5 of 10 quarters"
   bootstrap: {resamples: 10000, interval_percentile: 90, seed: "fixed"}
-  flags: "pooled pinball loss to B1, B2 or B3 is flagged in the headline, not gated"
-  verdict: "Stage A passes if Q or Q_raw passes. Each passing arm enters Stage B with its own verdict. Two eligible arms give two tries, uncorrected. Otherwise Stage B is not run."
-  selection_period_disclosure: "the grid choice for year Y uses years before Y; B3's identity, the feature set and the grid values used 2023-2024; the Stage A gate uses 2023H2, 2024 and 2025. 2025 is the clean test for model and parameter choices only, not a holdout: Stage B scores 2025 after a pass that read 2025 outcomes, and EXP-188's 2025 results shaped the design. Only the forward period after the data end is independent."
+  flags: "pooled pinball loss to B1, B2 or B3 is flagged in headline, not gated"
+  verdict: "Stage A passes if Q or Q_raw passes. Each passing arm enters Stage B with own verdict. Two eligible arms give two tries, uncorrected. Otherwise Stage B not run."
+  selection_period_disclosure: "report states: grid for year Y uses earlier years; B3 identity, feature set, grid values used 2023-2024; Stage A gate uses 2023H2-2025. 2025 clean for model/parameter choices only, not a holdout (Stage B scores it after a pass that read 2025 outcomes; EXP-188's 2025 results shaped design). Only the forward period after data end is independent."
 
 failure_semantics:
-  R1: "panel, folds, dictionary, M0 or M3 series do not bind: refuse EXPERIMENT_IDENTITY_CONFLICT; nothing rebuilt or imputed. A merely absent M3 year is B3 not_testable for that year."
-  fit_failed: "that fold's arm is fit_failed, no retry. Q_raw fits failing makes Stage A not_testable; a calibration failure affects Q only."
-  abstention: "burn-in, thin tail pool, level-width burn-in, non-finite output: unscored (an abstention, not 'no'), counted; leaves the paired population"
+  R1: "panel, folds, dictionary, M0 or M3 series do not bind: refuse EXPERIMENT_IDENTITY_CONFLICT; nothing rebuilt or imputed. A merely absent M3 year is B3 not_testable."
+  fit_failed: "fold's arm is fit_failed, no retry. Q_raw fit failure makes Stage A not_testable; calibration failure affects Q only."
+  abstention: "burn-in, thin tail pool, level-width burn-in, non-finite output: unscored (an abstention, not 'no'), counted; leaves paired population"
   zero_median: "ratio undetermined, counted; quantiles stay valid"
   R2: "quarter or year chunks; over-limit refuses RESOURCE_LIMIT_EXCEEDED, no partial report"
-  R3_R4: "fixed seeds; receipts atomic, immutable, bound to inputs; a changed input refuses"
-  R5: "arm ids hash the source, level set and configuration"
-  R6: "causality: fits, selection, calibration, tail, level-width and baseline pools use data available before the fold or month; a month's predictions are written before its labels are read"
+  R3_R4: "fixed seeds; receipts atomic, immutable, bound to inputs; changed input refuses"
+  R5: "arm ids hash source, level set and configuration"
+  R6: "causality: fits, selection, calibration, tail, level-width and baseline pools use data available before fold or month; month's predictions written before its labels are read"
 
 stage_b:
   status: pending_part_2
-  design: guides/size_quantile_trading_design.md
-  settled_decisions:
-    D1: "M0's point forecast is a feature in both selection models (N1, N2)."
-    D11: "EXP-189's arm E (per event and structure, the width multiplier k in 0.5..3.0 maximising exp_pnl_sim) is a second Stage B control beside production."
-    D12: "Default: crush draws rank-coupled to historic pairs"
-    D13: "Default twin filter; the band-width ratio is also a selection-model feature."
-    D14: "Width quantile chosen walk-forward per family (centre-peaked, TWIN pair) from {p10, p25, p40, p50, p60, p75}: 2024 uses the best on 2023H2, 2025 the best on 2023H2-2024; every quantile printed per year."
-    D15: "The report states the periods used for any selection. 2025 is the clean test for model and parameter choices, not a holdout, since the Stage A gate reads it."
-    N1: "Learned selection model per family (one centre-peaked, one twin): HGB predicting each candidate trade's return under F, from calibrated quantiles, band-width ratios, option-implied move, entry cost, breakevens relative to spot and M0's forecast; top 20% by predicted return, trailing window; production widths; walk-forward on out-of-sample quantile features only."
-    N2: "Its control: the same model without quantile features. The gap is the value of the distribution."
-    N3: "Trade-everything pricing: exits priced for every candidate, to train N1 and N2 and to report 'trade every event' P&L per arm."
-    N4: "Quantile walk-forward reaches back to the earliest year with stored option chains, made precise by section 4's Y0 rule (chain share 0.5 and 3 earlier training years)."
-    F: "Fair-value marks and spread-aware fills: default for Stage B scoring, selection and the N1/N2 target; mid and harsh still reported. Per leg: Black-Scholes (American adjustment, dividends, rates) at ORATS smvVol (not stored in option_chains; part 2 extracts it from cached raw payloads), clamped to [bid, ask]; fill = fair value plus a concession rising with relative spread (and thin size or open interest where available); structure guard on fill-over-fair and on summed spreads over net debit. Form and constants pre-registered, not tuned; calibration from the user's real fills, if provided, stated. Experiment-side only. Missing smvVol: a per-expiry smooth smile. Motivation: EXP-105 diagnostics; EXP-133's no-arbitrage caveat."
+  decisions_recorded_in: "design section 10 (D1, D11-D15, N1-N4, F)"
+  rule: "write every Stage B rule here before settled"
 
 amendments: []
