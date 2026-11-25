@@ -60,7 +60,8 @@ With `s = (ask - bid)/mid`:
 | `thin_size` | 1 when the size on the side hit (`ask_size` to buy, `bid_size` to sell) is under 10 contracts, else 0 |
 | `thin_oi` | 1 when `open_interest` is under 100, else 0 |
 | **Unknown liquidity** | a null size sets that side's `thin_size` to **0.5**; a null open interest sets `thin_oi` to **0.5**. Zero is a known value and is thin. Counted per field |
-| `quote_repaired` | the stored quote is a crossed one collapsed to `bid = ask` (`engine/data/validate.py`), so its zero spread is false: the spread term takes its cap (`min(s/0.50, 1) = 1`) and `V` is that stored price |
+
+**Repaired quotes.** A `quote_repaired` row is a crossed quote collapsed to `bid = ask = P` (`engine/data/validate.py`), so its zero spread is false, and no concession on it could change a price. Its **effective quote** is `bid = 0.75*P`, `ask = 1.25*P`: relative spread 0.50, the cap (width mine). Wherever this file clamps `V`, computes `s` or fills, or sums spreads, at entry and at exit, a repaired row uses its effective quote; its mid stays `P`. Statuses are read from the stored quote, so `P <= 0` stays `unpriceable`.
 
 0.5 favours neither rows with sizes nor rows without. Missing sizes follow the pull type, hence the era, so two **sensitivities** re-mark the same taken set, entry and exit, with every unknown set to 0 and to 1. They never decide a verdict.
 
@@ -102,7 +103,7 @@ F is used in **selection and scoring alike**:
 - Every F-scored P&L, account and success test uses `debit_F` and `proceeds_F`.
 - **Mid and harsh are still reported**, on the same taken set, computed by the consumer's existing code (`mid` is `FillModel(0.5)`; "harsh" keeps that experiment's own definition). They never decide or break a tie where F is the declared basis.
 
-**Diagnostics**, by year, `chain_kind` and entry versus exit: vol source and status shares; smile minus `smvVol`; `|V - mid| / half-spread` by right (the dividend omission would show as a put/call difference); clamp, better-than-mid, unknown and repaired shares; `c` quantiles; guard skips by reason; `exit_fair_mid` and `unpriceable` counts; and the share of entries whose structure value violates a no-arbitrage payoff bound at mid and at `V`. Status, source and liquidity coverage on entry rows is printed **before any outcome is read**.
+**Diagnostics**, by year, `chain_kind` and entry versus exit: vol source and status shares; smile minus `smvVol`; `|V - mid| / half-spread` (effective quote; rows with zero half-spread excluded and counted) by right (the dividend omission would show as a put/call difference); clamp, better-than-mid, unknown and repaired shares; `c` quantiles; guard skips by reason; `exit_fair_mid` and `unpriceable` counts; and the share of entries whose structure value violates a no-arbitrage payoff bound at mid and at `V`. Status, source and liquidity coverage on entry rows is printed **before any outcome is read**.
 
 ## 9. Recalibration from the user's real fills (only if supplied)
 
