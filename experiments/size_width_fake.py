@@ -55,6 +55,11 @@ def fake_pred(model, event_ids, labels, d):
     return pd.Series(np.where(ok, fake, np.nan), index=[str(e) for e in event_ids])
 
 
+def _at(pred, ids):
+    """Forecasts of ``pred`` at event ids as float64; an empty str Index.map keeps the str dtype under pandas 3, so no map here."""
+    return pred.reindex(pd.Index(ids).astype(str)).to_numpy(dtype=float)
+
+
 def _run(months, table, labels, pred, sessions, *, draws, names, pricing=sv):
     """One full sweep on the forecast Series ``pred``: per calendar month, a pool of a model whose forecasts are ``pred``
     (crush stays M0's), built causally: rows with event_date before the month start, and labels whose ``available`` date
@@ -68,8 +73,8 @@ def _run(months, table, labels, pred, sessions, *, draws, names, pricing=sv):
         start = pd.to_datetime(events["event_date"]).dt.to_period("M").min().start_time
         t = table[pd.to_datetime(table["event_date"]) < start]
         printed = labels[label_availability.printed_before(labels["available"], start.date().isoformat())]
-        pool = build_pool(t.assign(pred_move=t.index.astype(str).map(pred)), printed)
-        sweep.add_month(chunk, events.assign(pred_move=events["event_id"].astype(str).map(pred)), pool,
+        pool = build_pool(t.assign(pred_move=_at(pred, t.index)), printed)
+        sweep.add_month(chunk, events.assign(pred_move=_at(pred, events["event_id"])), pool,
                         output=output, sessions=sessions, draws=draws)
     return {name: {k: unit_score(sweep.rows([(name, k)], INNER), INNER) for k in sweep.ks} for name in names}
 
