@@ -3,6 +3,7 @@ import json
 
 import pytest
 
+from engine.v2.foundation import content_hash
 from experiments import size_pnl_receipts as receipts
 from experiments import size_width_report as report
 from experiments import size_width_tuning as tuning
@@ -54,10 +55,11 @@ FAKE = {"calibration": {"ok": True}, "N": tuning.FAKE_DRAWS, "sim_draws": tuning
 
 
 def _write(out, *, passing=(), c_status="ok", smoke=False, model=True, b_rets=None, c_rets=None, e_peak=None,
-           outer_over=None, inputs_over=None, tuning_over=None):
+           outer_over=None, inputs_over=None, after_digest=None, tuning_over=None):
     """A full synthetic receipt set under ``out/receipts``; arms in ``passing`` beat production on every test.
     ``c_rets`` gives C's score curves their own returns (default: B's). ``outer_over`` and ``inputs_over`` (inputs_outer) are merged
-    into those bodies, and ``tuning_over`` maps an arm to fields merged into its envelope, for the identity-conflict tests."""
+    into those bodies before their digests are taken; ``after_digest`` maps "inputs_inner" or "inputs_outer" to fields merged into
+    the written inputs receipt after its digest is bound, and ``tuning_over`` maps an arm to fields merged into its envelope."""
     rec = out / "receipts"
     b_rets = b_rets or [BASE] * len(GRID)
     c_rets = c_rets or b_rets
@@ -75,16 +77,18 @@ def _write(out, *, passing=(), c_status="ok", smoke=False, model=True, b_rets=No
     if model:
         cal = {"ok": c_status == "ok", "reason": None if c_status == "ok" else "fake_not_calibrated",
                "rmse_m0": 0.1, "rmse_fake": 0.1, "mae_m0": 0.05, "mae_fake": 0.05, "rmse_rel": 0.01, "mae_rel": -0.01}
+    in_body = {"stage": "inputs", "inputs_hash": "H", "scope": None, "identity": IDENTITY}
+    out_body = {**in_body, **(inputs_over or {})}  # the final inputs_outer body, digested before any later alteration
+    after = after_digest or {}
     receipts.write_receipt(rec / "inner_summary.json", {
         "stage": "inner", "inputs_hash": "H", "scope": None, "smoke": smoke, "c_status": c_status,
         "model": MODEL if model else None, "calibration": cal, "anchor": ANCHOR,
-        "results": inner_r, "stats": inner_s, "declined": DECLINED})
+        "results": inner_r, "stats": inner_s, "declined": DECLINED, "inputs_inner": content_hash(in_body)})
     receipts.write_receipt(rec / "outer_summary.json", {
         "stage": "outer", "inputs_hash": "H", "scope": None, "smoke": smoke, "arms": arms,
-        "results": outer_r, "stats": outer_s, "declined": DECLINED, **(outer_over or {})})
-    receipts.write_receipt(rec / "inputs_inner.json", {"stage": "inputs", "inputs_hash": "H", "scope": None, "identity": IDENTITY})
-    receipts.write_receipt(rec / "inputs_outer.json", {"stage": "inputs", "inputs_hash": "H", "scope": None, "identity": IDENTITY,
-                                                       **(inputs_over or {})})
+        "results": outer_r, "stats": outer_s, "declined": DECLINED, "inputs_outer": content_hash(out_body), **(outer_over or {})})
+    receipts.write_receipt(rec / "inputs_inner.json", {**in_body, **after.get("inputs_inner", {})})
+    receipts.write_receipt(rec / "inputs_outer.json", {**out_body, **after.get("inputs_outer", {})})
 
     def tune_receipt(arm, body):
         envelope = {"experiment": "EXP-189", "arm": arm, "inputs_hash": "H", "window": "2023H2-2024", "body": body}
@@ -118,11 +122,21 @@ def test_passing_arm_a_is_recommended(tmp_path):
     rule = json.loads((tmp_path / "proposed_rule.json").read_text(encoding="utf-8"))
     assert rule["recommendation"] == "A" and len(rule["rows"]) == 7
     assert all(r["divisor"] == f"divisor / {r['k']}" for r in rule["rows"])
+    assert all(r["k"] == 0.75 and r["divisor"] == "divisor / 0.75" for r in rule["rows"])  # arm A's fixture: every structure at 0.75
+    assert {r["structure"] for r in rule["rows"]} == set(NAMES)
     text = _text(tmp_path)
     for heading in HEADINGS:
         assert heading in text
     assert "2025 NOT blind for widths" in text
     assert "### Proposed board width rule (arm A)" in text
+
+
+def test_passing_arm_d_sets_the_twin_to_1_25_and_the_rest_to_1_0(tmp_path):
+    _write(tmp_path, passing=("D",))
+    assert report.assemble(tmp_path)["recommendation"] == "D"
+    rule = json.loads((tmp_path / "proposed_rule.json").read_text(encoding="utf-8"))
+    rows = {r["structure"]: r["k"] for r in rule["rows"]}
+    assert rows == {n: (1.25 if n in TWIN else 1.0) for n in NAMES}
 
 
 def test_no_passing_arm_gives_no_change(tmp_path):
@@ -294,3 +308,37 @@ def test_expected_with_another_plan_id_refuses(tmp_path):
 def test_matching_expected_passes(tmp_path):
     _write(tmp_path, passing=("A",))
     assert report.assemble(tmp_path, expected=dict(IDENTITY))["recommendation"] == "A"
+
+
+def test_inputs_outer_altered_after_its_digest_refuses(tmp_path):
+    _write(tmp_path, after_digest={"inputs_outer": {"table": "ALTERED"}})
+    _refused(tmp_path, "tuning_receipt_changed")
+
+
+def test_inputs_inner_altered_after_its_digest_refuses(tmp_path):
+    _write(tmp_path, after_digest={"inputs_inner": {"facts": "ALTERED"}})
+    _refused(tmp_path, "tuning_receipt_changed")
+
+
+def test_summary_without_an_input_digest_refuses_without_a_key_error(tmp_path):
+    _write(tmp_path)
+    path = tmp_path / "receipts" / "outer_summary.json"
+    body = {k: v for k, v in receipts.load_receipt(path).items() if k not in ("content_hash", "inputs_outer")}
+    path.unlink()
+    receipts.write_receipt(path, body)
+    _refused(tmp_path, "tuning_receipt_changed")
+
+
+@pytest.mark.parametrize("arg, value", [("expected", "x"), ("expected", {}), ("w5_tables", 3), ("out_dir", None)])
+def test_bad_arguments_refuse_before_anything_is_read(tmp_path, arg, value):
+    _write(tmp_path, passing=("A",))
+    out, kwargs = tmp_path, {"expected": None, "w5_tables": None}
+    if arg == "out_dir":
+        out = value
+    else:
+        kwargs[arg] = value
+    with pytest.raises(Refusal) as caught:
+        report.assemble(out, **kwargs)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.details["reason"] == "report_input_invalid"
+    assert not (tmp_path / "REPORT.md").exists() and not (tmp_path / "proposed_rule.json").exists()

@@ -1,7 +1,9 @@
 """EXP-189 report (W6b): REPORT.md and proposed_rule.json assembled read-only from the receipts (design sections 6-7)."""
 import json
+import os
 from pathlib import Path
 
+from engine.v2.foundation import content_hash
 from experiments import size_pnl_receipts as receipts
 from experiments import size_width_errmodel as errmodel
 from experiments import size_width_fake as fake
@@ -48,6 +50,11 @@ def _k(k):
 def _load(out, name):
     """The verified receipt ``name`` under ``out/receipts``; a missing or tampered one refuses."""
     return receipts.load_receipt(out / "receipts" / name)
+
+
+def _digest(receipt):
+    """content_hash of a loaded receipt's body, without its own content_hash key (the digest the summaries bind)."""
+    return content_hash({k: v for k, v in receipt.items() if k != "content_hash"})
 
 
 def _unit(body, name):
@@ -188,6 +195,8 @@ def _bound(out, expected):
     if any(r["inputs_hash"] != inner["inputs_hash"] for r in (outer, inputs_inner, inputs_outer)): raise _conflict("inputs_hash differs")
     if any(r["scope"] != inner["scope"] for r in (outer, inputs_inner, inputs_outer)): raise _conflict("scope differs")
     if inner["smoke"] != outer["smoke"]: raise _conflict("smoke flag differs between the inner and outer summaries")
+    if outer.get("inputs_outer") != _digest(inputs_outer): raise _conflict("inputs_outer differs from the inner/outer summary's input digest")
+    if inner.get("inputs_inner") != _digest(inputs_inner): raise _conflict("inputs_inner differs from the inner/outer summary's input digest")
     arms = [a for a in ARMS if a != "C" or inner["c_status"] == "ok"]
     if outer["arms"] != arms: raise _conflict(f"outer arms {outer['arms']} are not {arms} for c_status {inner['c_status']}")
     if inputs_outer["identity"] != inputs_inner["identity"]: raise _conflict("inputs_outer identity differs from inputs_inner")
@@ -202,10 +211,21 @@ def _bound(out, expected):
     return inner, outer, bodies
 
 
+def _check_args(out_dir, expected, w5_tables):
+    """Refuses a malformed argument before anything is read: out_dir a path, expected None or a dict of str identity keys, w5_tables None or a str."""
+    def bad(what):
+        return Refusal("INVALID_EXPERIMENT_SPEC", f"report argument {what}", {"reason": "report_input_invalid"})
+    if not isinstance(out_dir, (str, os.PathLike)): raise bad(f"out_dir must be a str or os.PathLike, got {type(out_dir).__name__}")
+    if expected is not None and (not isinstance(expected, dict) or any(not isinstance(expected.get(k), str) for k in IDENTITY_KEYS)):
+        raise bad(f"expected must be None or a dict with a str for each of {IDENTITY_KEYS}, got {type(expected).__name__}")
+    if w5_tables is not None and not isinstance(w5_tables, str): raise bad(f"w5_tables must be None or a str, got {type(w5_tables).__name__}")
+
+
 def assemble(out_dir, *, expected=None, w5_tables=None):
     """Read the receipts under ``out_dir`` (a missing, tampered, or mismatched one refuses before anything is written; ``expected``
     is the identity dict compared with the inputs receipts), write REPORT.md and proposed_rule.json, and return
     {"report": path, "recommendation": arm or "no_change"}."""
+    _check_args(out_dir, expected, w5_tables)
     out = Path(out_dir)
     inner, outer, bodies = _bound(out, expected)
     labels = [label for label in ("production", "A", "B", "C", "D", "E") if label == "production" or label in bodies]

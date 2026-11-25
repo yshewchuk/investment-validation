@@ -165,7 +165,7 @@ def _inner(src, out, loaded):
     stats = {label: {w: _stats(sweep, by[label], WINDOWS[w]) for w in ("2023H2", "2024")} for label in by}
     body = {"stage": "inner", "inputs_hash": inputs_hash, "scope": base._scope(ids), "smoke": ids is not None, "c_status": c["status"],
             "model": model, "calibration": c.get("calibration"), "anchor": anchor, "results": results, "stats": stats,
-            "declined": _declined(sweep)}
+            "declined": _declined(sweep), "inputs_inner": content_hash(loaded["inputs"])}
     receipts.write_receipt(out / "receipts" / "inner_summary.json", body)
     return {"stage": "inner", "c_status": c["status"], "arms": sorted(by), "months": len(months)}
 

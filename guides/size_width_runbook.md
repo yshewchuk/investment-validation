@@ -14,7 +14,7 @@ Operating steps for `experiments/EXP-189_short_vol_width_tuning/run.py`. Design:
    `EXPERIMENT_IDENTITY_CONFLICT` (`planned_row_missing`) before reading anything. A changed `spec.yaml` needs a new
    PLANNED row first.
 3. Use a fresh `--out-dir` under `experiments/EXP-189_*/results/`. Receipts are immutable; a rerun with the same inputs
-   replays read-only and changed inputs refuse (`tuning_receipt_changed`). Never delete a receipt to force a rerun.
+   replays read-only and changed inputs refuse (first on the stage's inputs receipt, `inputs_receipt_changed`; the outer preflight against the inner receipts uses `tuning_receipt_changed`). Never delete a receipt to force a rerun.
 
 ## Smoke run (about 50 events)
 
@@ -32,8 +32,8 @@ python3 experiments/EXP-189_short_vol_width_tuning/run.py --stage report --no-le
 ```
 
 Under 300 inner events no error model is fitted (`c_status` is `smoke_no_fake`): tuning C is skipped and tuned arms
-A, B, D and E run with every unit `k_defaulted` (fewer than 300 trades). The ids are receipted as `scope`, so a smoke
-receipt cannot feed a full run (`tuning_receipt_changed`). Record RSS and wall time from stderr before the full run.
+A, B and D run with every unit `k_defaulted` (fewer than 300 trades); arm E also runs. The ids are receipted as `scope`, so a smoke
+receipt cannot feed a full run (`inputs_receipt_changed` or `tuning_receipt_changed`). Record RSS and wall time from stderr before the full run.
 
 ## Full run
 
@@ -62,7 +62,8 @@ python3 tools/bounded_run.py --heavy --cores 8 -- python3 experiments/EXP-189_sh
 
 `--stage report` reads no sources (`--sources` is required but never imported) and changes no receipt. It first
 checks that the receipts belong to one driver run: the two summaries and the two inputs receipts agree on stage,
-`inputs_hash` and scope (the summaries also on the smoke flag), the outer arms match the inner `c_status`, both inputs
+`inputs_hash` and scope (the summaries also on the smoke flag), each summary's digest matches its full inputs receipt,
+the outer arms match the inner `c_status`, both inputs
 receipts carry one identity, and every arm's tuning receipt passes `size_width_tuning.frozen`. A mismatch refuses
 `tuning_receipt_changed`; an `--expected` value that differs from the receipted identity refuses `expected_mismatch`;
 nothing is written. It needs the inner and
