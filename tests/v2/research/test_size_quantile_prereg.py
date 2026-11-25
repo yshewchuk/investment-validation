@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
+import pytest
 import yaml
 
 from engine.v2.models.frozen_state_io import read_bounded_state
@@ -236,6 +238,15 @@ def test_check_id_free_refuses_malformed_sibling_that_mentions_exp_190(tmp_path)
     sibling = tmp_path / "EXP-191_z"
     sibling.mkdir()
     (sibling / "spec.yaml").write_text("id: EXP-190\n: [unclosed")
+    assert refusal(lambda: check_id_free(tmp_path)) == "experiment_id_conflict"
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs os.mkfifo")
+def test_check_id_free_refuses_a_fifo_spec_without_hanging(tmp_path):
+    _make_experiment(tmp_path, "EXP-190_x", "EXP-190")
+    sibling = tmp_path / "EXP-191_z"
+    sibling.mkdir()
+    os.mkfifo(sibling / "spec.yaml")
     assert refusal(lambda: check_id_free(tmp_path)) == "experiment_id_conflict"
 
 

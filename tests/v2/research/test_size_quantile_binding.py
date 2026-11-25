@@ -139,12 +139,22 @@ def test_blend_m3_of_only_hmosxlp_components_is_kept():
 
 
 def test_non_hmosxlp_m3_falls_back_to_lowest_normalized_mae_then_lowest_id():
-    scores = [_ok("MO1", 0.5), _failed("HM1"), _ok("HM2", 0.7), _ok("HM3", 0.7), _ok("B1", 0.05),
+    scores = [_ok("MO1", 0.5), _failed("HM1"), _ok("HM3", 0.7), _ok("HM2", 0.7), _ok("B1", 0.05),
               _ok("BMIX", 0.04)]
     result = binding.bind_b3(_plan(), _selection("MO1", scores))
     assert result["b3_candidate_id"] == "HM2"
     assert result["rule"] == "lowest_inner_mae_hmosxlp"
     assert result["kind"] == "candidate"
+
+
+def test_blend_with_a_non_hmosxlp_component_falls_back_to_lowest_inner_mae_hmosxlp():
+    scores = [_ok("BMIX", 0.04, mae=3.0), _ok("HM1", 0.5), _ok("HM2", 0.7), _ok("MO1", 0.1)]
+    result = binding.bind_b3(_plan(), _selection("BMIX", scores))
+    assert result["m3_candidate_id"] == "BMIX"
+    assert result["b3_candidate_id"] == "HM1"
+    assert result["rule"] == "lowest_inner_mae_hmosxlp"
+    assert result["kind"] == "candidate"
+    assert result["m3_pinball_p50_from_mae"] == 1.5
 
 
 def test_selection_plan_id_mismatch_refuses():

@@ -34,13 +34,12 @@ def load_spec(spec_path=SPEC_PATH):
 
 
 def _may_claim(spec_file):
-    """True unless an unparseable sibling spec is readable, at most 4 MiB and free of the id in its raw bytes."""
+    """True unless an unparseable sibling spec is a readable regular file, at most 4 MiB and free of the id."""
     try:
-        with open(spec_file, "rb") as handle:
-            raw = handle.read((4 << 20) + 1)
-    except OSError:
+        text = _read_bounded(spec_file, 4 << 20)
+    except (OSError, ValueError):
         return True
-    return len(raw) > 4 << 20 or b"EXP-190" in raw
+    return "EXP-190" in text
 
 
 def check_id_free(experiments_dir=None):

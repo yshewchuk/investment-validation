@@ -44,7 +44,8 @@ def _clean_env():
 
 
 def _git(args, cwd=ROOT):
-    return subprocess.run(["git", *args], cwd=cwd, env=_clean_env(), capture_output=True, text=True, check=False)
+    return subprocess.run(["git", *args], cwd=cwd, env=_clean_env(), capture_output=True, text=True, check=False,
+                          timeout=120)
 
 
 def test_replica_matches_the_binding_source_files():
@@ -77,8 +78,12 @@ def test_closures_are_unchanged_since_the_merge_base(tmp_path):
             pytest.fail("merge-base of HEAD and origin/main cannot be resolved in the PR tests workflow")
         pytest.skip("merge-base of HEAD and origin/main cannot be resolved here")
 
-    changed = set(filter(None, _git(["diff", "--name-only", "--no-renames", base]).stdout.splitlines()))
-    changed |= set(filter(None, _git(["ls-files", "--others", "--exclude-standard"]).stdout.splitlines()))
+    diff = _git(["diff", "--name-only", "--no-renames", base])
+    assert diff.returncode == 0, diff.stderr
+    untracked = _git(["ls-files", "--others", "--exclude-standard"])
+    assert untracked.returncode == 0, untracked.stderr
+    changed = set(filter(None, diff.stdout.splitlines()))
+    changed |= set(filter(None, untracked.stdout.splitlines()))
     if not _is_exp190_change(changed):
         pytest.skip("not an EXP-190 change")
 
