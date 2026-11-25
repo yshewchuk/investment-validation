@@ -65,6 +65,25 @@ python3 tools/bounded_run.py --heavy --cores 8 -- python3 experiments/EXP-189_sh
 - **Progress** goes to stderr: per month `done/total`, rate per minute, ETA, RSS; stage start and end with elapsed time.
   stdout is one JSON summary. A refusal prints `{"refused", "message", "reason"}` and exits 2.
 
+## Arm E per-event choices (`e_choices/`)
+
+Both stages write `<out-dir>/e_choices/<period>.parquet` for every output month, next to `months/` (inner:
+2023H2-2024; outer: 2025, each written after that month's frozen rows and before its labels are read). It is kept for
+later analysis only: no gate, objective, tuning or account reads it.
+
+- **Rows:** one per simulated candidate event and structure, whatever the decision. An event with no simulation is
+  dropped from the sweep (as from `months/`), so it has no row.
+- **Choice:** `event_id`, `event_date`, `structure`, `k` (chosen; the grid value nearest 1 when no `k` is scored),
+  `exp_pnl_sim` (at the chosen `k`), `exp_pnl_sim_k1`, `status` and `reason` (the gate's decision on arm E).
+- **Marks:** `entry_cost` is the entry mark (debit per share) of any candidate that priced. The rest is filled for
+  taken rows only, and is null otherwise: `exit_value`, `exit_value_mid`, `pnl_dollars`, `pnl_dollars_mid`, `lots`,
+  `debit_dollars` (`entry_cost` x 100 x `lots`), `secured_per_contract`, and for each alpha in {0.00, 0.25, 0.50, 0.75,
+  1.00} `entry_a*`, `exit_a*`, `pnl_a*` (dollars; entry repriced at that alpha, the breakeven ladder's marks).
+- **Receipts:** `receipts/e_choices_inner.json` and `e_choices_outer.json` hold stage, `inputs_hash`, scope, and per
+  month the file's sha256, rows and taken count. Files and receipts are immutable like `months/`: a rerun with other
+  bytes refuses (`month_freeze_changed`; the receipt, `tuning_receipt_changed`). A stage that stops before its
+  receipt leaves unbound month files: do not analyse them. Existing outputs and receipts are unchanged by this.
+
 ## Report
 
 `--stage report` reads no sources (`--sources` is required but never imported) and changes no receipt. It first
@@ -80,9 +99,18 @@ A-D rule, `flatness_se` is always T3's flatness at `k = 1` on the primary per-st
 calibrated, else arm B's), whichever arm is recommended: it is not the recommended arm's own tuning curve. T8 and
 T9 (realised widths, tolerance bands, the fallback at each `phi`, the adoption answer) follow, after `tuning_band.json`
 is checked against the inner summary. The recommendation and adoption answer are evidence for the user's separate board
-decision, not a validated result.
+decision, not a validated result. A short T5b section states the `e_choices` row and taken counts from their
+receipts (no analysis; a receipt bound to other inputs or scope refuses `tuning_receipt_changed`). A run directory
+with neither receipt has no T5b.
 
-## Pricing seam
+## Pricing and fill-model seams
 
 `size_width_driver.PRICING` is `size_width_pricing.PRICING`: `size_pnl_shortvol`'s own code on
 `engine.chain_index.price_structure_indexed`, with results identical to `price_structure`'s.
+
+Its marks come from a `size_width_fills.Fills` object, `size_width_pricing.load(fills=...)`: `entry(priced)` gives the
+entry cost per share and relative spread (the gate's entry cost, the `exp_pnl_sim` entry-cost input and the realised
+entry mark), and `exit_value(chunk, traded, alpha, mid)` the exit mark. The default, `CurrentFills`, calls
+`size_pnl_shortvol`'s functions. Strike resolution, the rung-3 zero floor and the simulation's Black-Scholes exit
+repricing are not marks and stay outside the seam. No command selects another model; receipts do not record one, so a
+change that does must bind its identity in the inputs receipt.
