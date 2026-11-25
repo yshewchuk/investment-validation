@@ -30,7 +30,7 @@ ROWS = (
      "imports; test that AMC and BMO sessions match last_pre_print"),
     ("13", "Expiry selection", "each factory leg's ExpirySelector (first_post_event)",
      "fixed; pinned() requires leg selectors equal the ladder's, else factory_default_mismatch"),
-    ("14", "Straddle universe", "engine/score.py GATE_MCAP_FLOOR, BAD_QUOTE_COST_PCT",
+    ("14", "Straddle universe", "engine/score.py Scorer._gate_in_domain (floor GATE_MCAP_FLOOR), BAD_QUOTE_COST_PCT",
      "imports (Amendment 5)"),
     ("15", "Straddle gate", "engine/models/registry.json gate.fit, refit through 2024",
      "imports; user-approved refit (Amendment 3)"),

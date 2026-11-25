@@ -33,7 +33,9 @@ def _num(x):
 
 def in_universe(mcap):
     """Production's own STR-THRU domain check (``Scorer._gate_in_domain``), called rather than re-implemented. It declines only a
-    finite market cap below GATE_MCAP_FLOOR. A missing or non-positive market cap passes (the gate then sees non-finite inputs).
+    finite market cap below GATE_MCAP_FLOOR. A missing or non-positive market cap passes. The gate's own inputs do not come from
+    this check: they come from the separately built gate_inputs table, and the gate withholds (``gate_input_nan``) only if that
+    table's inputs are non-finite. (In a run, a missing market-cap fact is already dropped by the driver's facts_missing.)
     ``self`` and ``request`` are unused by production's method. No spread term (Amendment 5)."""
     m = _num(mcap)
     frame = pd.DataFrame({"mcap_log": [math.log(m) if math.isfinite(m) and m > 0 else float("nan")]})
@@ -144,22 +146,21 @@ def decide(events, chunk, gate):
     rows = []
     for ev in events.to_dict("records"):
         edge = _edge(_num(ev["pred_abs_move"]), _num(ev["implied_move"]))
+        # mcap_usd is recorded on every row, refusals included, so each decision shows the market cap it was judged on.
         row = {"event_id": ev["event_id"], "event_date": ev["event_date"], "edge": edge,
-               "rel_spread": float("nan"), "mcap_usd": float("nan"), "status": "undetermined", "reason": None}
+               "rel_spread": float("nan"), "mcap_usd": _num(ev["mcap_usd"]), "status": "undetermined", "reason": None}
         if not math.isfinite(edge):
             row["reason"] = "missing_forecast"
         elif str(ev["event_id"]) not in pos:
             row["reason"] = "no_ladder_chunk"
         else:
             i = pos[str(ev["event_id"])]
-            mcap = _num(ev["mcap_usd"])  # read only once the forecast is known to be present
-            row["mcap_usd"] = mcap  # straddle rows were published with mcap_usd always NaN; recorded so a refusal shows its market cap
             state = entry_state(chunk, i)
             if state["status"] != "ok":
                 row["reason"] = state["reason"]
             else:
                 row["rel_spread"] = state["rel_spread"]  # recorded for every ok entry; the spread is not a universe term (Amendment 5)
-                if not in_universe(mcap):
+                if not in_universe(row["mcap_usd"]):
                     row.update(status="not_taken", reason="universe_filter")
                 elif bad_quote(state["priced"], float(chunk["spot_entry"][i])):
                     row.update(status="not_taken", reason="bad_quote")

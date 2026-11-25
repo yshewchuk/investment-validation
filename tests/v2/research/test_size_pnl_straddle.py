@@ -340,12 +340,24 @@ def test_null_mcap_reaches_the_gate_and_takes_its_verdict(null, verdict):
     assert pd.isna(out.loc[0, "mcap_usd"])
 
 
-def test_decide_records_mcap_usd_on_taken_and_universe_rows():
+def test_decide_records_mcap_usd_on_every_refusal_branch():
     assert sd.DECISION_COLS.index("mcap_usd") == sd.DECISION_COLS.index("rel_spread") + 1
-    events = pd.DataFrame([ev("t", 1.0, mcap=5e9), ev("s", 1.0, mcap=0.5e9)])
-    out = sd.decide(events, good("t", "s"), GATE).set_index("event_id")
+    chunk = lad._pack([rec("t", 100.0, pair(100)),                                      # taken
+                       rec("s", 100.0, pair(100)),                                      # universe_filter
+                       rec("eu", 100.0, pair(100, put_e=(2.2, 2.0))),                   # entry_quote_unusable (crossed)
+                       rec("bq", 10.0, pair(10, call_e=(1.5, 2.5), put_e=(1.0, 2.0))),  # bad_quote (35% of spot)
+                       rec("mf", 100.0, pair(100))], {})                                # missing_forecast (no implied move)
+    events = pd.DataFrame([ev("t", 1.0, mcap=5e9), ev("s", 1.0, mcap=0.5e9),
+                           ev("eu", 1.0, mcap=8e9), ev("bq", 1.0, mcap=7e9),
+                           ev("mf", 1.0, mcap=9e9, implied=NAN),
+                           ev("ghost", 1.0, mcap=11e9)])                                # no_ladder_chunk: absent from chunk
+    out = sd.decide(events, chunk, GATE).set_index("event_id")
     assert out.loc["t", "status"] == "taken" and out.loc["t", "mcap_usd"] == 5e9
     assert out.loc["s", "reason"] == "universe_filter" and out.loc["s", "mcap_usd"] == 0.5e9
+    assert out.loc["eu", "reason"] == "entry_quote_unusable" and out.loc["eu", "mcap_usd"] == 8e9
+    assert out.loc["bq", "reason"] == "bad_quote" and out.loc["bq", "mcap_usd"] == 7e9
+    assert out.loc["mf", "reason"] == "missing_forecast" and out.loc["mf", "mcap_usd"] == 9e9
+    assert out.loc["ghost", "reason"] == "no_ladder_chunk" and out.loc["ghost", "mcap_usd"] == 11e9
 
 
 def test_five_billion_name_is_in_the_universe():

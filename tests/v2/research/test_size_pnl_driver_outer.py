@@ -951,7 +951,7 @@ def test_outer_rows_carry_literal_marks_and_forecasts(tmp_path, outer_stubs, mon
     def taken_gate(gate_, table, labels, start_m):
         def decide(events, chunk_):  # the G_PROD decider takes every event
             return pd.DataFrame({"event_id": events["event_id"].astype(str).to_numpy(), "event_date": events["event_date"].to_numpy(),
-                                 "edge": 0.5, "rel_spread": np.nan, "mcap_usd": np.nan, "status": "taken", "reason": "taken"})[driver.straddle.DECISION_COLS]
+                                 "edge": 0.5, "rel_spread": np.nan, "mcap_usd": 4.5e9, "status": "taken", "reason": "taken"})[driver.straddle.DECISION_COLS]
         return decide
 
     def straddle_marks(chunk_, events, dec, alpha, **kw):
@@ -981,6 +981,7 @@ def test_outer_rows_carry_literal_marks_and_forecasts(tmp_path, outer_stubs, mon
     assert len(rows) > 0
     for col, value in marks.items():
         assert rows[col].notna().all() and (rows[col].to_numpy(dtype=float) == value).all()
+    assert (rows["mcap_usd"].to_numpy(dtype=float) == 4.5e9).all()  # the stub decision's literal cap, published unchanged
     for mid, (move, crush) in literals.items():
         rows = frame[frame["model_id"] == mid]
         assert len(rows) > 0
