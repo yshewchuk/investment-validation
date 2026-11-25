@@ -4,6 +4,35 @@
 
 Standalone operator tools. `bounded_run.py` is the wrapper every heavy job runs under: CPU pinning, memory, swap and box-floor limits, test slots and the heavy reservation. Its module docstring is the flag reference; `engine/v2/ops/ARCHITECTURE.md` describes it as an executor adapter. `bench_chain_index.py` is a synthetic-only benchmark of `price_structure` against the chain-index twin (`--tiny`, `--reps`, `--no-profile`); it reads no data and CI runs only a tiny smoke of it.
 
+## `orats_smoothed_vol.py`: experiment-side smoothed vol
+
+The production chain normalizer drops ORATS `smvVol`; this operator tool re-reads the raw cache into separate tables for fair-value fill experiments. No production path or `size_panel.py` closure file imports it; it writes no ledger row. Protected directories are the raw, curated and feature stores and `--raw-root`.
+
+Output root: `--out`, default `data/experiment/orats_smoothed_vol/`. Each table is split into `year=YYYY/month=MM.parquet`, sorted by its unique key.
+
+| Output | Source, key and values |
+|---|---|
+| `quotes/` | `hist/strikes`. Key `(ticker, obs_date, expiry, strike)`, built as the chain normalizer builds it from `tradeDate` and `expirDate`; join to `option_chains` on these four (both sides of a strike share the row). Values `smvVol`, `callMidIv`, `putMidIv`, `stockPrice`, as vendor-reported: sentinels become NaN, zeros stay zero. |
+| `rates/` | `hist/cores`. Key `(ticker, obs_date)`. Values `iRate5wk`, `iRateLt`. |
+| `manifest.json` | Per-table entry, skip and row counts, `duplicates_dropped`, and `conflicting_keys` (duplicated keys whose values differ). Written last. |
+
+Match coverage against `option_chains` is not reported yet. Dividends: none are ingested. `dividend_fields` in `manifest.json` counts non-null rows for each parsed `hist/cores` field whose name contains `div` (empty: none present); presence does not establish meaning.
+
+| Condition | Outcome |
+|---|---|
+| Several rows share a key | The latest `fetched_at` wins (a missing or unparseable stamp sorts oldest), then the greatest cache key, then the later body row. The winner is kept whole, even where its values are NaN. |
+| A payload has no non-null `smvVol` (quotes) or no non-null rate (rates) | Skipped and counted, so it cannot override a pull that had them. |
+| A row has an unusable key | Dropped and counted. |
+| A body is unreadable (over 256 MiB, either form) or its shape unrecognized | Counted and logged. Outputs and the manifest are still written; exit 1. Nothing is quarantined. |
+| A run stops after preflight | No manifest exists. The next run reuses `--work-dir` (default under `/tmp`) entries only if body, parsing code, marker and shards are unchanged; others are reparsed. A shard that changes before its merge fails the run. |
+| A run completes | Its shards and markers are removed; other files in `--work-dir` remain. A rerun rebuilds; the same cache and library versions give identical outputs. |
+| A metadata sidecar exceeds 1 MiB | The run fails on the shared listing's `ValueError`, naming the file, before writing anything. |
+| An output or work directory equals, contains or sits inside a protected one or each other; no `hist/strikes` entry | Refused with a message before writing anything. |
+| `--work-dir` cannot be created | The run fails and any previous manifest remains. |
+| Two runs share an output or work directory | Unsupported: there is no lock. |
+
+Memory holds one body or one month. The shared listing (`iter_cached`) skips unparseable sidecars uncounted; a read error fails the run.
+
 ## Mutation snapshot-worker budget
 
 The mutation driver limits concurrent synthetic snapshot-worker reservations, not whole-run RSS. It neither provisions a larger runner nor changes time budgets.
