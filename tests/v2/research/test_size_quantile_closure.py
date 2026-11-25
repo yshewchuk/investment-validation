@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from engine.v2.models.frozen_state_io import read_bounded_state
 from engine.v2.ops.fingerprints import source_closure
 from experiments.size_search_binding import _source_files
 
@@ -25,7 +26,7 @@ def closure_a(root):
 def closure_b(root):
     """Sealed v14 search closure, plus the model registry bytes (as size_search_binding builds it)."""
     keys = source_closure(root, ["experiments/size_search.py", "experiments/magnitude_search_worker.py"])
-    registry = (root / "engine/models/registry.json").read_bytes()
+    registry = read_bounded_state(root / "engine/models/registry.json", 16 * 1024 * 1024)
     return {**keys, "engine/models/registry.json": "sha256:" + hashlib.sha256(registry).hexdigest()}
 
 
@@ -69,7 +70,7 @@ def test_closures_are_unchanged_since_the_merge_base(tmp_path):
     base_run = _git(["merge-base", "HEAD", "origin/main"])
     base = base_run.stdout.strip()
     if base_run.returncode != 0 or not base:
-        workflow_name = yaml.safe_load(WORKFLOW.read_text())["name"]
+        workflow_name = yaml.safe_load(read_bounded_state(WORKFLOW, 1 << 20).decode("utf-8"))["name"]
         in_pr_tests = (os.environ.get("GITHUB_EVENT_NAME") == "pull_request"
                        and os.environ.get("GITHUB_WORKFLOW") == workflow_name)
         if in_pr_tests:

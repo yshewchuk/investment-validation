@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import yaml
 
+from engine.v2.models.frozen_state_io import read_bounded_state
 from engine.v2.ops.errors import OpsError
 from experiments import lib, size_quantile_prereg
 from experiments.size_quantile_prereg import check_id_free, load_spec
@@ -12,7 +15,7 @@ STAMP = "2026-11-25T12:00:00+00:00"
 
 def _write_spec(case, *, settled=True, drop_stage_b=False, **changes):
     """Re-dump the real EXP-190 spec.yaml into ``case``: settled stage_b and a stamp unless told otherwise."""
-    spec = yaml.safe_load(REAL_SPEC.read_text())
+    spec = yaml.safe_load(read_bounded_state(REAL_SPEC, 1 << 20).decode("utf-8"))
     if settled:
         spec["stage_b"] = {**spec["stage_b"], "status": "settled"}
         spec["preregistered_at"] = STAMP
@@ -25,7 +28,10 @@ def _write_spec(case, *, settled=True, drop_stage_b=False, **changes):
 
 
 def _digest(spec_path):
-    return lib.spec_hash(lib.load_spec(spec_path))
+    spec = yaml.safe_load(read_bounded_state(Path(spec_path), 1 << 20).decode("utf-8"))
+    if not isinstance(spec, dict):
+        raise ValueError(f"spec at {spec_path} did not parse to a mapping")
+    return lib.spec_hash(spec)
 
 
 def _planned_row(digest, **overrides):
