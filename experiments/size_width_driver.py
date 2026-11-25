@@ -206,8 +206,15 @@ def _outer(src, out, loaded):
     arms, by, inner = _preflight(out, loaded)
     sweep, labels, table, sessions = deviation.DeviationSweep(ladder=True, pricing=PRICING), loaded["labels"], loaded["table"], loaded["sessions"]
     total, started, count, fresh_labels = _total(plan), time.monotonic(), 0, []
+    read_to = pd.Timestamp(base.OUTER[0])  # every 2025 label of an event dated before read_to has been read
     for count, (chunk, events, output) in enumerate(_months(src, plan, base._restrict(table, ids), loaded["facts_all"], loaded["exits"], pd.Timestamp(base.OUTER[0])), start=1):
         period = _period(events)
+        if read_to < period.start_time:  # months with no scoped event: read their labels now, they have no decisions to freeze
+            gap = readers.read_labels(src.fetch, src.admitted, start=read_to, end=period.start_time, event_ids=None)
+            _log(f"outer gap labels {read_to.date()}..{period.start_time.date()} rows={len(gap)}")
+            fresh_labels.append(gap)
+            labels = pd.concat([labels, gap])
+            read_to = period.start_time
         fresh = sweep.add_month(chunk, events, _pool(table, labels, period.start_time), output=output, sessions=sessions)
         _progress("outer", count, total, started)
         if output:
@@ -217,6 +224,7 @@ def _outer(src, out, loaded):
             got = readers.read_labels(src.fetch, src.admitted, start=period.start_time, end=(period + 1).start_time, event_ids=None)
             fresh_labels.append(got)
             labels = pd.concat([labels, got])
+            read_to = (period + 1).start_time
     _require_priced(sweep, ids, "outer")
     results = tuning.run_outer(sweep, out, arms, inputs_hash)
     by = {"production": {n: 1.0 for n in NAMES}, **by}

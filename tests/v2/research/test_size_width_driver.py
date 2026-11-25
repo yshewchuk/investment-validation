@@ -546,6 +546,43 @@ def test_a_scoped_outer_reads_every_label_unscoped(tmp_path, m0, taking, monkeyp
     assert seen and all(e is None for e in seen)  # the load's pre-2025 read and each 2025 month's read
 
 
+def test_a_scoped_outer_pool_holds_the_labels_of_months_with_no_scoped_event(tmp_path, m0, taking, monkeypatch):
+    """January 2025 (E3) has no scoped event, so its labels must still reach February's pools (primary and fallback pass) and be
+    read before February is frozen; the read covering January is the gap read, and no range is read twice."""
+    ids = ["E1", "E2", "E4"]
+    use_chunks(monkeypatch, [("2023Q3", chunk("E1")), ("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path, event_ids=ids, prereg=OK)
+    events, pools = [], []
+    real_read, real_freeze = readers.read_labels, driver.decisions.freeze_month
+
+    def recording(fetch, admitted, **kw):
+        events.append(("read", pd.Timestamp(kw["start"]), pd.Timestamp(kw["end"])))
+        return real_read(fetch, admitted, **kw)
+
+    def freezing(out_dir, period, frames):
+        events.append(("freeze", period))
+        return real_freeze(out_dir, period, frames)
+
+    monkeypatch.setattr(readers, "read_labels", recording)
+    monkeypatch.setattr(driver.decisions, "freeze_month", freezing)
+    monkeypatch.setattr(driver, "build_pool", lambda table, labels: pools.append((set(table.index.astype(str)), set(labels.index.astype(str)))))
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E4"))])
+    driver.run(sources(), "outer", tmp_path, event_ids=ids, prereg=OK)
+
+    feb, mar = pd.Timestamp("2025-02-01"), pd.Timestamp("2025-03-01")
+    with_e3 = [labels for table, labels in pools if "E3" in table]  # February's pools: rows before February, E3 among them
+    assert with_e3 and all("E3" in labels for labels in with_e3)
+    assert len(with_e3) >= 2  # the primary pass and the fallback pass both build February's pool
+    reads = [(i, e[1], e[2]) for i, e in enumerate(events) if e[0] == "read"]
+    ranges = [(start, end) for _, start, end in reads]
+    assert (pd.Timestamp("2025-01-01"), feb) in ranges  # the gap read of January's labels
+    feb_freeze = events.index(("freeze", pd.Period("2025-02", "M")))
+    for i, start, end in reads:
+        if start < mar and end > feb:  # a read covering February happens only after its freeze
+            assert i > feb_freeze
+    assert len(set(ranges)) == len(ranges)  # no range is read twice
+
+
 def test_require_priced_refuses_only_a_scoped_run_that_priced_nothing():
     sweep = Sweep()
     driver._require_priced(sweep, None, "inner")  # a full run never refuses, even at zero
