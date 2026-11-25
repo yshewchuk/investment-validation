@@ -1,7 +1,8 @@
 """EXP-189 driver: the width sweep's inner (2023H2-2024) and outer (2025) stages over EXP-188's inputs (design sections 3-6).
 
 Every sweep is built on ``PRICING``, the one pricing seam. The inner stage holds every quarter chunk in memory (W3's contract:
-the fake and the anchor re-use the months). The outer stage freezes each 2025 month before its labels are read (R6)."""
+the fake and the anchor re-use the months). The outer stage freezes each 2025 month before its labels are read (R6). Both stages
+run the tolerance bands and the nearest-feasible fallback with its T8 tables and T9 (``size_width_flex``)."""
 import math
 import os
 import sys
@@ -16,17 +17,19 @@ from experiments import size_pnl_decisions as decisions
 from experiments import size_pnl_driver as base
 from experiments import size_pnl_readers as readers
 from experiments import size_pnl_receipts as receipts
-from experiments import size_pnl_shortvol
+from experiments import size_width_band as band
+from experiments import size_width_deviation as deviation
 from experiments import size_width_errmodel as errmodel
 from experiments import size_width_fake as fake
+from experiments import size_width_flex as flex
 from experiments import size_width_prereg
 from experiments import size_width_tuning as tuning
 from experiments.size_pnl_pool import build_pool
 from experiments.size_pnl_shortvol import NAMES, Refusal
-from experiments.size_width_sweep import RET_COLS, WINDOWS, Sweep
-from experiments.size_width_success import LADDER, breakeven_alpha
+from experiments.size_width_pricing import PRICING
+from experiments.size_width_sweep import INNER, RET_COLS, WINDOWS
+from experiments.size_width_success import LADDER, breakeven_alpha, recommend, success_table
 
-PRICING = size_pnl_shortvol
 _CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
 
 
@@ -139,7 +142,7 @@ def _inner(src, out, loaded):
     sessions, inputs_hash = loaded["sessions"], loaded["inputs_hash"]
     months = list(_months(src, plan, table, loaded["facts_all"], loaded["exits"], base.INNER_EMIT_FROM))
     _log(f"materialised months={len(months)}")
-    sweep, started, total = Sweep(ladder=True, pricing=PRICING), time.monotonic(), _total(plan)
+    sweep, started, total = deviation.DeviationSweep(ladder=True, pricing=PRICING), time.monotonic(), _total(plan)
     for done, (chunk, events, output) in enumerate(months, start=1):
         sweep.add_month(chunk, events, _pool(table, labels, _period(events).start_time), output=output, sessions=sessions)
         _progress("inner", done, total, started)
@@ -163,30 +166,35 @@ def _inner(src, out, loaded):
         by["C"] = tuning.factors("C", c["body"])
         results["C"] = {w: tuning.evaluate(sweep, by["C"], WINDOWS[w]) for w in ("2023H2", "2024")}
     stats = {label: {w: _stats(sweep, by[label], WINDOWS[w]) for w in ("2023H2", "2024")} for label in by}
+    bands = band.build_bands(flex.curves(res["tuned"]["B"], c["body"] if c["status"] == "ok" else None, anchor, tuning.MIN_TRADES))
+    band.write_bands(out, bands, inputs_hash)
+    flexed = flex.inner(by, ((chunk, events, output, _pool(table, labels, _period(events).start_time)) for chunk, events, output in months),
+                        total, sweep, out, inputs_hash, sessions, PRICING)
     body = {"stage": "inner", "inputs_hash": inputs_hash, "scope": base._scope(ids), "smoke": ids is not None, "c_status": c["status"],
             "model": model, "calibration": c.get("calibration"), "anchor": anchor, "results": results, "stats": stats,
-            "declined": _declined(sweep), "inputs_inner": content_hash(loaded["inputs"])}
+            "declined": _declined(sweep), "bands": bands, "t8": deviation.tables(sweep, {"2023-24": INNER}), "flex": flexed,
+            "inputs_inner": content_hash(loaded["inputs"])}
     receipts.write_receipt(out / "receipts" / "inner_summary.json", body)
     return {"stage": "inner", "c_status": c["status"], "arms": sorted(by), "months": len(months)}
 
 
 def _preflight(out, loaded):
-    """The outer stage's preflight: the inner summary, its binding to these inputs and scope, and every arm's frozen factors. Returns (arms, by)."""
+    """The outer preflight: the inner summary (with its fallback stage), every arm's frozen factors and the tuning_band receipt."""
     ids, inputs_hash = loaded["ids"], loaded["inputs_hash"]
     inner = receipts.load_receipt(out / "receipts" / "inner_summary.json")
-    if inner["inputs_hash"] != inputs_hash or inner["scope"] != base._scope(ids):
-        raise Refusal(_CONFLICT, "inner_summary.json is bound to other inputs or another scope", {"reason": "tuning_receipt_changed"})
+    if inner["inputs_hash"] != inputs_hash or inner["scope"] != base._scope(ids) or "flex" not in inner:
+        raise Refusal(_CONFLICT, "inner_summary.json is bound to other inputs or scope, or has no fallback stage", {"reason": "tuning_receipt_changed"})
     arms = [a for a in ("A", "B", "C", "D", "E") if a != "C" or inner["c_status"] == "ok"]
     by = {arm: tuning.frozen(out, arm, inputs_hash) for arm in arms}
-    return arms, by
+    band.frozen_bands(out, inputs_hash)
+    return arms, by, inner
 
 
 def _outer(src, out, loaded):
-    """The outer stage. Preflight first: the inner summary and every arm's frozen factors, before any chunk is built. Then each
-    2025 month is frozen before its labels are read (R6)."""
+    """The outer stage: preflight first, then each 2025 month is frozen before its labels are read (R6)."""
     ids, inputs_hash, plan = loaded["ids"], loaded["inputs_hash"], loaded["plan"]
-    arms, by = _preflight(out, loaded)
-    sweep, labels, table, sessions = Sweep(ladder=True, pricing=PRICING), loaded["labels"], loaded["table"], loaded["sessions"]
+    arms, by, inner = _preflight(out, loaded)
+    sweep, labels, table, sessions = deviation.DeviationSweep(ladder=True, pricing=PRICING), loaded["labels"], loaded["table"], loaded["sessions"]
     total, started, count, fresh_labels = _total(plan), time.monotonic(), 0, []
     for count, (chunk, events, output) in enumerate(_months(src, plan, table, loaded["facts_all"], loaded["exits"], pd.Timestamp(base.OUTER[0])), start=1):
         period = _period(events)
@@ -202,9 +210,18 @@ def _outer(src, out, loaded):
     results = tuning.run_outer(sweep, out, arms, inputs_hash)
     by = {"production": {n: 1.0 for n in NAMES}, **by}
     stats = {label: {"2025": _stats(sweep, by[label], WINDOWS["2025"])} for label in results}
+    tuned_e = receipts.load_receipt(out / "receipts" / "tuning_E.json")["body"]
+    merged = {label: {**inner["results"][label], "2025": results[label]} for label in results}
+    rec = recommend(success_table(merged["production"], {l: r for l, r in merged.items() if l != "production"},
+                                  {l: {"2025": stats[l]["2025"]["x"]} for l in merged}, tuned_e))
+    # The fallback pass runs after the 2025 recommendation; phi comes from the inner summary.
+    months = ((chunk, events, output, _pool(table, labels, _period(events).start_time))
+              for chunk, events, output in _months(src, plan, table, loaded["facts_all"], loaded["exits"], pd.Timestamp(base.OUTER[0])))
+    flexed = flex.outer(by, inner["flex"], rec, months, total, sweep, out, inputs_hash, sessions, PRICING, _stats)
     body = {"stage": "outer", "inputs_hash": inputs_hash, "scope": base._scope(ids), "smoke": ids is not None, "arms": arms,
             "results": {label: {"2025": results[label]} for label in results}, "stats": stats, "declined": _declined(sweep),
-            "inputs_outer": content_hash(loaded["inputs"]), "labels_2025": content_hash(base._label_rows(fresh_labels))}
+            "inputs_outer": content_hash(loaded["inputs"]), "labels_2025": content_hash(base._label_rows(fresh_labels)),
+            "t8": deviation.tables(sweep, {"2025": WINDOWS["2025"]}), "flex": flexed}
     receipts.write_receipt(out / "receipts" / "outer_summary.json", body)
     return {"stage": "outer", "arms": arms, "months": count}
 

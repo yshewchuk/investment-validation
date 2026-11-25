@@ -5,14 +5,18 @@ import json
 import pandas as pd
 import pytest
 
+from engine.chain_index import price_structure_indexed
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import OpsError, fail
 from experiments import size_pnl_driver as base
 from experiments import size_pnl_readers as readers
 from experiments import size_pnl_receipts as receipts
 from experiments import size_pnl_shortvol as sv
+from experiments import size_width_band as band
+from experiments import size_width_deviation as deviation
 from experiments import size_width_driver as driver
 from experiments import size_width_fake as fake
+from experiments import size_width_pricing as seam
 from experiments import size_width_report as report
 from experiments import size_width_tuning as tuning
 from experiments.size_pnl_shortvol import NAMES, Refusal
@@ -40,6 +44,16 @@ def _m0_key(roster):
     return next(m["model_id"] for m in roster["models"] if "M0" in m["roles"])
 
 
+def _scores(events, name):
+    """A score_events frame with every SCORE_COLS column: each row scored at exp_pnl_sim 0.01 and width pred_move; mcap_usd from the events (NaN if absent)."""
+    n = len(events)
+    mcap = events["mcap_usd"].to_numpy(dtype=float) if "mcap_usd" in events.columns else [float("nan")] * n
+    return pd.DataFrame({"event_id": events["event_id"].astype(str).to_numpy(), "event_date": events["event_date"].to_numpy(),
+                         "structure": [name] * n, "width": events["pred_move"].to_numpy(dtype=float), "entry_cost": [2.0] * n,
+                         "rel_spread": [float("nan")] * n, "mcap_usd": mcap, "exp_pnl_sim": [0.01] * n, "status": ["scored"] * n,
+                         "reason": [None] * n, "alpha": [None] * n})
+
+
 @pytest.fixture
 def m0(monkeypatch):
     """The M0 table is the only ready model, keyed by the roster's M0 model id."""
@@ -55,10 +69,7 @@ def pricing(monkeypatch):
         return {str(e): "sim" for e in events["event_id"]}
 
     def score_events(chunk_, events, sims, name, *, alpha=0.5):
-        n = len(events)
-        return pd.DataFrame({"event_id": events["event_id"].astype(str).to_numpy(), "event_date": events["event_date"].to_numpy(),
-                             "structure": [name] * n, "status": ["scored"] * n, "reason": [None] * n,
-                             "exp_pnl_sim": [0.01] * n, "entry_cost": [2.0] * n})
+        return _scores(events, name)
 
     def decide(scored):
         return scored.assign(status="undetermined", reason="thin_history")
@@ -73,11 +84,12 @@ def pricing(monkeypatch):
         ids = [str(e) for e in decisions["event_id"]]
         return pd.DataFrame({"event_id": pd.Series(ids, dtype=object), "secured_per_contract": [5.0] * len(ids)})
 
-    monkeypatch.setattr(sv, "simulate", simulate)
-    monkeypatch.setattr(sv, "score_events", score_events)
-    monkeypatch.setattr(sv, "decide", decide)
-    monkeypatch.setattr(sv, "score", score)
-    monkeypatch.setattr(sv, "secured", secured)
+    monkeypatch.setattr(driver.PRICING, "simulate", simulate)
+    monkeypatch.setattr(driver.PRICING, "score_events", score_events)
+    monkeypatch.setattr(driver.PRICING, "decide", decide)
+    monkeypatch.setattr(driver.PRICING, "score", score)
+    monkeypatch.setattr(driver.PRICING, "secured", secured)
+    monkeypatch.setattr(driver.PRICING, "resolve", lambda chunk_, i, name, pred: (None, "structure_unresolved"))
     monkeypatch.setattr(driver, "build_pool", lambda table, labels: None)
     monkeypatch.setattr(fake, "build_pool", lambda table, labels: None)
 
@@ -90,10 +102,7 @@ def taking(monkeypatch):
         return {str(e): "sim" for e in events["event_id"]}
 
     def score_events(chunk_, events, sims, name, *, alpha=0.5):
-        n = len(events)
-        return pd.DataFrame({"event_id": events["event_id"].astype(str).to_numpy(), "event_date": events["event_date"].to_numpy(),
-                             "structure": [name] * n, "width": events["pred_move"].to_numpy(dtype=float), "status": ["scored"] * n,
-                             "reason": [None] * n, "exp_pnl_sim": [0.01] * n, "entry_cost": [2.0] * n})
+        return _scores(events, name)
 
     def decide(scored):
         hit = [s == NAME and w == 5.0 for s, w in zip(scored["structure"], scored["width"])]
@@ -110,11 +119,12 @@ def taking(monkeypatch):
         ids = [str(e) for e in decisions["event_id"]]
         return pd.DataFrame({"event_id": pd.Series(ids, dtype=object), "secured_per_contract": [1000.0] * len(ids)})
 
-    monkeypatch.setattr(sv, "simulate", simulate)
-    monkeypatch.setattr(sv, "score_events", score_events)
-    monkeypatch.setattr(sv, "decide", decide)
-    monkeypatch.setattr(sv, "score", score)
-    monkeypatch.setattr(sv, "secured", secured)
+    monkeypatch.setattr(driver.PRICING, "simulate", simulate)
+    monkeypatch.setattr(driver.PRICING, "score_events", score_events)
+    monkeypatch.setattr(driver.PRICING, "decide", decide)
+    monkeypatch.setattr(driver.PRICING, "score", score)
+    monkeypatch.setattr(driver.PRICING, "secured", secured)
+    monkeypatch.setattr(driver.PRICING, "resolve", lambda chunk_, i, name, pred: (None, "structure_unresolved"))
     monkeypatch.setattr(driver, "build_pool", lambda table, labels: None)
     monkeypatch.setattr(fake, "build_pool", lambda table, labels: None)
 
@@ -127,10 +137,30 @@ def _loaded(src, ids=None):
             "inputs_hash": "H", "inputs": {"stage": "inputs", "inputs_hash": "H"}}
 
 
+def _bands():
+    """Every structure's B curve all not_scored: no positive peak anywhere, so no band and no fallback."""
+    return band.build_bands({n: {"B": {str(k): {"ret": 0.0, "se": 0.0, "trades": 0, "not_scored": True} for k in GRID}} for n in NAMES})
+
+
+def _flex_stub():
+    """The inner fallback stage of a run with no recovery: production only, phi not chosen (insufficient_recovery)."""
+    acc = {w: {"fallback": 0.0, "base": 0.0} for w in ("2023H2", "2024")}
+    cell = {"recovery": {"recovered": 0, "recovered_ret": None, "taken_ret": None}, "accounts": acc, "t9": []}
+    return {"production": {"factors": {n: 1.0 for n in NAMES}, "choice": {"phi": None, "flags": ["insufficient_recovery"]},
+                           "phis": {p: cell for p in ("0.8", "0.9", "0.95")}}}
+
+
 def _inner_summary(out, inputs_hash="H", c_status="smoke_no_fake"):
+    empty = {"2023H2": {}, "2024": {}}
     receipts.write_receipt(out / "receipts" / "inner_summary.json", {
         "stage": "inner", "inputs_hash": inputs_hash, "scope": None, "smoke": False, "c_status": c_status, "model": None,
-        "calibration": None, "anchor": {}, "results": {}, "stats": {}, "declined": {}})
+        "calibration": None, "anchor": {}, "results": {label: dict(empty) for label in ("production", "A", "B", "D", "E")},
+        "stats": {}, "declined": {}, "bands": _bands(),
+        "t8": {"quantiles": [], "buckets": [], "declines": [], "deviation_unavailable": 0}, "flex": _flex_stub()})
+
+
+def _band_receipt(out, inputs_hash="H"):
+    band.write_bands(out, _bands(), inputs_hash)
 
 
 def _tuning_receipts(out, inputs_hash="H"):
@@ -169,22 +199,24 @@ def test_missing_m0_inputs_refuse_before_any_receipt(tmp_path, monkeypatch):
     assert not (tmp_path / "receipts").exists()
 
 
-def test_pricing_is_the_shortvol_seam(monkeypatch):
-    assert driver.PRICING is sv
+def test_pricing_is_the_chain_index_seam():
+    assert driver.PRICING is seam.PRICING and driver.PRICING is not sv
+    assert driver.PRICING.price_structure is price_structure_indexed and sv.price_structure is not price_structure_indexed
 
 
 def test_the_sweep_is_built_on_the_pricing_seam(tmp_path, m0, pricing, monkeypatch):
     seen = []
+    real = deviation.DeviationSweep
 
-    class Recorder(Sweep):
+    class Recorder(real):
         def __init__(self, *args, **kwargs):
             seen.append(kwargs.get("pricing"))
             super().__init__(*args, **kwargs)
 
-    monkeypatch.setattr(driver, "Sweep", Recorder)
+    monkeypatch.setattr(deviation, "DeviationSweep", Recorder)
     use_chunks(monkeypatch, [("2023Q3", chunk("E1")), ("2024Q3", chunk("E2"))])
     driver.run(sources(), "inner", tmp_path, event_ids=["E1", "E2"], prereg=OK)
-    assert seen and all(p is sv for p in seen)
+    assert seen and all(p is driver.PRICING for p in seen)
 
 
 # ---- months ---------------------------------------------------------------------
@@ -274,6 +306,7 @@ def test_outer_freezes_each_2025_month_before_its_labels_are_read(tmp_path, m0, 
     src, out = sources(), tmp_path / "out"
     _inner_summary(out)
     _tuning_receipts(out)
+    _band_receipt(out)
     loaded = _loaded(src)  # the pre-2025 labels are read before the recorder is installed
     seen, real = [], readers.read_labels
 
@@ -309,6 +342,7 @@ def test_outer_freezes_the_width_one_taken_rows_and_counts_the_2025_trades(tmp_p
     src, out = sources(), tmp_path / "out"
     _inner_summary(out)
     _tuning_receipts(out)
+    _band_receipt(out)
     use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
     driver._outer(src, out, _loaded(src))
     frozen = pd.read_parquet(out / "months" / "2025-01.parquet")
@@ -468,6 +502,7 @@ def test_fit_population_is_the_2023_24_rows_with_labels_printed_before_2025(tmp_
     monkeypatch.setattr(readers, "model_tables", lambda bound, roster, admitted, production, **kw: {
         _m0_key(roster): {"status": "ready", "table": table, "binding": {"model": "M0"}}})
     monkeypatch.setattr(driver.errmodel, "fit", fit)
+    monkeypatch.setattr(driver.fake, "run_anchor", lambda *a, **k: {n: {} for n in NAMES})  # an anchor row for every structure
     use_chunks(monkeypatch, [("2023Q3", chunk("E1")), ("2024Q3", chunk("E2"))])
     summary = driver.run(sources(fetch=fetch), "inner", tmp_path, event_ids=["E1", "E2"], prereg=OK)
     assert summary["c_status"] == "smoke_no_fake"
@@ -490,7 +525,7 @@ def test_fake_and_anchor_are_run_on_the_pricing_seam(tmp_path, m0, pricing, monk
 
     def run_anchor(months, table, labels, sessions, **kw):
         seen["anchor"] = kw["pricing"]
-        return {}
+        return {n: {} for n in NAMES}  # every structure has an (empty) anchor curve, as run_anchor returns
 
     monkeypatch.setattr(driver.errmodel, "fit", fit)
     monkeypatch.setattr(driver.fake, "run_fake", run_fake)
@@ -499,3 +534,51 @@ def test_fake_and_anchor_are_run_on_the_pricing_seam(tmp_path, m0, pricing, monk
     summary = driver.run(sources(), "inner", tmp_path, event_ids=["E1", "E2"], prereg=OK)
     assert summary["c_status"] == "fake_not_calibrated"
     assert seen == {"fake": driver.PRICING, "anchor": driver.PRICING}
+
+
+# ---- fallback stage, tuning_band receipt, T8 and T9 -------------------------------
+
+def test_outer_without_a_tuning_band_refuses_before_any_month(tmp_path, m0):
+    src, out = sources(), tmp_path / "out"
+    _inner_summary(out)
+    _tuning_receipts(out)
+    with pytest.raises(Refusal) as caught:
+        driver._outer(src, out, _loaded(src))  # inputs hash "H", as the hand-written receipts
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "tuning_receipt_missing"
+    assert not list(tmp_path.rglob("inputs_outer.json")) and not (out / "months").exists()
+
+
+def test_smoke_inner_writes_the_band_receipt_and_the_fixed_factor_fallback_stage(tmp_path, m0, pricing, monkeypatch):
+    use_chunks(monkeypatch, [("2023Q3", chunk("E1")), ("2024Q3", chunk("E2"))])
+    out = tmp_path / "out"
+    driver.run(sources(), "inner", out, event_ids=["E1", "E2"], prereg=OK)
+    assert (out / "receipts" / "tuning_band.json").exists()
+    inner = receipts.load_receipt(out / "receipts" / "inner_summary.json")
+    assert set(inner["bands"]) == set(NAMES)
+    assert set(inner["t8"]) == {"quantiles", "buckets", "declines", "deviation_unavailable"}
+    assert set(inner["flex"]) == {"production", "A", "B", "D"}  # the fixed-factor arms; E has none, and C is not run in smoke
+    assert all(set(inner["flex"][label]["phis"]) == {"0.8", "0.9", "0.95"} for label in inner["flex"])
+
+
+def test_inner_then_outer_smoke_writes_t8_the_fallback_stage_and_the_report(tmp_path, m0, taking, monkeypatch):
+    out, ids = tmp_path / "out", ["E1", "E2", "E3", "E4"]
+    use_chunks(monkeypatch, [("2023Q3", chunk("E1")), ("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", out, event_ids=ids, prereg=OK)
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+    driver.run(sources(), "outer", out, event_ids=ids, prereg=OK)
+    outer = receipts.load_receipt(out / "receipts" / "outer_summary.json")
+    assert set(outer["t8"]) == {"quantiles", "buckets", "declines", "deviation_unavailable"}
+    assert "adoption" in outer["flex"] and "sets" in outer["flex"]
+    assert sorted(outer["flex"]["sets"]["production"]["phis"]) == ["0.8", "0.9", "0.95"]
+    report.assemble(out)
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    for needle in ("### T8-T9 width flexibility (2025 NOT blind for widths)", "T8 realised/target width quantiles",
+                   "T9 tolerance bands", "Adoption:"):
+        assert needle in text
+    # a tuning_band receipt that no longer matches the inner summary's bands refuses, and REPORT.md is not rewritten
+    monkeypatch.setattr(report.band, "frozen_bands", lambda out_dir, inputs_hash: {"changed": True})
+    with pytest.raises(Refusal) as caught:
+        report.assemble(out)
+    assert caught.value.details["reason"] == "tuning_receipt_changed"
+    assert (out / "REPORT.md").read_text(encoding="utf-8") == text
