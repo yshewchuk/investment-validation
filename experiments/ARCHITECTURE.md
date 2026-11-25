@@ -931,10 +931,9 @@ The evidence helper separately consumes native history admission and research st
 ## Magnitude search orchestration
 
 `v2_magnitude_search_run` composes public plan, journal, trial and outer APIs. Separate `seal`, `run` and read-only `collect` commands keep explicit ownership; run never migrates or seals implicitly. A distinct driver seal binds plan/ref and full driver source closure; atomic absence guards prevent blessing started library journals. Run and CLI collection
-require that exact binding, without changing the scientific report hash. The same pre-work roster check (unfinished claims, premature selections) gates serial and bounded-worker execution; each fit child stays single-threaded (including MLP), preserving request identity and the parent/child memory contract. Durable inner results reconcile first; completed outer results replay next, before any fresh fitting. Scientific scoring refusals continue only after public reconciliation verifies the
-durable refused terminal; shared/resource failures stop. Freeze precedes all selected outer evaluation, with zero fit retries and unchanged winner policy.
+require that exact binding, without changing the scientific report hash. The same pre-work roster check (unfinished claims, premature selections) gates serial and bounded-worker execution; each fit child stays single-threaded (including MLP), preserving request identity and the parent/child memory contract. The table below gives replay order and refusal continuation. Freeze precedes all selected outer evaluation, with zero fit retries and unchanged winner policy.
 
-The CLI reuses the bounded staged-input reader, strict duplicate-key decoder, typed spec/reference admission and shared canonical JSON stream. Output is limited by a configured UTF-8 byte budget; an oversized report is discarded without truncation and only the refusal document is written to stdout. Collection preserves the existing outer report identity and uses a read-only
+The CLI reuses the bounded staged-input reader, strict duplicate-key decoder, typed spec/reference admission and shared canonical JSON stream. Output is limited by a configured UTF-8 byte budget (overflow: table below). Collection preserves the existing outer report identity and uses a read-only
 SQLite connection. No persisted report framework, scheduler, ledger, final-read or release authority is introduced.
 
 Each invocation revalidates bindings/evidence; there is no cross-call admission cache. The CLI calls `seal_search_run`/`run_search`. Direct engine dependencies are contracts, data, foundation and ops.
@@ -955,6 +954,8 @@ Each invocation revalidates bindings/evidence; there is no cross-call admission 
 | CLI typed `OpsError`/`DataError`; unexpected builtin failure | Preserve the complete typed `Problem` in one refusal document, exit 2; unexpected builtin errors propagate. An opened connection closes in either case. |
 | Output exceeds the byte budget or output staging fails with an artifact, filesystem or SQLite error | Report bytes are discarded; only the refusal document reaches stdout, emitting `RESOURCE_LIMIT_EXCEEDED` or sanitized `RESOURCE_UNAVAILABLE`. Other staging errors are unexpected builtin failures and propagate. Prior journal commits remain. |
 | Stdout write or flush failure | The original stream error propagates with no retry and no second document; downstream may have received a prefix, and stdout remains caller-owned. |
+
+`size_quantile_metrics` (EXP-190 Q5a): pure Stage A metrics over caller arrays; no data access or caller. Invalid input raises `ValueError`; events lacking level width carry `level_width_burn_in` or `level_width_empty_bin`; cells skip as `cell_small`, `constant_e` or `zero_e_residual`.
 
 ### Qualified SIZE panel (opt-in)
 
