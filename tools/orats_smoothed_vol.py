@@ -209,7 +209,8 @@ def merge_stage(work: Path, out: Path, markers: dict) -> dict:
         for key in sorted(markers[table]):
             for month in markers[table][key]["months"]:
                 index.setdefault(month, []).append(key)
-        shutil.rmtree(out / table, ignore_errors=True)
+        if (out / table).exists():
+            shutil.rmtree(out / table)
         totals = Counter(rows_out=0, conflicting_keys=0)
         start = time.monotonic()
         for done, (month, entry_keys) in enumerate(sorted(index.items()), 1):

@@ -31,7 +31,7 @@ Match coverage against `option_chains` is not reported yet. Dividends: none are 
 | `--work-dir` cannot be created | The run fails and any previous manifest remains. |
 | Two runs share an output or work directory | Unsupported: there is no lock. |
 
-Memory holds one body or one month. The shared listing (`iter_cached`) skips unreadable sidecars uncounted.
+Memory holds one body or one month. The shared listing (`iter_cached`) skips unparseable sidecars uncounted; a read error fails the run.
 
 ## Mutation snapshot-worker budget
 
