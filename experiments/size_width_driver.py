@@ -90,14 +90,22 @@ def _declined(sweep):
     return out
 
 
+def _require_priced(sweep, ids, stage):
+    """A smoke scope that priced no event in any month refuses before the stage writes anything after its sweep loop."""
+    _log(f"{stage} priced_events={sweep.priced}")
+    if ids is not None and sweep.priced == 0:
+        raise Refusal(_CONFLICT, "the smoke scope priced no event in any month", {"reason": "smoke_priced_nothing", "stage": stage})
+
+
 def _load(src, stage, ids, receipt):
     """The loaded run: the M0 table on the stage's plan with its facts and labels, and the inputs body (stage-independent but for the table and plan bindings)."""
-    roster, bound, _production = base._prepare(src, stage, ids)
+    # The scope limits the events priced, never the pool history: history is read and kept whole, and only the plan is scoped.
+    roster, bound, _production = base._prepare(src, stage, None)
     m0 = next((m["model_id"] for m in roster["models"] if "M0" in m["roles"]), None)
     entry = bound["tables"].get(m0)
     if entry is None or entry["status"] != "ready":
         raise Refusal(_CONFLICT, "M0 inputs are missing or failed", {"reason": "m0_inputs_missing"})
-    ready = {"M0": {**entry, "table": base._restrict(entry["table"], ids)}}
+    ready = {"M0": entry}
     full = src.plan_frame
     if full[[c for c in ("event_date", "entry_date", "exit_date") if c in full.columns]].isna().to_numpy().any():
         raise fail("INVALID_EXPERIMENT_SPEC", "plan dates must not be null", details={"reason": "plan_dates_null"})
@@ -110,8 +118,8 @@ def _load(src, stage, ids, receipt):
     wanted = (stage_ids | {str(e) for e in inner_window["event_id"]}) & set(ready["M0"]["table"].index.astype(str))
     facts_all = base._load_facts(src, wanted)
     ready = base._drop_facts_missing(src, ready, facts_all)
-    labels = readers.read_labels(src.fetch, src.admitted, start=base.INNER[0], end=base.OUTER[0], event_ids=ids)
-    unlabelled = base._unlabelled(inner_window, labels)
+    labels = readers.read_labels(src.fetch, src.admitted, start=base.INNER[0], end=base.OUTER[0], event_ids=None)
+    unlabelled = base._unlabelled(base._plan_window(full, base.INNER, None), labels)  # the full-run rule for the history
     _log(f"facts_missing={len(base._facts_missing(facts_all))} unlabelled={len(unlabelled)}")
     ready = base._drop_ids(ready, unlabelled)
     table = ready["M0"]["table"]
@@ -139,12 +147,13 @@ def _inner(src, out, loaded):
     """The inner stage. It materialises every inner quarter chunk (``months``), which the fake and the anchor re-use (W3's contract)."""
     ids, plan, table, labels = loaded["ids"], loaded["plan"], loaded["table"], loaded["labels"]
     sessions, inputs_hash = loaded["sessions"], loaded["inputs_hash"]
-    months = list(_months(src, plan, table, loaded["facts_all"], loaded["exits"], base.INNER_EMIT_FROM))
+    months = list(_months(src, plan, base._restrict(table, ids), loaded["facts_all"], loaded["exits"], base.INNER_EMIT_FROM))
     _log(f"materialised months={len(months)}")
     sweep, started, total = deviation.DeviationSweep(ladder=True, pricing=PRICING), time.monotonic(), _total(plan)
     for done, (chunk, events, output) in enumerate(months, start=1):
         sweep.add_month(chunk, events, _pool(table, labels, _period(events).start_time), output=output, sessions=sessions)
         _progress("inner", done, total, started)
+    _require_priced(sweep, ids, "inner")
     fit_rows = table[pd.to_datetime(table["event_date"]) < pd.Timestamp(base.OUTER[0])]
     printed = base._printed(labels, base.OUTER[0])
     try:
@@ -195,7 +204,7 @@ def _outer(src, out, loaded):
     arms, by, inner = _preflight(out, loaded)
     sweep, labels, table, sessions = deviation.DeviationSweep(ladder=True, pricing=PRICING), loaded["labels"], loaded["table"], loaded["sessions"]
     total, started, count, fresh_labels = _total(plan), time.monotonic(), 0, []
-    for count, (chunk, events, output) in enumerate(_months(src, plan, table, loaded["facts_all"], loaded["exits"], pd.Timestamp(base.OUTER[0])), start=1):
+    for count, (chunk, events, output) in enumerate(_months(src, plan, base._restrict(table, ids), loaded["facts_all"], loaded["exits"], pd.Timestamp(base.OUTER[0])), start=1):
         period = _period(events)
         fresh = sweep.add_month(chunk, events, _pool(table, labels, period.start_time), output=output, sessions=sessions)
         _progress("outer", count, total, started)
@@ -203,9 +212,10 @@ def _outer(src, out, loaded):
             taken = fresh.assign(model_id="M0", book="short_vol", arm_or_rule=fresh["arm"], status="taken", reason=None)
             dec = sweep.declined_rows().assign(model_id="M0", book="short_vol", arm_or_rule=lambda f: f["arm"])
             decisions.freeze_month(out, period, [taken, dec])
-            got = readers.read_labels(src.fetch, src.admitted, start=period.start_time, end=(period + 1).start_time, event_ids=ids)
+            got = readers.read_labels(src.fetch, src.admitted, start=period.start_time, end=(period + 1).start_time, event_ids=None)
             fresh_labels.append(got)
             labels = pd.concat([labels, got])
+    _require_priced(sweep, ids, "outer")
     results = tuning.run_outer(sweep, out, arms, inputs_hash)
     by = {"production": {n: 1.0 for n in NAMES}, **by}
     stats = {label: {"2025": _stats(sweep, by[label], WINDOWS["2025"])} for label in results}
@@ -215,7 +225,7 @@ def _outer(src, out, loaded):
                                   {l: {"2025": stats[l]["2025"]["x"]} for l in merged}, tuned_e))
     # The fallback pass runs after the 2025 recommendation; phi comes from the inner summary.
     months = ((chunk, events, output, _pool(table, labels, _period(events).start_time))
-              for chunk, events, output in _months(src, plan, table, loaded["facts_all"], loaded["exits"], pd.Timestamp(base.OUTER[0])))
+              for chunk, events, output in _months(src, plan, base._restrict(table, ids), loaded["facts_all"], loaded["exits"], pd.Timestamp(base.OUTER[0])))
     flexed = flex.outer(by, inner["flex"], rec, months, total, sweep, out, inputs_hash, sessions, PRICING, _stats)
     body = {"stage": "outer", "inputs_hash": inputs_hash, "scope": base._scope(ids), "smoke": ids is not None, "arms": arms,
             "results": {label: {"2025": results[label]} for label in results}, "stats": stats, "declined": _declined(sweep),
