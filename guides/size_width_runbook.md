@@ -60,8 +60,12 @@ python3 tools/bounded_run.py --heavy --cores 8 -- python3 experiments/EXP-189_sh
 
 ## Report
 
-`--stage report` reads no sources (`--sources` is required but never imported; the `--expected` file is still read and
-its four keys checked) and changes no receipt. It needs the inner and
+`--stage report` reads no sources (`--sources` is required but never imported) and changes no receipt. It first
+checks that the receipts belong to one driver run: the two summaries and the two inputs receipts agree on stage,
+`inputs_hash` and scope (the summaries also on the smoke flag), the outer arms match the inner `c_status`, both inputs
+receipts carry one identity, and every arm's tuning receipt passes `size_width_tuning.frozen`. A mismatch refuses
+`tuning_receipt_changed`; an `--expected` value that differs from the receipted identity refuses `expected_mismatch`;
+nothing is written. It needs the inner and
 outer receipts and writes `<out-dir>/REPORT.md` (T1-T7, 2025 tables titled "2025 NOT blind for widths") and
 `<out-dir>/proposed_rule.json` (the proposed board rule: divisors `divisor / k`, or `no_change`, or the E rule). In an
 A-D rule, `flatness_se` is always T3's flatness at `k = 1` on the primary per-structure curve (arm C's when C is

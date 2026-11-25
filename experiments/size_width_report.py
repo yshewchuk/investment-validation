@@ -8,9 +8,12 @@ from experiments import size_width_fake as fake
 from experiments import size_width_success as success
 from experiments import size_width_tuning as tuning
 from experiments.size_pnl_report import md_table
-from experiments.size_pnl_shortvol import NAMES
+from experiments.size_pnl_shortvol import NAMES, Refusal
 from experiments.size_width_sizing import GRID
 
+_CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
+IDENTITY_KEYS = ("plan_id", "registration_id", "seal_id", "panel_id")
+ARMS = ("A", "B", "C", "D", "E")
 PERIODS = ("2025", "2023H2", "2024")
 TUNED = ("A", "B", "C", "D")
 FLAT_KS = (0.75, 1.0, 1.25)
@@ -170,14 +173,41 @@ def _t6(labels, merged):
             + md_table(["structure", *labels], rows))
 
 
-def assemble(out_dir, *, w5_tables=None):
-    """Read the receipts under ``out_dir`` (a missing or tampered one refuses), write REPORT.md and proposed_rule.json,
-    and return {"report": path, "recommendation": arm or "no_change"}."""
-    out = Path(out_dir)
+def _conflict(what, reason="tuning_receipt_changed"):
+    """The refusal for receipts that do not belong to one driver run; ``what`` names the mismatch."""
+    return Refusal(_CONFLICT, f"report receipts do not belong to one run: {what}", {"reason": reason})
+
+
+def _bound(out, expected):
+    """(inner, outer, bodies): the summaries and inputs receipts checked to belong to one driver run, every arm's tuning receipt
+    validated and bound (tuning.frozen), and the bodies by arm. Any mismatch refuses before anything is built or written."""
     inner, outer = _load(out, "inner_summary.json"), _load(out, "outer_summary.json")
-    bodies = {arm: _load(out, f"tuning_{arm}.json")["body"] for arm in ("A", "B", "D", "E")}
-    if inner["c_status"] == "ok":
-        bodies["C"] = _load(out, "tuning_C.json")["body"]
+    inputs_inner, inputs_outer = _load(out, "inputs_inner.json"), _load(out, "inputs_outer.json")
+    if inner["stage"] != "inner": raise _conflict("inner_summary.json is not the inner stage")
+    if outer["stage"] != "outer": raise _conflict("outer_summary.json is not the outer stage")
+    if any(r["inputs_hash"] != inner["inputs_hash"] for r in (outer, inputs_inner, inputs_outer)): raise _conflict("inputs_hash differs")
+    if any(r["scope"] != inner["scope"] for r in (outer, inputs_inner, inputs_outer)): raise _conflict("scope differs")
+    if inner["smoke"] != outer["smoke"]: raise _conflict("smoke flag differs between the inner and outer summaries")
+    arms = [a for a in ARMS if a != "C" or inner["c_status"] == "ok"]
+    if outer["arms"] != arms: raise _conflict(f"outer arms {outer['arms']} are not {arms} for c_status {inner['c_status']}")
+    if inputs_outer["identity"] != inputs_inner["identity"]: raise _conflict("inputs_outer identity differs from inputs_inner")
+    bodies = {}
+    for arm in outer["arms"]:
+        tuning.frozen(out, arm, inner["inputs_hash"])
+        bodies[arm] = _load(out, f"tuning_{arm}.json")["body"]
+    if expected is not None:
+        for key in IDENTITY_KEYS:
+            if inputs_inner["identity"].get(key) != expected.get(key):
+                raise _conflict(f"--expected {key} differs from the identity bound in the inputs receipts", "expected_mismatch")
+    return inner, outer, bodies
+
+
+def assemble(out_dir, *, expected=None, w5_tables=None):
+    """Read the receipts under ``out_dir`` (a missing, tampered, or mismatched one refuses before anything is written; ``expected``
+    is the identity dict compared with the inputs receipts), write REPORT.md and proposed_rule.json, and return
+    {"report": path, "recommendation": arm or "no_change"}."""
+    out = Path(out_dir)
+    inner, outer, bodies = _bound(out, expected)
     labels = [label for label in ("production", "A", "B", "C", "D", "E") if label == "production" or label in bodies]
     merged = {label: {**inner["results"][label], **outer["results"][label]} for label in labels}
     stats = {label: {**inner["stats"][label], **outer["stats"][label]} for label in labels}

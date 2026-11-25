@@ -26,7 +26,7 @@ _INVALID, _CONFLICT, _INPUT_LIMIT = "INVALID_EXPERIMENT_SPEC", "EXPERIMENT_IDENT
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--stage", required=True, choices=("inner", "outer", "report"), help="inner and outer need BOUNDED_RUN_NESTED=1 (tools/bounded_run.py --heavy); report reads no sources, and --sources and --expected are still required only to keep one argument surface")
+    parser.add_argument("--stage", required=True, choices=("inner", "outer", "report"), help="inner and outer need BOUNDED_RUN_NESTED=1 (tools/bounded_run.py --heavy); report reads no sources, and --expected is compared with the identity bound in the inputs receipts")
     parser.add_argument("--event-ids", default=None, help="optional smoke set: a JSON array of event id strings (validated by the driver); not supported by report")
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--expected", required=True, help="JSON with plan_id, registration_id, seal_id, panel_id")
@@ -72,7 +72,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.stage == "report" and args.event_ids is not None: raise fail(_INVALID, "--event-ids is not supported by the report stage", details={"reason": "event_ids_not_supported"})
             if args.stage == "report":
                 from experiments import size_width_report  # after the gates; no sources are read
-                summary = size_width_report.assemble(args.out_dir)
+                summary = size_width_report.assemble(args.out_dir, expected=args.expected_identities)
             else:
                 from experiments import size_pnl_driver, size_width_driver  # after the gates, so a missing PLANNED row refuses first
                 module_name, _, func = args.sources.partition(":")

@@ -5,12 +5,15 @@ import pytest
 
 from experiments import size_pnl_receipts as receipts
 from experiments import size_width_report as report
+from experiments import size_width_tuning as tuning
 from experiments.size_pnl_shortvol import NAMES, Refusal
 from experiments.size_width_sizing import GRID
 from experiments.size_width_success import PREFERENCE
 from experiments.size_width_tuning import TWIN
 
 PERIODS = ("2025", "2023H2", "2024")
+CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
+IDENTITY = {"plan_id": "PLAN", "registration_id": "REG", "seal_id": "SEAL", "panel_id": "P"}
 HALVES = ("2023H2", "2024")
 BASE, PASS, FAIL = 0.01, 0.02, 0.005
 FLAT_RETS = [0.01, 0.02, 0.03, 0.04, 0.05, 0.045, 0.04, 0.03, 0.02, 0.01]
@@ -46,13 +49,20 @@ def _unit(members, k, rets):
     return {"k": k, "flags": [], "members": list(members), "scores": _scores(rets)}
 
 
-def _write(out, *, passing=(), c_status="ok", smoke=False, model=True, b_rets=None, c_rets=None, e_peak=None):
+FAKE = {"calibration": {"ok": True}, "N": tuning.FAKE_DRAWS, "sim_draws": tuning.FAKE_SIM_DRAWS, "seed_tag": tuning.FAKE_SEED_TAG,
+        "model": MODEL}
+
+
+def _write(out, *, passing=(), c_status="ok", smoke=False, model=True, b_rets=None, c_rets=None, e_peak=None,
+           outer_over=None, inputs_over=None, tuning_over=None):
     """A full synthetic receipt set under ``out/receipts``; arms in ``passing`` beat production on every test.
-    ``c_rets`` gives C's score curves their own returns (default: B's)."""
+    ``c_rets`` gives C's score curves their own returns (default: B's). ``outer_over`` and ``inputs_over`` (inputs_outer) are merged
+    into those bodies, and ``tuning_over`` maps an arm to fields merged into its envelope, for the identity-conflict tests."""
     rec = out / "receipts"
     b_rets = b_rets or [BASE] * len(GRID)
     c_rets = c_rets or b_rets
     labels = ["production", "A", "B", *(["C"] if c_status == "ok" else []), "D", "E"]
+    arms = [a for a in ("A", "B", "C", "D", "E") if a != "C" or c_status == "ok"]
     inner_r, inner_s, outer_r, outer_s = {}, {}, {}, {}
     for label in labels:
         ret, x = _values(label, passing)
@@ -70,23 +80,28 @@ def _write(out, *, passing=(), c_status="ok", smoke=False, model=True, b_rets=No
         "model": MODEL if model else None, "calibration": cal, "anchor": ANCHOR,
         "results": inner_r, "stats": inner_s, "declined": DECLINED})
     receipts.write_receipt(rec / "outer_summary.json", {
-        "stage": "outer", "inputs_hash": "H", "scope": None, "smoke": smoke, "arms": [],
-        "results": outer_r, "stats": outer_s, "declined": DECLINED})
+        "stage": "outer", "inputs_hash": "H", "scope": None, "smoke": smoke, "arms": arms,
+        "results": outer_r, "stats": outer_s, "declined": DECLINED, **(outer_over or {})})
+    receipts.write_receipt(rec / "inputs_inner.json", {"stage": "inputs", "inputs_hash": "H", "scope": None, "identity": IDENTITY})
+    receipts.write_receipt(rec / "inputs_outer.json", {"stage": "inputs", "inputs_hash": "H", "scope": None, "identity": IDENTITY,
+                                                       **(inputs_over or {})})
 
-    def tuning(arm, body):
-        receipts.write_receipt(rec / f"tuning_{arm}.json", {
-            "experiment": "EXP-189", "arm": arm, "inputs_hash": "H", "window": "2023H2-2024", "body": body})
+    def tune_receipt(arm, body):
+        envelope = {"experiment": "EXP-189", "arm": arm, "inputs_hash": "H", "window": "2023H2-2024", "body": body}
+        if arm == "C":
+            envelope["fake"] = FAKE
+        receipts.write_receipt(rec / f"tuning_{arm}.json", {**envelope, **(tuning_over or {}).get(arm, {})})
 
     rest = tuple(n for n in NAMES if n not in TWIN)
     curve = {str(k): (0.02 if k == e_peak else BASE) for k in GRID}
     curve["E"] = BASE
-    tuning("A", {"all": _unit(NAMES, 0.75, b_rets)})
-    tuning("B", {n: _unit((n,), 1.0, b_rets) for n in NAMES})
-    tuning("D", {"T": _unit(TWIN, 1.25, b_rets), "C": _unit(rest, 1.0, b_rets)})
-    tuning("E", {n: {"k_share": {"0.75": 0.5, "1.25": 0.5}, "modal_share": 0.5, "same_k": False,
-                     "candidates": 400, "no_feasible_k": 3, "curve": curve} for n in NAMES})
+    tune_receipt("A", {"all": _unit(NAMES, 0.75, b_rets)})
+    tune_receipt("B", {n: _unit((n,), 1.0, b_rets) for n in NAMES})
+    tune_receipt("D", {"T": _unit(TWIN, 1.25, b_rets), "C": _unit(rest, 1.0, b_rets)})
+    tune_receipt("E", {n: {"k_share": {"0.75": 0.5, "1.25": 0.5}, "modal_share": 0.5, "same_k": False,
+                           "candidates": 400, "no_feasible_k": 3, "curve": curve} for n in NAMES})
     if c_status == "ok":
-        tuning("C", {n: _unit((n,), 1.5, c_rets) for n in NAMES})
+        tune_receipt("C", {n: _unit((n,), 1.5, c_rets) for n in NAMES})
 
 
 def _text(out):
@@ -225,3 +240,57 @@ def test_missing_tuning_b_refuses(tmp_path):
     with pytest.raises(Refusal) as caught:
         report.assemble(tmp_path)
     assert caught.value.details["reason"] == "tuning_receipt_missing"
+
+
+def _refused(out, reason, expected=None):
+    """assemble refuses as an identity conflict under ``reason`` and writes neither REPORT.md nor proposed_rule.json."""
+    with pytest.raises(Refusal) as caught:
+        report.assemble(out, expected=expected)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == reason
+    assert not (out / "REPORT.md").exists() and not (out / "proposed_rule.json").exists()
+
+
+def test_outer_summary_with_another_inputs_hash_refuses(tmp_path):
+    _write(tmp_path, outer_over={"inputs_hash": "OTHER"})
+    _refused(tmp_path, "tuning_receipt_changed")
+
+
+def test_outer_summary_with_another_scope_refuses(tmp_path):
+    _write(tmp_path, outer_over={"scope": "OTHER"})
+    _refused(tmp_path, "tuning_receipt_changed")
+
+
+def test_smoke_flag_differing_between_inner_and_outer_refuses(tmp_path):
+    _write(tmp_path, outer_over={"smoke": True})
+    _refused(tmp_path, "tuning_receipt_changed")
+
+
+def test_outer_arms_differing_from_c_status_refuse(tmp_path):
+    _write(tmp_path, outer_over={"arms": ["A", "B", "D", "E"]})  # c_status is ok, so C must be listed
+    _refused(tmp_path, "tuning_receipt_changed")
+
+
+def test_tuning_receipt_bound_to_another_inputs_hash_refuses(tmp_path):
+    _write(tmp_path, tuning_over={"D": {"inputs_hash": "OTHER"}})
+    _refused(tmp_path, "tuning_receipt_changed")
+
+
+def test_tuning_receipt_naming_another_arm_refuses(tmp_path):
+    _write(tmp_path, tuning_over={"B": {"arm": "A"}})
+    _refused(tmp_path, "tuning_receipt_changed")
+
+
+def test_inputs_outer_identity_differing_refuses(tmp_path):
+    _write(tmp_path, inputs_over={"identity": {**IDENTITY, "seal_id": "OTHER"}})
+    _refused(tmp_path, "tuning_receipt_changed")
+
+
+def test_expected_with_another_plan_id_refuses(tmp_path):
+    _write(tmp_path)
+    _refused(tmp_path, "expected_mismatch", expected={**IDENTITY, "plan_id": "OTHER"})
+
+
+def test_matching_expected_passes(tmp_path):
+    _write(tmp_path, passing=("A",))
+    assert report.assemble(tmp_path, expected=dict(IDENTITY))["recommendation"] == "A"

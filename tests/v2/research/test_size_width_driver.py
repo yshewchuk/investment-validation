@@ -332,7 +332,7 @@ def test_the_report_reads_the_receipts_the_driver_writes(tmp_path, m0, taking, m
     driver.run(sources(), "inner", tmp_path, event_ids=ids, prereg=OK)
     use_chunks(monkeypatch, [("2023Q3", chunk("E1")), ("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
     driver.run(sources(), "outer", tmp_path, event_ids=ids, prereg=OK)
-    recommendation = report.assemble(tmp_path)["recommendation"]
+    recommendation = report.assemble(tmp_path, expected=sources().expected)["recommendation"]
     assert isinstance(recommendation, str)
     text = (tmp_path / "REPORT.md").read_text(encoding="utf-8")
     for heading in ("### T2 chosen factors", "### T3 curves per structure", "### T5 production versus arms",

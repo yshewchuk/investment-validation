@@ -163,7 +163,7 @@ def test_report_assembles_without_reading_sources_or_the_bounded_env(tmp_path, m
         return pnl.sources()
 
     def fake_assemble(out_dir, **kwargs):
-        seen.append(out_dir)
+        seen.append((out_dir, kwargs))
         return {"stage": "report"}
 
     monkeypatch.setattr(size_width_prereg, "require_preregistration", OK)
@@ -172,5 +172,5 @@ def test_report_assembles_without_reading_sources_or_the_bounded_env(tmp_path, m
     monkeypatch.setattr(size_width_report, "assemble", fake_assemble)
     assert run_py.main(_argv(tmp_path, sources=FAKE, stage="report")) == 0
     assert json.loads(capsys.readouterr().out) == {"stage": "report"}
-    assert seen == [str(tmp_path / "out")]
+    assert seen == [(str(tmp_path / "out"), {"expected": pnl.EXPECTED})]  # the --expected identities reach assemble
     assert calls == []
