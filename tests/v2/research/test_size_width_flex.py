@@ -244,13 +244,14 @@ class OracleStub:
                              "secured_per_contract": pd.Series([5000.0] * len(mine), dtype=float)})
 
 
-def _assert_t9(rows, n):
-    """One NAME row in tier ge_10B: n declined events, all recovered at rho 1.05; the n taken base trades are the T events."""
+def _assert_t9(rows, n, rho, lo, hi):
+    """One NAME row in tier ge_10B: n declined events, all recovered at the one rung ``rho`` of the phi's band (lo, hi); the n taken base trades are the T events."""
     assert len(rows) == 1
     row = rows[0]
     assert (row["structure"], row["tier"]) == (NAME, "ge_10B")
+    assert (row["lo"], row["hi"]) == (pytest.approx(lo), pytest.approx(hi))
     assert (row["declined"], row["recovered"], row["fallback_infeasible"]) == (n, n, 0)
-    assert row["share"] == pytest.approx(1.0) and row["rho"] == {"1.05": n}
+    assert row["share"] == pytest.approx(1.0) and row["rho"] == {rho: n}
     assert row["recovered_trades"] == n and row["recovered_ret"] == pytest.approx(0.38) and row["recovered_pnl"] == pytest.approx(38.0)
     assert row["taken_trades"] == n and row["taken_ret"] == pytest.approx(0.30) and row["taken_pnl"] == pytest.approx(30.0)
 
@@ -260,7 +261,11 @@ def test_fallback_inner_and_outer_scored_values_match_the_hand_computation(tmp_p
     # Account 200,000; headroom 0.66 * 200,000 = 132,000; want 0.25 * 132,000 / 5,000 = 6.6 -> 6 contracts (still 6.6 after T's gain).
     # T gain = 6 * 100 * 0.30 = 180; R gain = 6 * 100 * 0.38 = 228.
     # Per window: base total_return = 180 / 200,000 = 0.0009; fallback = 408 / 200,000 = 0.00204.
-    # First rho: rungs are multiples of 0.05 without 1.0, nearest by |log rho|, so 1.05 comes before 0.95 and scores first.
+    # First rho per phi: rungs are multiples of 0.05 inside the phi's band [lo, hi] without 1.0, nearest by |log rho| first.
+    #   phi 0.8  band [0.5, 3.0]: 1.05 is nearer than 0.95, so 1.05 scores first.
+    #   phi 0.9  band [0.5, 1.0]: rungs below 1 only, so 0.95 is first.
+    #   phi 0.95 band [1.1, 3.0]: 1.1 is the nearest rung in band, so 1.1 is first.
+    # The stub declines R only at pred_move 5.0 and every rung moves pred_move, so each first rung recovers R.
     # Breakeven alpha of mean return per trade: base is T only, 0.80 - a -> 0.80; fallback mean of T and R is 0.84 - a -> 0.84.
     # adopt: 0.84 <= 0.80 + 0.05, so alpha_ok.
     monkeypatch.setattr(size_width_band, "MIN_RECOVERED", 1)
@@ -272,9 +277,11 @@ def test_fallback_inner_and_outer_scored_values_match_the_hand_computation(tmp_p
                pd.DataFrame({"event_id": [eid], "event_date": [pd.Timestamp(a)], "pred_move": [5.0], "mcap_usd": [20e9]}),
                True, None) for eid, (a, _b) in spans.items()]
     none = {"lo": None, "hi": None, "peak_k": None, "flags": ["no_positive_peak"]}
-    wide = {"lo": 0.5, "hi": 3.0, "peak_k": 1.0, "flags": []}
+    band = {"0.8": {"lo": 0.5, "hi": 3.0, "peak_k": 1.0, "flags": []},
+            "0.9": {"lo": 0.5, "hi": 1.0, "peak_k": 1.0, "flags": []},
+            "0.95": {"lo": 1.1, "hi": 3.0, "peak_k": 1.5, "flags": []}}
     body = {n: {"primary": "B", "curves": {"B": {str(p): none for p in PHIS}}} for n in NAMES}
-    body[NAME] = {"primary": "B", "curves": {"B": {str(p): wide for p in PHIS}}}
+    body[NAME] = {"primary": "B", "curves": {"B": band}}
     write_bands(tmp_path, body, "H")
     stub, factors = OracleStub(), {n: 1.0 for n in NAMES}
     base = Sweep(ladder=True, pricing=stub)
@@ -283,6 +290,8 @@ def test_fallback_inner_and_outer_scored_values_match_the_hand_computation(tmp_p
     inner = flex.inner({"production": factors}, iter(months[:4]), 4, base, tmp_path, "H", sessions, stub)
     got = flex.outer({"production": factors}, inner, None, iter(months[4:]), 2, base, tmp_path, "H", sessions, stub, driver._stats)
 
+    # phi -> (first rung that recovers R, band lo, band hi)
+    per_phi = {"0.8": ("1.05", 0.5, 3.0), "0.9": ("0.95", 0.5, 1.0), "0.95": ("1.1", 1.1, 3.0)}
     for p in ("0.8", "0.9", "0.95"):
         cell = inner["production"]["phis"][p]
         assert cell["recovery"]["recovered"] == 2
@@ -290,7 +299,7 @@ def test_fallback_inner_and_outer_scored_values_match_the_hand_computation(tmp_p
         for w in ("2023H2", "2024"):
             assert cell["accounts"][w]["fallback"] == pytest.approx(0.00204)
             assert cell["accounts"][w]["base"] == pytest.approx(0.0009)
-        _assert_t9(cell["t9"], 2)
+        _assert_t9(cell["t9"], 2, *per_phi[p])
     assert inner["production"]["choice"] == {"phi": 0.8, "flags": []}
 
     for p in ("0.8", "0.9", "0.95"):
@@ -299,7 +308,7 @@ def test_fallback_inner_and_outer_scored_values_match_the_hand_computation(tmp_p
             assert cell["accounts"][w]["fallback"] == pytest.approx(0.00204)
             assert cell["accounts"][w]["base"] == pytest.approx(0.0009)
         assert cell["alpha"]["fallback"] == pytest.approx(0.84) and cell["alpha"]["base"] == pytest.approx(0.80)
-        _assert_t9(cell["t9"], 1)
+        _assert_t9(cell["t9"], 1, *per_phi[p])
     adoption = got["adoption"]
     assert adoption["adopt"] is True and adoption["phi"] == 0.8
     assert adoption["beats"] is True and adoption["alpha_ok"] is True
