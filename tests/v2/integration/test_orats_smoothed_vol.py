@@ -44,6 +44,10 @@ def _entry(raw, endpoint, key, payload, fetched_at, body=None):
     (d / f"{key}.meta.json").write_text(json.dumps(meta), encoding="utf-8")
 
 
+def _body(rows):
+    return gzip.compress(json.dumps(_payload(rows)).encode("utf-8"), compresslevel=0, mtime=0)
+
+
 def _chains(chains, year, rows):
     d = chains / f"year={year}"
     d.mkdir(parents=True, exist_ok=True)
@@ -101,9 +105,15 @@ def test_end_to_end(tmp_path):
     q = pd.read_parquet(out / "quotes" / "year=2025" / "month=01.parquet").set_index("strike")
     assert q.loc[100.0, "smvVol"] == 0.25        # later fetched_at wins, not key order
     assert pd.isna(q.loc[105.0, "smvVol"])       # 3.4e38 sentinel -> NaN
+    row = q.loc[100.0]
+    assert (row["smvVol"], row["callMidIv"], row["putMidIv"], row["stockPrice"]) == (0.25, 0.21, 0.22, 500.0)
 
     r = pd.read_parquet(out / "rates" / "year=2025" / "month=01.parquet")
     assert list(r.columns)[:2] == ["ticker", "obs_date"]
+    assert len(r) == 2
+    assert r["iRate5wk"].tolist() == [0.04, 0.04]
+    assert r["iRateLt"].tolist() == [0.045, 0.045]
+    assert r["obs_date"].dt.strftime("%Y-%m-%d").tolist() == ["2025-01-02", "2025-01-03"]
     assert r["iRate5wk"].notna().all()
 
     cov = json.loads((out / "coverage.json").read_text(encoding="utf-8"))
@@ -190,6 +200,67 @@ def test_guard_refuses_protected_out(tmp_path, tmp_path_factory, where):
     raw, chains = _world(tmp_path / "base")
     out = {"inside_curated": chains / "sub", "equals_raw": raw, "ancestor_of_curated": tmp_path}[where]
     before = _tree(tmp_path)
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit, match="overlaps"):
         tool.main(_args(raw, chains, out, tmp_path_factory.mktemp("work")))
     assert _tree(tmp_path) == before
+
+
+def test_equal_fetched_at_ties(tmp_path):
+    raw, chains = tmp_path / "raw", tmp_path / "curated" / "option_chains"
+    t = "2025-01-04T00:00:00+00:00"
+    # "a" body: strike 100 (0.1), then strike 105 twice (0.4 then 0.5)
+    _entry(raw, "hist/strikes", "a" * 64, _payload([
+        _quote("SPY", 100.0, 0.1), _quote("SPY", 105.0, 0.4), _quote("SPY", 105.0, 0.5)]), t)
+    # "b" body: strike 100 twice (0.2 then 0.3); greater cache key wins the tie
+    _entry(raw, "hist/strikes", "b" * 64, _payload([
+        _quote("SPY", 100.0, 0.2), _quote("SPY", 100.0, 0.3)]), t)
+    _entry(raw, "hist/cores", K_RATES, _payload([
+        {"ticker": "SPY", "tradeDate": "2025-01-02", "iRate5wk": 0.04, "iRateLt": 0.045}]), t)
+    _chains(chains, 2025, [{"ticker": "SPY", "obs_date": "2025-01-02", "expiry": "2025-02-21",
+                            "strike": 100.0, "chain_kind": "american"}])
+    out = tmp_path / "out"
+    assert tool.main(_args(raw, chains, out, tmp_path / "work")) == 0
+    q = pd.read_parquet(out / "quotes" / "year=2025" / "month=01.parquet").set_index("strike")
+    assert q.loc[100.0, "smvVol"] == 0.3
+    assert q.loc[105.0, "smvVol"] == 0.5
+
+
+def test_changed_body_same_size_is_reparsed(tmp_path, monkeypatch):
+    raw, chains = _world(tmp_path)
+    out, work = tmp_path / "out", tmp_path / "work"
+    args = _args(raw, chains, out, work)
+    early = _body([_quote("SPY", 100.0, 0.25)])
+    late = _body([_quote("SPY", 100.0, 0.35)])
+    assert len(early) == len(late)
+    _entry(raw, "hist/strikes", K_LATE_SMALL, None, "2025-01-05T00:00:00+00:00", body=early)
+
+    def crash(*_a, **_k):
+        raise RuntimeError("simulated merge crash")
+
+    monkeypatch.setattr(tool, "merge_stage", crash)
+    with pytest.raises(RuntimeError):
+        tool.main(args)
+    _entry(raw, "hist/strikes", K_LATE_SMALL, None, "2025-01-05T00:00:00+00:00", body=late)
+    monkeypatch.undo()
+    assert tool.main(args) == 0
+    q = pd.read_parquet(out / "quotes" / "year=2025" / "month=01.parquet").set_index("strike")
+    assert q.loc[100.0, "smvVol"] == 0.35
+
+
+def test_body_size_cap_counts_unreadable(tmp_path, monkeypatch):
+    raw, chains = _world(tmp_path)
+    out = tmp_path / "out"
+    monkeypatch.setattr(tool, "MAX_BODY_BYTES", 10)
+    assert tool.main(_args(raw, chains, out, tmp_path / "work")) == 1
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["tables"]["quotes"]["unreadable"] == 3
+    assert manifest["tables"]["rates"]["unreadable"] == 1
+
+
+def test_meta_size_cap_refuses_before_writing(tmp_path, monkeypatch):
+    raw, chains = _world(tmp_path)
+    out = tmp_path / "out"
+    monkeypatch.setattr(tool, "MAX_META_BYTES", 10)
+    with pytest.raises(ValueError):
+        tool.main(_args(raw, chains, out, tmp_path / "work"))
+    assert not out.exists()

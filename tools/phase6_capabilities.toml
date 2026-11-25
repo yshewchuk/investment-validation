@@ -857,6 +857,10 @@ ids = ["cli:tools/bench_chain_index.py"]
 reason = "Synthetic-only legacy-vs-twin price_structure benchmark (development tooling, not a consumer; no data read)."
 
 [[excluded]]
+ids = ["cli:tools/orats_smoothed_vol.py"]
+reason = "Operator re-ingest of ORATS smoothed vol and rates from the raw cache into experiment-side parquet (research tooling, not a board/nightly consumer)."
+
+[[excluded]]
 ids = ["cli:tools/land.py"]
 reason = "Supervisor merge/gate/push wrapper (hygiene + bounded tests before pushing a branch to main); development tooling, not a board/nightly consumer."
 

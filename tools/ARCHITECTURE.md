@@ -6,7 +6,7 @@ Standalone operator tools. `bounded_run.py` is the wrapper every heavy job runs 
 
 ## `orats_smoothed_vol.py`: experiment-side smoothed vol
 
-`data/curated/option_chains` has no ORATS smoothed vol (the production normalizer drops `smvVol`). This operator tool re-reads the raw ORATS cache into separate tables for fair-value fill experiments. No production path or `size_panel.py` source-closure file imports it; it writes no ledger row and never writes the raw, curated or feature stores. An output or work directory that equals, contains or sits inside one of those, `--raw-root` or `--curated-chains` is refused.
+The production chain normalizer drops ORATS `smvVol`; this operator tool re-reads the raw cache into separate tables for fair-value fill experiments. No production path or `size_panel.py` closure file imports it; it writes no ledger row. Protected directories are the raw, curated and feature stores, `--raw-root` and `--curated-chains`.
 
 Output root: `--out`, default `data/experiment/orats_smoothed_vol/`. Each table is split into `year=YYYY/month=MM.parquet`, sorted by its unique key.
 
@@ -17,19 +17,22 @@ Output root: `--out`, default `data/experiment/orats_smoothed_vol/`. Each table 
 | `coverage.json` | Per year (2017–2026) and `chain_kind`, plus `all`: curated rows, rows with a quote key, with `smvVol > 0` (`smv_share`), and with a rate. |
 | `manifest.json` | Per-table entry, skip and row counts, `duplicates_dropped`, and `conflicting_keys` (duplicated keys whose values differ). Written last. |
 
-Dividends: this tool ingests none, and no repository reader of a cores dividend field exists. Coverage reports every cached `hist/cores` field whose name contains `div`, with its non-null row count, or says none was present. Presence does not establish a field's meaning.
+Dividends: none are ingested. `dividend_fields` in `coverage.json` counts non-null rows for each parsed `hist/cores` field whose name contains `div` (empty: none present); presence does not establish meaning.
 
 | Condition | Outcome |
 |---|---|
 | Several rows share a key | The latest `fetched_at` wins (a missing or unparseable stamp sorts oldest), then the greatest cache key, then the later body row. The winner is kept whole, even where its values are NaN. |
 | A payload has no non-null `smvVol` (quotes) or no non-null rate (rates) | Skipped and counted, so it cannot override a pull that had them. |
 | A row has an unusable key | Dropped and counted. |
-| A body is unreadable or its shape unrecognized | Counted and logged. Outputs and the manifest are still written; exit 1. Nothing is quarantined. |
-| A run stops early | No manifest exists, so the outputs are incomplete. The next run reuses each parsed entry in `--work-dir` (default under `/tmp`) whose `fetched_at`, body size and tool version are unchanged. |
+| A body is unreadable (including over 256 MiB decompressed) or its shape unrecognized | Counted and logged. Outputs and the manifest are still written; exit 1. Nothing is quarantined. |
+| A run stops early | No manifest exists, so the outputs are incomplete. The next run reuses each parsed entry in `--work-dir` (default under `/tmp`) whose `fetched_at`, compressed-body SHA-256 and tool version are unchanged. |
 | A run completes | Its shards and markers are removed; other files in `--work-dir` remain. A rerun rebuilds; the same cache and library versions give identical outputs. |
+| A metadata sidecar exceeds 1 MiB | The run fails on the shared listing's `ValueError`, naming the file, before writing anything. |
+| An output or work directory equals, contains or sits inside a protected one or each other; no curated chain file or `hist/strikes` entry | Refused with a message before writing anything. |
+| `--work-dir` cannot be created | The run fails and any previous manifest remains. |
 | Two runs share an output or work directory | Unsupported: there is no lock. |
 
-Memory holds one body while sharding and one month while merging or joining coverage. An unreadable metadata sidecar is skipped uncounted by the shared cache listing (`engine.data.fetch.iter_cached`).
+Memory holds one body or one month. The shared listing (`iter_cached`) skips unreadable sidecars uncounted.
 
 ## Mutation snapshot-worker budget
 
