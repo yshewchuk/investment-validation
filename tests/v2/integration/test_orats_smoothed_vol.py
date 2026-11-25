@@ -84,6 +84,8 @@ def test_end_to_end(tmp_path):
     quotes_m = manifest["tables"]["quotes"]
     assert quotes_m["duplicates_dropped"] == 1
     assert quotes_m["conflicting_keys"] == 1
+    assert quotes_m["conflicting_keys_all_columns"] == 1
+    assert quotes_m["rows_out"] == 2
     assert quotes_m["without_required_fields"] == 1
     assert quotes_m["non_null"] == {"smvVol": 1, "callMidIv": 2, "putMidIv": 2, "stockPrice": 2}
 
@@ -112,6 +114,9 @@ def test_end_to_end(tmp_path):
         "iRate5wk": 2, "iRateLt": 2, "borrow30": 1, "borrow2yr": 1, "annIdiv": 1,
         "annActDiv": 1, "divAmt": 1, "divDate": 1, "assetType": 1}
     assert manifest["tables"]["rates"]["conflicting_keys_all_columns"] == 0
+    assert manifest["tables"]["rates"]["rows_out"] == 2
+    assert manifest["tables"]["rates"]["duplicates_dropped"] == 0
+    assert manifest["tables"]["rates"]["conflicting_keys"] == 0
 
     assert manifest["version"] == "4"
     assert manifest["units"] == {"iRate5wk": "percent", "iRateLt": "percent", "borrow30": "percent", "borrow2yr": "percent",
@@ -457,6 +462,15 @@ def test_rates_later_fetch_wins_whole_row(tmp_path):
     first = r.iloc[0]
     assert first["borrow30"] == 6.0
     assert pd.isna(first["annActDiv"]) and pd.isna(first["divAmt"])
+    for col in ["borrow2yr", "annIdiv", "annActDiv", "divAmt", "divDate", "assetType"]:
+        assert pd.isna(first[col]), col
+    assert manifest["tables"]["rates"]["rows_out"] == 2
+    assert manifest["tables"]["rates"]["duplicates_dropped"] == 1
+    assert manifest["tables"]["rates"]["non_null"] == {
+        "iRate5wk": 2, "iRateLt": 2, "borrow30": 1,
+        "borrow2yr": 0, "annIdiv": 0, "annActDiv": 0, "divAmt": 0, "divDate": 0, "assetType": 0}
+    # counted before dedupe, so the losing row still counts
+    assert manifest["dividend_fields"] == {"annActDiv": 1, "annIdiv": 1, "divAmt": 1, "divDate": 1}
 
 
 def test_rates_without_required_fields_does_not_override(tmp_path):

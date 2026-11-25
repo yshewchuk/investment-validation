@@ -39,7 +39,7 @@
 Per quote row, with `S` the row's curated `spot` (the one strike resolution uses; the re-ingest's `stockPrice` is not used), `T = max(expiry - obs_date, 0) / 365` in calendar days, and `V` the fair value, **clamped to [bid, ask]**:
 
 - `T = 0`: intrinsic value, then clamped.
-- **Calls:** European Black-Scholes with carry `b` where that is the American value: no dividend before expiry and `b >= r >= 0`. Otherwise (F7) the American tree below, since early exercise can then pay. F2 and F3 as built take `b = r`, no dividend, and price every call as European, even with `r < 0`, where this rule would use the tree and the European value can be too low.
+- **Calls:** European Black-Scholes with carry `b` where that is the American value: no `dividend_applied` (the table below, expiry day included) and `b >= r >= 0`. Otherwise (F7) the American tree below, since early exercise can then pay. F2 and F3 as built take `b = r`, no dividend, and price every call as European, even with `r < 0`, where this rule would use the tree and the European value can be too low.
 - **Puts:** American, by a Cox-Ross-Rubinstein tree with **200 steps** (mine), vectorised over rows, early exercise at every step. Vol is floored at 0.01; a tree probability outside (0, 1) is `no_fair_value`.
 - **Rate `r`:** `iRate5wk` up to 35 calendar days to expiry, linear to `iRateLt` at 365, flat beyond; if one of the two is missing, the other is used (mine). The row is the ticker's for `obs_date`, else its latest earlier one within 7 calendar days; none: `rate_unknown`.
 - **Carry rate `b` (F7):** ORATS borrow, from that same row. By the leg's calendar days to expiry: `borrow30` up to 30, linear to `borrow2yr` at 730, flat beyond; if one is missing or out of range, the other is used (interpolation mine). The underlying drifts at `b` (forward `S*e^(bT)`) and cash flows discount at `r`: in the tree `p = (e^(b*dt) - d)/(u - d)`. This is a yield of `r - b`, and rests on the unconfirmed reading in section 3 (using it this way is mine). **Both missing: `b = r`**, flagged `carry_fallback` and counted. No further search back.
@@ -138,7 +138,7 @@ New constants are a **new constants id**. A consumer needs a new spec hash and P
 | --- | --- | --- |
 | R1 inputs | snapshot, manifest or table hash does not bind; manifest absent or fingerprint null; required column absent; duplicate quote or vol key; vol unit check fails | refuse `EXPERIMENT_IDENTITY_CONFLICT` with a `details.reason`; no partial output; nothing imputed except the rules written above |
 | R1 per row | missing vol, rate or quote | section 7 statuses, counted; never silent or zero |
-| R1 per row (F7) | missing carry or dividend input | section 4's fallbacks (`b = r`; no dividend), flagged and counted; not a status. A column absent from the bound table is `R1 inputs` |
+| R1 per row (F7) | missing carry or dividend input | section 4's fallbacks (`b = r`; no dividend), flagged and counted; not a status. A column absent from the bound table, or section 3's `input_unit` refusal, is `R1 inputs` |
 | R2 resources | put tree on unique rows | quarter chunks, each row priced once per run, under the consumer's `bounded_run` limit; over it refuses `RESOURCE_LIMIT_EXCEEDED`, no partial report. Smoke first |
 | R3 determinism | no randomness or clock | values never depend on row order, chunking or requested structures |
 | R4 replay | stored leg tables | atomic writes with a receipt binding input hashes and F id; replay read-only; changed input refuses |
