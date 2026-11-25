@@ -15,13 +15,13 @@ import pandas as pd
 
 from engine.fills import BAD_QUOTE_COST_PCT, FillModel
 from engine.portfolio import CAPITAL_PER_TRADE, CONTRACT_MULTIPLIER
-from engine.score import GATE_MCAP_FLOOR, _mean_relative_spread
+from engine.score import Scorer, _mean_relative_spread
 from engine.structures import CALL, PUT, STRUCTURES, ChainSnapshot, StructureError, price_structure
 
 GATE_RULE = "G_PROD"  # the only straddle rule now (Amendment 6); decided only with a gate callable.
 EXIT_UNQUOTED = "exit_unquoted_worst_case"
 STATUSES = ("taken", "not_taken", "undetermined")
-DECISION_COLS = ["event_id", "event_date", "edge", "rel_spread", "status", "reason"]
+DECISION_COLS = ["event_id", "event_date", "edge", "rel_spread", "mcap_usd", "status", "reason"]
 
 
 def _num(x):
@@ -32,8 +32,12 @@ def _num(x):
 
 
 def in_universe(mcap):
-    """Production's STR-THRU universe: market cap at or above engine.score GATE_MCAP_FLOOR (Amendment 5). No spread term: production applies none."""
-    return math.isfinite(_num(mcap)) and _num(mcap) >= GATE_MCAP_FLOOR
+    """Production's own STR-THRU domain check (``Scorer._gate_in_domain``), called rather than re-implemented. It declines only a
+    finite market cap below GATE_MCAP_FLOOR. A missing or non-positive market cap passes (the gate then sees non-finite inputs).
+    ``self`` and ``request`` are unused by production's method. No spread term (Amendment 5)."""
+    m = _num(mcap)
+    frame = pd.DataFrame({"mcap_log": [math.log(m) if math.isfinite(m) and m > 0 else float("nan")]})
+    return Scorer._gate_in_domain(None, None, frame)
 
 
 def _edge(pred, implied):
@@ -91,11 +95,9 @@ def resolve(chunk, i, alpha=0.5):
     return priced, found[CALL], found[PUT], None
 
 
-def entry_state(chunk, i, *, mcap):
+def entry_state(chunk, i):
     """Entry status: ``ok`` with the priced straddle and its mean relative spread, else ``undetermined`` with a reason."""
     priced, c, p, reason = resolve(chunk, i)
-    if reason is None and not math.isfinite(_num(mcap)):
-        reason = "missing_mcap"
     if reason is not None:
         return {"legs": None, "rel_spread": float("nan"), "status": "undetermined", "reason": reason, "priced": None}
     rel = _mean_relative_spread(priced)
@@ -143,7 +145,7 @@ def decide(events, chunk, gate):
     for ev in events.to_dict("records"):
         edge = _edge(_num(ev["pred_abs_move"]), _num(ev["implied_move"]))
         row = {"event_id": ev["event_id"], "event_date": ev["event_date"], "edge": edge,
-               "rel_spread": float("nan"), "status": "undetermined", "reason": None}
+               "rel_spread": float("nan"), "mcap_usd": float("nan"), "status": "undetermined", "reason": None}
         if not math.isfinite(edge):
             row["reason"] = "missing_forecast"
         elif str(ev["event_id"]) not in pos:
@@ -151,7 +153,8 @@ def decide(events, chunk, gate):
         else:
             i = pos[str(ev["event_id"])]
             mcap = _num(ev["mcap_usd"])  # read only once the forecast is known to be present
-            state = entry_state(chunk, i, mcap=mcap)
+            row["mcap_usd"] = mcap  # straddle rows were published with mcap_usd always NaN; recorded so a refusal shows its market cap
+            state = entry_state(chunk, i)
             if state["status"] != "ok":
                 row["reason"] = state["reason"]
             else:

@@ -386,6 +386,33 @@ Of 5,479 covered 2025 events, M0's G_PROD took 279 (about 5%); production's walk
 - *Inner and synthetic stages bind no gate* (the fold is trained through 2024), so they emit no straddle rows; X4 is empty and H2/H3 and T10 rest on the 2025 rows. A verdict that requires the 2024 sign reads `not_testable` (FULL_YEARS is unchanged). The user decides whether H2's full-year rule should change.
 - `spec.yaml` changes (the hash moves), so the PLANNED row must be registered by the supervisor after the series lands.
 
+### Straddle fidelity check of the full7 run (2026-11-25)
+
+**Correction to Amendment 5's missing-cap rule.** Production's domain check (`Scorer._gate_in_domain`) declines only a finite market cap below the floor; a missing one passes, and the gate then withholds on its non-finite `mcap_log` input. `in_universe` now calls that method, so the straddle book no longer emits `missing_mcap` (still listed as an E_str reason in section 17). No run result is expected to move: `facts_missing` drops an event with a missing cap before either book. Straddle rows now record `mcap_usd`, which was always NaN. The spec text and hash are unchanged.
+
+**Measured** (M0, 2025, read-only): the full7 `decisions.parquet` straddle book against EXP-187 arm B's `transactions_f30eefe5ee51.csv`, 1,025 selected events.
+
+| Production picks in EXP-188 | Events |
+| --- | --- |
+| also taken | 356 |
+| below the threshold | 301 |
+| `universe_filter` | 249 |
+| `bad_quote` | 1 |
+| no row in either book | 118 |
+
+**The 249.** Their market cap, read from the same events' short-vol rows, is finite and below $1B in all of them ($22M to $996M); the NaN seen on their straddle rows was the recording gap. They match the live floor. EXP-187 arm B applies no domain floor: its `select` needs only complete features and the threshold. The code has no spread term; the wide spreads on some of these rows play no part. M0's G_PROD score reaches the threshold on 235 of the 249.
+
+Jaccard over M0's covered events, diagnostics only: 0.312 as run; 0.400 if the sub-$1B events leave both sides; 0.507 if G_PROD (hypothetically) had no floor. Dropping the floor would leave live production's rule, so it is a user decision and no rule changes here. On rows that reach the gate G_PROD takes 589 of 3,338 (17.6%).
+
+**The 118.** 47 are random-holdout members (`ExperimentHoldouts.random_membership` on the event id; none of the other 907 picks is one): admission drops them by design, and EXP-187 kept them. Of the other 71, 70 belong to 53 tickers with no 2025 event anywhere in the run, large names included. The two files do not carry exclusion reasons, so these 71 are **not attributed** and no defect is shown. Candidates in code: ambiguous-metadata admission, plan-frame drops, `production_forecast_missing`, `facts_missing`, model-table common support, ladder skips, and the shared no-simulation drop (design section 4; it also removes straddles, although G_PROD needs no simulation). The ticker pattern suggests input coverage, unverified. Attributing them needs the run's per-reason event ids or reads of the snapshot tables.
+
+**The 301 and the stored gate.** The champion STR-THRU gate is `gate_midfill_str_thru_forecast_analog`, and its registered threshold 0.0508851760203979 is the one G_PROD already uses. In the registry 0.056790907681124256 belongs to `gate_midfill_str_thru` (not champion) and 0.0725137593996064 to the STR-RUNUP gate. Only the fitted model differs, and there are two other candidates:
+
+1. **Stored champion artifact (the live model).** `fit_final` trained on every row of 2020-2026, so 2025 scores would be in-sample. It is not EXP-187's model either (a per-fold refit). Needs: pinning the artifact by sha256 inside a fold payload, relaxing the `train_through <= 2024` refusal, an amendment, a `spec.yaml` change, a new PLANNED row, an in-sample label and a rerun. Not recommended.
+2. **EXP-187's per-fold refit** (`experiments/common.py` `make_registered_gate`, v2-snapshot trades, registered threshold). Out of sample for 2025. Needs: a through-2024 fit on EXP-147's gate dataset (a new `size_pnl_gate_fold` path, or an export of that fold model, with the recipe checked for parity), a new fold and receipt (heavy), an amendment, a new PLANNED row and a rerun. How much of the 301 it recovers is unmeasured: the transactions file holds `gate_proba` (a calibrated win probability), not the predicted `ret`. Per-model band inputs and the restricted analog pool would still differ.
+
+**Open for the user:** keep the live $1B floor and compare agreement inside the live domain, or adopt EXP-187's unfloored universe; and keep the legacy-trades refit or take option 2. No rule, threshold or agreement bar changes here.
+
 **Slice impact.** Rows 3-4, 10 and 16 route resolution through `price_structure`, which runs about 600,000 times (7 structures x 12 models x ~7,000 events; the straddle adds one per model-event). If the 50-ticker smoke shows it too slow, the fallback is to keep the local resolver and add a runtime parity preflight over a fixed sample against `price_structure` (like the fast-path preflight), refusing on any difference; the audit row then reads "re-implements, held by preflight".
 
 ### Timing: D-1 vs D0

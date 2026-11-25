@@ -8,7 +8,7 @@ import pytest
 
 from engine.fills import FillModel
 from engine.portfolio import CAPITAL_PER_TRADE, CONTRACT_MULTIPLIER
-from engine.score import GATE_MCAP_FLOOR
+from engine.score import GATE_MCAP_FLOOR, Scorer
 from engine.structures import CALL, PUT, StructurePrice
 from engine.v2.ops.errors import OpsError
 from experiments import size_pnl_gate_agreement as ga
@@ -102,7 +102,7 @@ def test_non_finite_spot_is_no_atm_pair():
 def test_crossed_or_nan_bid_is_entry_quote_unusable_and_never_taken(kw):
     chunk = one(**kw)
     assert sd.resolve(chunk, 0) == (None, None, None, "entry_quote_unusable")
-    assert sd.entry_state(chunk, 0, mcap=20e9)["reason"] == "entry_quote_unusable"
+    assert sd.entry_state(chunk, 0)["reason"] == "entry_quote_unusable"
     out = sd.decide(pd.DataFrame([ev("E", 1.0)]), chunk, GATE)
     assert out.loc[0, "status"] == "undetermined" and out.loc[0, "reason"] == "entry_quote_unusable"
 
@@ -113,7 +113,7 @@ def test_zero_bid_and_locked_entry_quotes_are_priced_at_mid(kw, cost):
     chunk = one(**kw)
     priced, c, p, reason = sd.resolve(chunk, 0)
     assert reason is None and priced.cost == pytest.approx(cost)
-    assert sd.entry_state(chunk, 0, mcap=20e9)["status"] == "ok"
+    assert sd.entry_state(chunk, 0)["status"] == "ok"
     out = sd.decide(pd.DataFrame([ev("E", 1.0)]), chunk, GATE)
     assert out.loc[0, "status"] == "taken" and pd.isna(out.loc[0, "reason"])
 
@@ -141,24 +141,16 @@ def test_chain_snapshot_puts_only_holds_only_puts():
 # ---- entry_state ----------------------------------------------------------
 
 def test_entry_healthy_reports_spread():
-    st = sd.entry_state(one(), 0, mcap=20e9)
+    st = sd.entry_state(one(), 0)
     assert st["status"] == "ok" and st["reason"] is None
     assert st["rel_spread"] == pytest.approx((0.2 / 2.1 + 0.2 / 1.9) / 2)
     assert st["priced"].cost == pytest.approx(2.1 + 1.9)
 
 
-def test_entry_missing_mcap_and_no_pair():
-    st = sd.entry_state(one(), 0, mcap=NAN)
-    assert st["status"] == "undetermined" and st["reason"] == "missing_mcap"
+def test_entry_no_atm_pair_is_undetermined():
     calls_only = lad._pack([rec("E", 100.0, [(1, 100, 2.0, 2.2, 1.0, 1.4, 1)])], {})
-    st = sd.entry_state(calls_only, 0, mcap=20e9)
+    st = sd.entry_state(calls_only, 0)
     assert st["status"] == "undetermined" and st["reason"] == "no_atm_pair"
-
-
-@pytest.mark.parametrize("null", [None, pd.NA])
-def test_entry_null_mcap_is_missing_mcap(null):
-    st = sd.entry_state(one(), 0, mcap=null)
-    assert st["status"] == "undetermined" and st["reason"] == "missing_mcap"
 
 
 # ---- exit_value -----------------------------------------------------------
@@ -267,13 +259,6 @@ def test_null_forecast_input_is_missing_forecast(field, null):
 
 
 @pytest.mark.parametrize("null", [None, pd.NA])
-def test_null_mcap_is_missing_mcap(null):
-    event = dict(ev("m", 1.0), mcap_usd=null)
-    out = sd.decide(pd.DataFrame([event]), good("m"), GATE)
-    assert out.loc[0, "status"] == "undetermined" and out.loc[0, "reason"] == "missing_mcap"
-
-
-@pytest.mark.parametrize("null", [None, pd.NA])
 def test_missing_forecast_beats_null_mcap(null):
     event = dict(ev("b", 1.0, implied=NAN), mcap_usd=null)
     out = sd.decide(pd.DataFrame([event]), good("b"), GATE)
@@ -313,9 +298,54 @@ def test_universe_filters_are_not_taken():
 
 def test_in_universe_is_production_gate_floor_only():
     assert sd.in_universe(GATE_MCAP_FLOOR) and sd.in_universe(GATE_MCAP_FLOOR * 1.5)
-    assert not sd.in_universe(0.5e9) and not sd.in_universe(0.0)
+    assert not sd.in_universe(0.5e9)
     for null in (NAN, None, pd.NA):
-        assert not sd.in_universe(null)
+        assert sd.in_universe(null)  # production passes a missing market cap; the gate withholds on it
+
+
+@pytest.mark.parametrize("mcap, expected", [(GATE_MCAP_FLOOR, True), (GATE_MCAP_FLOOR - 1, False), (0.5e9, False),
+                                            (5e9, True), (0.0, True), (-1.0, True), (NAN, True)])
+def test_in_universe_matches_production_gate_domain(mcap, expected):
+    assert sd.in_universe(mcap) is expected
+
+
+def test_in_universe_delegates_to_production_gate_domain(monkeypatch):
+    seen = []
+
+    def stub(self, request, features):
+        seen.append(features)
+        return False
+
+    monkeypatch.setattr(Scorer, "_gate_in_domain", stub)
+    assert sd.in_universe(5e9) is False
+    assert len(seen) == 1 and list(seen[0].columns) == ["mcap_log"] and len(seen[0]) == 1
+
+
+@pytest.mark.parametrize("verdict", [("undetermined", "gate_input_nan"), ("taken", None)])
+@pytest.mark.parametrize("null", [None, pd.NA, NAN])
+def test_null_mcap_reaches_the_gate_and_takes_its_verdict(null, verdict):
+    calls = []
+
+    def gate(event):
+        calls.append(event["event_id"])
+        return verdict
+
+    out = sd.decide(pd.DataFrame([dict(ev("m", 1.0), mcap_usd=null)]), good("m"), gate)
+    assert calls == ["m"]
+    assert out.loc[0, "status"] == verdict[0]
+    if verdict[1] is None:
+        assert pd.isna(out.loc[0, "reason"])
+    else:
+        assert out.loc[0, "reason"] == verdict[1]
+    assert pd.isna(out.loc[0, "mcap_usd"])
+
+
+def test_decide_records_mcap_usd_on_taken_and_universe_rows():
+    assert sd.DECISION_COLS.index("mcap_usd") == sd.DECISION_COLS.index("rel_spread") + 1
+    events = pd.DataFrame([ev("t", 1.0, mcap=5e9), ev("s", 1.0, mcap=0.5e9)])
+    out = sd.decide(events, good("t", "s"), GATE).set_index("event_id")
+    assert out.loc["t", "status"] == "taken" and out.loc["t", "mcap_usd"] == 5e9
+    assert out.loc["s", "reason"] == "universe_filter" and out.loc["s", "mcap_usd"] == 0.5e9
 
 
 def test_five_billion_name_is_in_the_universe():

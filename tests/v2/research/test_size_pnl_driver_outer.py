@@ -69,7 +69,7 @@ def outer_stubs(stubs, monkeypatch):
         def decide(events, chunk_):
             stubs.append(("decide", tuple(sorted(events["event_id"].astype(str)))))
             return pd.DataFrame({"event_id": events["event_id"].astype(str), "event_date": events["event_date"],
-                                 "edge": events["pred_abs_move"] - events["implied_move"], "rel_spread": np.nan,
+                                 "edge": events["pred_abs_move"] - events["implied_move"], "rel_spread": np.nan, "mcap_usd": np.nan,
                                  "status": "undetermined", "reason": "thin_history"})[driver.straddle.DECISION_COLS]
         return decide
 
@@ -296,7 +296,7 @@ def test_oracle_one_taken_2025_straddle_event_carries_zero_secured_and_dates(tmp
             ids = events["event_id"].astype(str)
             is_e3 = (ids == "E3").to_numpy()
             return pd.DataFrame({"event_id": ids, "event_date": events["event_date"], "edge": events["pred_abs_move"] - events["implied_move"],
-                                 "rel_spread": np.nan, "status": np.where(is_e3, "taken", "undetermined"),
+                                 "rel_spread": np.nan, "mcap_usd": np.nan, "status": np.where(is_e3, "taken", "undetermined"),
                                  "reason": np.where(is_e3, "taken", "thin_history")})[driver.straddle.DECISION_COLS]
         return decide
 
@@ -723,7 +723,7 @@ def _gprod_fake(monkeypatch):
         def decide(events, chunk_):
             ids = events["event_id"].astype(str).to_numpy()
             return pd.DataFrame({"event_id": ids, "event_date": events["event_date"].to_numpy(), "edge": 0.0, "cutoff": np.nan,
-                                 "rel_spread": 0.1, "status": "not_taken", "reason": "below_gate_threshold"})[driver.straddle.DECISION_COLS]
+                                 "rel_spread": 0.1, "mcap_usd": np.nan, "status": "not_taken", "reason": "below_gate_threshold"})[driver.straddle.DECISION_COLS]
         return decide
 
     monkeypatch.setattr(driver.gprod, "month_decider", fake)
@@ -951,7 +951,7 @@ def test_outer_rows_carry_literal_marks_and_forecasts(tmp_path, outer_stubs, mon
     def taken_gate(gate_, table, labels, start_m):
         def decide(events, chunk_):  # the G_PROD decider takes every event
             return pd.DataFrame({"event_id": events["event_id"].astype(str).to_numpy(), "event_date": events["event_date"].to_numpy(),
-                                 "edge": 0.5, "rel_spread": np.nan, "status": "taken", "reason": "taken"})[driver.straddle.DECISION_COLS]
+                                 "edge": 0.5, "rel_spread": np.nan, "mcap_usd": np.nan, "status": "taken", "reason": "taken"})[driver.straddle.DECISION_COLS]
         return decide
 
     def straddle_marks(chunk_, events, dec, alpha, **kw):
