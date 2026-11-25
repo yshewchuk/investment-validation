@@ -955,7 +955,9 @@ Each invocation revalidates bindings/evidence; there is no cross-call admission 
 | Output exceeds the byte budget or output staging fails with an artifact, filesystem or SQLite error | Report bytes are discarded; only the refusal document reaches stdout, emitting `RESOURCE_LIMIT_EXCEEDED` or sanitized `RESOURCE_UNAVAILABLE`. Other staging errors are unexpected builtin failures and propagate. Prior journal commits remain. |
 | Stdout write or flush failure | The original stream error propagates with no retry and no second document; downstream may have received a prefix, and stdout remains caller-owned. |
 
-`size_quantile_metrics` (EXP-190 Q5a): pure Stage A metrics over caller arrays; no data access or caller. Invalid input raises `ValueError`; events lacking level width carry `level_width_burn_in` or `level_width_empty_bin`; cells skip as `cell_small`, `constant_e` or `zero_e_residual`.
+### `size_quantile_metrics`
+
+Pure; no I/O or caller. `crps_quantile`, `level_width`, `cell_scores` refuse bad input (`ValueError`; non-finite history drops); others assume finite aligned rows. No width: `level_width_burn_in`/`level_width_empty_bin`. Cell skips: `cell_small`, `constant_e`, `zero_e_residual`.
 
 ### Qualified SIZE panel (opt-in)
 

@@ -80,6 +80,21 @@ def test_crps_matches_fine_grid_and_rejects_bad_input():
         crps_quantile(0.5, [0.0, 1.0], [0.0, float("nan")])
 
 
+def test_crps_quantile_refusals():
+    with pytest.raises(ValueError, match="equal length"):
+        crps_quantile(0.5, [0.0, 0.5, 1.0], [0.0, 1.0])
+    with pytest.raises(ValueError, match="equal length"):
+        crps_quantile(0.5, [0.0], [0.0])
+    with pytest.raises(ValueError, match="equal length"):
+        crps_quantile(0.5, [[0.0, 1.0]], [[0.0, 1.0]])
+    with pytest.raises(ValueError, match="nondecreasing"):
+        crps_quantile(0.5, [0.0, 0.6, 0.5, 1.0], [0.0, 0.5, 0.7, 1.0])
+    with pytest.raises(ValueError, match="finite"):
+        crps_quantile(0.5, [0.0, np.inf], [0.0, 1.0])
+    with pytest.raises(ValueError, match="finite"):
+        crps_quantile(0.5, [0.0, 1.0], [0.0, np.inf])
+
+
 def test_calibrated_exponential_coverage_and_pinball():
     rng = np.random.default_rng(190)
     n = 20000
@@ -99,6 +114,8 @@ def test_crossing_rate_ties_mixed_and_empty():
     assert crossing_rate(raw) == pytest.approx(0.4)
     assert crossing_rate(np.array([[1.0, 1.0, 2.0], [5.0, 5.0, 5.0]])) == 0.0
     assert np.isnan(crossing_rate(np.empty((0, 3))))
+    # Single row: only the last pair (3.0 > 2.5) is out of order.
+    assert crossing_rate(np.array([[1.0, 2.0, 3.0, 2.5]])) == pytest.approx(1.0)
 
 
 def test_level_width_burn_in_and_later_pairs_do_not_count():
@@ -204,19 +221,38 @@ def test_cell_scores_known_answer_single_cell():
     # sum of squares is 3.6 for each residual vector, so correlation = 0.6 / 3.6 = 1/6.
     # Contributions = residual product / (3.6 / 5) = [-1/3,-4/3,0,2,1/2].
     # Score residual order (i2,i4,i0,i1,i3) gives tercile labels [1,1,0,2,0].
-    # Tercile diff = mean e-residual of top tercile (i3: 1.2)
-    #              - mean e-residual of bottom tercile (i2,i4: (0-0.6)/2 = -0.3) = 1.5.
+    # Tercile diff uses raw errors: mean raw e of top tercile (i3: 50)
+    #              - mean raw e of bottom tercile (i2,i4: (30+40)/2 = 35) = 15.
     rules = Rules(min_cell=5)
     ids = np.arange(5)
     q50 = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
-    e = np.array([2.0, 1.0, 3.0, 5.0, 4.0])
+    e = np.array([20.0, 10.0, 30.0, 50.0, 40.0])  # same ranks as [2,1,3,5,4]
     score = np.array([1.0, 3.0, 2.0, 5.0, 4.0])
     per_event, per_cell = cell_scores(ids, ["A"] * 5, e, q50, score, rules)
     assert per_cell.correlation.iloc[0] == pytest.approx(1 / 6)
-    assert per_cell.tercile_diff.iloc[0] == pytest.approx(1.5)
+    assert per_cell.tercile_diff.iloc[0] == pytest.approx(15.0)
     np.testing.assert_allclose(per_event.contribution.to_numpy(),
                                [-1 / 3, -4 / 3, 0.0, 2.0, 0.5], atol=1e-12)
     assert per_event.tercile.to_numpy().astype(int).tolist() == [1, 1, 0, 2, 0]
+
+
+def test_level_width_nonfinite_history_is_dropped():
+    rng = np.random.default_rng(15)
+    months = _months(MONTH)
+    fin = _hist(rng.normal(size=499), rng.normal(size=499), "2024-06-01")
+    # 10 earlier pairs: 5 with NaN history q50, 5 with NaN y. Dropped, so 499 finite is burn-in.
+    bad = _hist(np.r_[np.full(5, np.nan), rng.normal(size=5)],
+                np.r_[rng.normal(size=5), np.full(5, np.nan)], "2024-06-01")
+    L, reason = level_width(months, [0.0], *_cat(fin, bad))
+    assert list(reason) == ["level_width_burn_in"]
+    # 600 finite earlier pairs: extra non-finite earlier pairs must not change L.
+    base = _hist(rng.normal(size=600), rng.normal(size=600), "2024-06-01")
+    extra = _hist(np.r_[np.full(3, np.nan), rng.normal(size=4)],
+                  np.r_[rng.normal(size=3), np.inf, np.inf, np.nan, np.nan], "2024-06-01")
+    L1, _ = level_width(months, [0.0], *base)
+    L2, _ = level_width(months, [0.0], *_cat(base, extra))
+    assert np.isfinite(L1).all()
+    np.testing.assert_array_equal(L1, L2)
 
 
 def test_level_width_rejects_nat_and_nonfinite_q50():
@@ -255,7 +291,8 @@ def test_cell_scores_score_equal_to_q50_is_zero_and_equal_to_e_is_positive():
     assert per_event.used.all()
     np.testing.assert_array_equal(per_event.contribution.to_numpy(), np.zeros(n))
     _, per_cell = cell_scores(ids, cell, e, q50, e.copy())
-    assert per_cell.correlation.iloc[0] > 0.9
+    # score equals e, so its residual equals e's residual and the correlation is 1.
+    assert per_cell.correlation.iloc[0] == pytest.approx(1.0)
     assert per_cell.tercile_diff.iloc[0] > 0
 
 
@@ -292,6 +329,27 @@ def test_cell_scores_string_ids_and_tercile_sizes():
     assert per_cell.skip.iloc[0] == ""
     assert per_event.used.all()
     assert np.bincount(per_event.tercile.to_numpy().astype(int)).tolist() == [11, 10, 10]
+
+
+def test_cell_scores_tie_break_by_event_id():
+    # score = q50 gives zero score residual, so tercile labels fall back to event id.
+    rng = np.random.default_rng(13)
+    n = 31
+    ids = np.array([f"ev-{i:02d}" for i in range(n)])[rng.permutation(n)]
+    e, q50 = rng.normal(size=(2, n))
+    per_event, _ = cell_scores(ids, ["A"] * n, e, q50, q50.copy())
+    num = np.array([int(s[3:]) for s in ids])
+    expected = np.where(num <= 10, 0, np.where(num <= 20, 1, 2))
+    np.testing.assert_array_equal(per_event.tercile.to_numpy().astype(int), expected)
+
+
+def test_cell_scores_constant_q50_still_scores():
+    rng = np.random.default_rng(14)
+    n = 40
+    e = rng.normal(size=n)
+    _, per_cell = cell_scores(np.arange(n), ["A"] * n, e, np.ones(n), e.copy())
+    assert per_cell.skip.iloc[0] == ""
+    assert per_cell.correlation.iloc[0] == pytest.approx(1.0)
 
 
 def test_cell_scores_validation():
