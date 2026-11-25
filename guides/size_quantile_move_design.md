@@ -1,6 +1,6 @@
 # Per-event quantile model of the earnings move (design, EXP-190)
 
-**Status: design; code lands slice by slice** (section 11). Experiment **EXP-190** (user, 2026-11-25; Q1 re-checks the ledger id). This revision supersedes PR #2869. **Part 1** (sections 1-5) is the model and Stage A, which does no trading. **Part 2** (section 6) is Stage B: fills, trading arms and success rule. **[D1]**-style tags point to section 10.
+**Status: design; code lands slice by slice** (section 11). Experiment **EXP-190** (user, 2026-11-25; Q1 re-checks the ledger id). This revision supersedes PR #2869. **Part 1** (sections 1-5, failure semantics in 7) is the model and Stage A, which does no trading. **Part 2** (section 6) is Stage B: fills, trading arms and success rule. **[D1]**-style tags point to section 10.
 
 ## 1. Question and evidence
 
@@ -130,7 +130,7 @@ A **candidate** is (event, structure), or an event for the straddle. Short vol (
 
 Unless stated, an arm **takes** a candidate when its score is at or above `trailing_cutoff` (6 months strictly before the month, top 20%, at least 100 scores) over **that arm's own** earlier universe scores, per structure.
 
-A row is **determined** for an arm when it has a decision or a counted non-trade (width declined, `ladder_too_coarse`, F status or guard, outside the universe, gate not met). A missing fact is **undetermined, never "no"**: forecast, quantiles, pool, cutoff history, market cap, spread, implied move, an absent strike or an unusable entry quote. Each candidate arm has **one paired population**: the rows determined by it and all its controls. Its account and theirs walk only those rows; drops are counted by arm, reason and year. The determined share of admitted candidates is reported, not gated.
+A row is **determined** for an arm when it has a decision or a counted non-trade (width declined, `ladder_too_coarse`, F status or guard, outside the universe, take rule not met). A fact the arm's rule needs but lacks makes it **undetermined, never "no"**: forecast, quantiles, pool, cutoff history, market cap, spread, implied move (ST, ST0), or, at geometry resolution (before F), an absent strike or unusable entry quote. Each candidate arm has **one paired population**: the rows determined by it and all its controls. Its account and theirs walk only those rows; drops are counted by arm, reason and year. The determined share of admitted candidates is reported, not gated.
 
 ### 6.3 Controls and arms
 
@@ -157,7 +157,7 @@ A row is **determined** for an arm when it has a decision or a counted non-trade
 
 ### 6.4 Width quantile, walk-forward [D14]
 
-One `tau` per family and source, from **{p10, p25, p40, p50, p60, p75}**. The objective (mine) is W_s's **family account** (6.8) return at F over the selection window: **2024** uses the best on 2023H2; **2025** the best on 2023H2-2024. All six are compared on rows determined at every `tau`. Ties: nearest p50, then smaller. A `tau` with fewer than 100 taken trades (mine) in the window is not eligible; with none eligible, p50. **2023H2** has no earlier window in this rule and uses **p50 for both families** (mine; no result chose it), labelled `tau_default`; the first draft's fixed 0.40 came from 2024-2025 observations and is dropped.
+One `tau` per family and source, from **{p10, p25, p40, p50, p60, p75}**. The objective (mine) is W_s's **family account** (6.8) return at F over the selection window, using only trades that also exit before the scored year: **2024** uses the best on 2023H2; **2025** the best on 2023H2-2024. All six are compared on rows determined at every `tau`. Ties: nearest p50, then smaller. A `tau` with fewer than 100 taken trades (mine) in the window is not eligible; with none eligible, p50. **2023H2** has no earlier window in this rule and uses **p50 for both families** (mine; no result chose it), labelled `tau_default`; the first draft's fixed 0.40 came from 2024-2025 observations and is dropped.
 
 Each `tau` is a complete arm with its own cutoff history; the walk-forward arm takes each period's decisions from that period's `tau`. LW, WD and LWD reuse W's choice (mine). **Every quantile is printed for every year** (W, LW, WD, LWD; both sources and families): returns, trades, declines and the chosen `tau`.
 
@@ -172,7 +172,7 @@ Each `tau` is a complete arm with its own cutoff history; the walk-forward arm t
 | Both N1 and N2 | structure id; M0's forecast [D1]; `implied_move`; M0 / `implied_move`; `debit_F / spot` (entry cost); breakevens: the distance from spot, as a share of spot, of the nearest and farthest expiry prices where the resolved structure's payoff equals `debit_F` (none: NaN) |
 | **N1 only** | the seven quantiles of `s`; each over `implied_move`; band-width ratios `(q75 - q25)/q50` and `(q90 - q10)/q50` [D13] |
 
-Missing values stay NaN; a zero denominator gives NaN. **Quantile features are out-of-sample only:** an event in year Y takes the walk-forward output of the Y fold (Q's calibration uses earlier labels), never an in-sample fit. A row without `s` output is in neither model, so **N2_s trains and scores on exactly N1_s's rows**.
+A missing `implied_move` or breakeven, or a zero denominator (including `zero_median`), leaves only that feature NaN; the row stays. **Quantile features are out-of-sample only:** an event in year Y takes the walk-forward output of the Y fold (Q's calibration uses earlier labels), never an in-sample fit. A row without `s` output is in neither model, so **N2_s trains and scores on exactly N1_s's rows**.
 
 **Windows.** One fit per year, on all rows from Y0 whose exit date is before 1 January of that year (expanding; mine), from 2023 through 2025; 2023 predictions give 2023H2 its cutoff history. **One fixed configuration, no tuning** (mine): `max_leaf_nodes` 7, `min_samples_leaf` 300, `learning_rate` 0.03, `l2_regularization` 10, `max_iter` 300, early stopping off (a random split would separate one event's structures), seed 0. Under 1,000 training rows for a family: that year is undetermined (`selection_burn_in`).
 
@@ -227,8 +227,9 @@ Planned requirements; no Stage B code exists yet.
 | R1: no bound Stage A pass receipt, changed spec or no PLANNED row | refuse (`stage_a_not_passed`, `spec_hash_mismatch`, `planned_row_missing`) |
 | R1 whole run: panel, folds, M0, quantile receipts, snapshot, F tables or pinned EXP-189 version do not bind; F's own R1 refusals | `EXPERIMENT_IDENTITY_CONFLICT` with `details.reason`; no partial report, nothing rebuilt or imputed |
 | R1 per row: quantiles in burn-in, thin pool or cutoff history, missing fact | undetermined (6.2), counted by reason; never "no" |
-| Thin `kappa` or TF history; `zero_median`; `selection_burn_in` | that arm's row undetermined, counted |
-| Width declined, ladder too coarse, F status or guard, no feasible `k`; unusable exit | 6.1: non-trade at P&L 0, or the flagged conservative exit; the event stays |
+| Thin `kappa` or TF history; `zero_median` in TF's `R`; `selection_burn_in` | that arm's row undetermined, counted |
+| Entry: width declined, ladder too coarse, F status or guard, no feasible `k` | non-trade at P&L 0, counted; the event stays |
+| Exit unusable after entry | never a non-trade: 6.1's flagged conservative or `exit_fair_mid` exit |
 | A selection fit fails | that year, family and source: N1 and N2 `fit_failed`, no retry; verdict `not_testable`; other arms run |
 | `G_PROD` artifacts absent | `not_available`; no verdict depends on it |
 | R2 cost | one heavy job, `bounded_run`, quarter chunks; each quote row priced once per chunk; over limit refuses `RESOURCE_LIMIT_EXCEEDED`, no partial report |
