@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Re-ingest ORATS smvVol and rates into experiment parquet; see tools/ARCHITECTURE.md."""
+"""Re-ingest ORATS smvVol, rates, borrow and dividend fields; see tools/ARCHITECTURE.md."""
 import argparse
 import contextlib
 import gzip
@@ -30,12 +30,16 @@ from engine.data.fetch import iter_cached
 from engine.data.normalize.common import mask_sentinels
 from engine.data.normalize.fetch_store import payload_shape
 
-TOOL_VERSION, LOG = "3", logging.getLogger("smvvol")
+TOOL_VERSION, LOG = "4", logging.getLogger("smvvol")
 MAX_META_BYTES, MAX_BODY_BYTES = 1 << 20, 1 << 28
 QKEYS, RKEYS = ["ticker", "obs_date", "expiry", "strike"], ["ticker", "obs_date"]
 QVALS, RATES = ["smvVol", "callMidIv", "putMidIv", "stockPrice"], ["iRate5wk", "iRateLt"]
+CARRY = ["borrow30", "borrow2yr", "annIdiv", "annActDiv", "divAmt", "divDate", "assetType"]
 TABLES = {"quotes": ("hist/strikes", QKEYS, QVALS, ["smvVol"]),
-          "rates": ("hist/cores", RKEYS, RATES, RATES)}
+          "rates": ("hist/cores", RKEYS, [*RATES, *CARRY], RATES)}
+UNITS = {"iRate5wk": "percent", "iRateLt": "percent", "borrow30": "percent",
+         "borrow2yr": "percent", "annIdiv": "dollars_per_share", "annActDiv": "dollars_per_share",
+         "divAmt": "dollars_per_share", "divDate": "date", "assetType": "code"}
 DATE = "datetime64[ns]"
 BAD, PROGRESS_S = ("unreadable", "unrecognized"), 30.0
 
@@ -108,7 +112,9 @@ def parse_entry(table: str, entry, blob: bytes) -> tuple:
         "obs_date": pd.to_datetime(raw["tradeDate"], errors="coerce").astype(DATE),
         "expiry": pd.to_datetime(raw["expirDate"], errors="coerce").astype(DATE),
         "strike": mask_sentinels(pd.to_numeric(raw["strike"], errors="coerce")),
-        **{v: mask_sentinels(pd.to_numeric(raw[v], errors="coerce")) for v in values},
+        **{v: (pd.to_datetime(raw[v], errors="coerce", format="ISO8601").astype(DATE)
+               if v == "divDate" else mask_sentinels(pd.to_numeric(raw[v], errors="coerce")))
+           for v in values},
     })
     fetched = pd.to_datetime((entry.meta or {}).get("fetched_at"), utc=True,
                              errors="coerce", format="ISO8601")
@@ -211,7 +217,8 @@ def merge_stage(work: Path, out: Path, markers: dict) -> dict:
                 index.setdefault(month, []).append(key)
         if (out / table).exists():
             shutil.rmtree(out / table)
-        totals = Counter(rows_out=0, conflicting_keys=0)
+        totals = Counter(rows_out=0, conflicting_keys=0, conflicting_keys_all_columns=0)
+        non_null = Counter(dict.fromkeys(values, 0))
         start = time.monotonic()
         for done, (month, entry_keys) in enumerate(sorted(index.items()), 1):
             shards = []
@@ -222,15 +229,19 @@ def merge_stage(work: Path, out: Path, markers: dict) -> dict:
                     raise ValueError(f"shard {path} changed after it was written")
                 shards.append(pd.read_parquet(io.BytesIO(blob)))
             df = pd.concat(shards, ignore_index=True)
-            conflicts = (df[cols].drop_duplicates().groupby(keys, sort=False).size() > 1).sum()
+            nc_cols = [*keys, *(v for v in values if v not in CARRY)]
+            conflicts = (df[nc_cols].drop_duplicates().groupby(keys, sort=False).size() > 1).sum()
+            conflicts_all = (df[cols].drop_duplicates().groupby(keys, sort=False).size() > 1).sum()
             final = df.sort_values([*keys, "fetched_at", "cache_key", "row_no"], kind="mergesort")
             final = final.drop_duplicates(subset=keys, keep="last")[cols].reset_index(drop=True)
             path = out / table / f"year={month[:4]}" / f"month={month[5:]}.parquet"
             _atomic(path, lambda t: final.to_parquet(t, index=False, engine="pyarrow"))
-            totals.update({"rows_out": len(final), "conflicting_keys": int(conflicts)})
+            totals.update({"rows_out": len(final), "conflicting_keys": int(conflicts),
+                           "conflicting_keys_all_columns": int(conflicts_all)})
+            non_null.update({v: int(final[v].notna().sum()) for v in values})
             LOG.info("[smvvol] merge %s %s: %d/%d months, rows_out %d, ETA %.0f s",
                      table, month, done, len(index), len(final), _eta(done, len(index), start))
-        result[table] = dict(totals)
+        result[table] = {**totals, "non_null": dict(non_null)}
     return result
 
 
@@ -246,6 +257,8 @@ def _table_counts(entries: list, markers: dict, counts: Counter, merged: dict) -
             "rows_in": c["rows_kept"], "rows_out": merged[table]["rows_out"],
             "duplicates_dropped": c["rows_kept"] - merged[table]["rows_out"],
             "conflicting_keys": merged[table]["conflicting_keys"],
+            "conflicting_keys_all_columns": merged[table]["conflicting_keys_all_columns"],
+            "non_null": merged[table]["non_null"],
         }
     return result
 
@@ -261,7 +274,8 @@ def _run(entries: list, out: Path, work: Path) -> int:
     divs: Counter = Counter()
     for m in markers["rates"].values():
         divs.update(m["dividend_fields"])
-    manifest = {"version": TOOL_VERSION, "tables": tables, "dividend_fields": divs}
+    manifest = {"version": TOOL_VERSION, "units": UNITS, "tables": tables,
+                "dividend_fields": divs}
     _atomic_json(out / "manifest.json", manifest)
     for name in ("shards", "markers"):
         shutil.rmtree(work / name, ignore_errors=True)
