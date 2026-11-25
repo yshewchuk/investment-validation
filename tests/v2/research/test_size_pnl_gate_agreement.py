@@ -241,6 +241,33 @@ def test_section_refuses_a_ladder_keyed_by_the_as_run_label_as_ladder_invalid():
     assert _reason(caught) == "ladder_invalid"
 
 
+# ---- shared admission: section and straddle_label refuse the same inputs ---------
+
+ADMIT_CALLS = {
+    "section": lambda selected, gap: agreement.section(M0, selected, accepted_gap=gap),
+    "straddle_label": lambda selected, gap: agreement.straddle_label(M0, selected, gap),
+}
+
+
+@pytest.mark.parametrize("call", list(ADMIT_CALLS.values()), ids=list(ADMIT_CALLS))
+@pytest.mark.parametrize("selected", [None, True, {"E1": float("nan")}, {"  ": 0.1}],
+                         ids=["none", "bool_return", "nan_return", "blank_id"])
+def test_both_entry_points_refuse_an_invalid_selected_as_stored_gate_invalid(call, selected):
+    with pytest.raises(OpsError) as caught:
+        call(selected, "test gap")
+    assert caught.value.problem.code == "INVALID_EXPERIMENT_SPEC"
+    assert _reason(caught) == "stored_gate_invalid"
+
+
+@pytest.mark.parametrize("call", list(ADMIT_CALLS.values()), ids=list(ADMIT_CALLS))
+@pytest.mark.parametrize("gap", ["", "   ", 5], ids=["empty", "blank", "non_str"])
+def test_both_entry_points_refuse_a_bad_accepted_gap_as_accepted_gap_invalid(call, gap):
+    with pytest.raises(OpsError) as caught:
+        call(SELECTED, gap)
+    assert caught.value.problem.code == "INVALID_EXPERIMENT_SPEC"
+    assert _reason(caught) == "accepted_gap_invalid"
+
+
 # ---- ladder_valid ------------------------------------------------------------
 
 @pytest.mark.parametrize("value", [{}, {"band": {"E1": 0.1}}, {"band": {}}])

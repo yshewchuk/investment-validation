@@ -21,6 +21,12 @@ CONTRAST_NOTE = ("d = median-type minus mean-type for the H2 pairs; M0 minus the
                  "arm harsh = harsh fills, reported only; arm primary = stored primary marks when no mid column exists.")
 
 
+def _admit_stored_gate(stored_gate):
+    """None is allowed (the caller decides whether a stored gate is needed); otherwise it must be {"selected": {event_id: finite ret}}."""
+    if stored_gate is not None and not stored_gate_valid(stored_gate):
+        raise fail(_INVALID, 'stored_gate must be {"selected": {event_id: finite ret}}', details={"reason": "stored_gate_invalid"})
+
+
 def _title(text):
     """A section titled with the Amendment 3 label."""
     return f"### {LABEL}: " + text[len("### "):]
@@ -67,7 +73,10 @@ def _m0_frame(det, role_model, label_of, in_e):
 
 def t10_straddle_label(gate_raw, role_model, label_of, outer_models, stored_gate, accepted_gap):
     """The straddle verdicts' label for this run, from the same M0 frame and agreement functions as the M0 section. Call it after
-    sections, which refuses a missing stored gate. NOT_COMPUTED when the run has no G_PROD rows or M0 is not in the run."""
+    sections, which refuses a missing stored gate. NOT_COMPUTED when the run has no G_PROD rows or M0 is not in the run; the
+    inputs are admitted first, as sections admits them."""
+    size_pnl_gate_agreement.admit_gap(accepted_gap)
+    _admit_stored_gate(stored_gate)
     if gate_raw.empty or not _m0_in_run(role_model, label_of, outer_models):
         return size_pnl_gate_agreement.NOT_COMPUTED
     det = gate_raw[gate_raw["status"] != "undetermined"]
@@ -92,12 +101,10 @@ def _agreement(det, role_model, label_of, outer_models, in_e, stored_gate, accep
 def sections(gate_raw, frame, *, label_of, role_model, roster, outer_models, quarter_of, tick, stored_gate=None, accepted_gap=None, ladder=None):
     """The G_PROD sections over the events that have a G_PROD row (``frame``, the G_PROD rows): per-model coverage and P&L, the
     covered-subset contrasts, and M0's agreement with production's stored 2025 decisions. [] when there are no gate rows."""
-    if accepted_gap is not None and not (isinstance(accepted_gap, str) and accepted_gap.strip()):  # direct callers are admitted here whatever the population
-        raise fail(_INVALID, "accepted_gap must be a non-empty string", details={"reason": "accepted_gap_invalid"})
+    size_pnl_gate_agreement.admit_gap(accepted_gap)  # direct callers are admitted here whatever the population
     if ladder is not None and not size_pnl_gate_agreement.ladder_valid(ladder):
         raise fail(_INVALID, "ladder must be a dict of label -> {event_id: finite score}", details={"reason": "ladder_invalid"})
-    if stored_gate is not None and not stored_gate_valid(stored_gate):
-        raise fail(_INVALID, 'stored_gate must be {"selected": {event_id: finite ret}}', details={"reason": "stored_gate_invalid"})
+    _admit_stored_gate(stored_gate)
     if gate_raw.empty:
         return []
     swapped = "pnl_dollars_mid" in gate_raw.columns

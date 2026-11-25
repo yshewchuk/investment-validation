@@ -297,6 +297,29 @@ def test_stored_gate_valid_rejects_malformed_values(value):
 
 
 NOT_COMPUTED = "Straddle verdicts (H2, and H3 through its straddle leg): production agreement not computed in this run."
+NO_M0 = set(LABEL_OF) - {"m0"}
+EMPTY = _gate(_cells()).iloc[0:0]
+
+
+def test_t10_straddle_label_with_empty_gate_and_no_m0_is_not_computed_for_none_inputs():
+    assert gprod_report.t10_straddle_label(EMPTY, ROLE_MODEL, LABEL_OF, NO_M0, None, None) == NOT_COMPUTED
+
+
+@pytest.mark.parametrize("gap", ["", "   ", 5], ids=["empty", "blank", "non_str"])
+def test_t10_straddle_label_refuses_a_bad_accepted_gap_before_not_computed(gap):
+    with pytest.raises(OpsError) as caught:
+        gprod_report.t10_straddle_label(EMPTY, ROLE_MODEL, LABEL_OF, NO_M0, None, gap)
+    assert caught.value.problem.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.details["reason"] == "accepted_gap_invalid"
+
+
+@pytest.mark.parametrize("stored", [{"selected": {"E1": True}}, {"selected": {"  ": 0.1}}, {"selected": None}],
+                         ids=["bool_ret", "blank_id", "non_dict_selected"])
+def test_t10_straddle_label_refuses_an_invalid_stored_gate_before_not_computed(stored):
+    with pytest.raises(OpsError) as caught:
+        gprod_report.t10_straddle_label(EMPTY, ROLE_MODEL, LABEL_OF, NO_M0, stored, None)
+    assert caught.value.problem.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.details["reason"] == "stored_gate_invalid"
 
 
 def test_t10_straddle_label_is_not_computed_without_gate_rows_or_m0():

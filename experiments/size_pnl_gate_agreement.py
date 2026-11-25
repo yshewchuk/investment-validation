@@ -138,10 +138,21 @@ def ladder_table(steps, covered, prod, threshold):
     return report.md_table(["step", "scored", "selected", "rate", "overlap_with_production", "jaccard"], rows)
 
 
-def check(st, accepted_gap):
-    """Raises when agreement is below the bar and no gap is accepted; returns the label ("" when at or above the bar)."""
+def admit_gap(accepted_gap):
+    """Admits ``accepted_gap``: None or a non-blank str. Raises accepted_gap_invalid otherwise."""
     if accepted_gap is not None and not (isinstance(accepted_gap, str) and accepted_gap.strip()):
         raise _refuse("accepted_gap_invalid", "accepted_gap must be a non-empty string")
+
+
+def admit_selected(selected):
+    """Admits ``selected``: {event_id: finite ret} with non-blank ids. Raises stored_gate_invalid otherwise."""
+    if not valid({"selected": selected}):
+        raise _refuse("stored_gate_invalid", "selected must map non-empty event ids to finite returns")
+
+
+def check(st, accepted_gap):
+    """Raises when agreement is below the bar and no gap is accepted; returns the label ("" when at or above the bar)."""
+    admit_gap(accepted_gap)
     jac = st["jaccard"]
     if not (st["covered"] and jac is not None and jac >= MIN_JACCARD):
         if accepted_gap is None:
@@ -163,7 +174,9 @@ def live_domain(m0, selected):
 
 def agreement_parts(m0, selected, accepted_gap):
     """The one computation behind the M0 section and the straddle label: the as-run stats, the live domain, and check's label
-    (raises as check does)."""
+    (raises as check does). Admits both inputs before anything computes."""
+    admit_gap(accepted_gap)
+    admit_selected(selected)
     st = stats(m0, selected)
     return st, live_domain(m0, selected), check(st, accepted_gap)
 
@@ -185,8 +198,7 @@ def straddle_label(m0, selected, accepted_gap):
 def section(m0, selected, *, accepted_gap=None, ladder=None):
     """The M0 agreement section (markdown). ``m0``: M0's determined 2025 G_PROD rows in E, one per event; ``selected``: {id: ret_mid}.
     check runs first, so a failing bar raises before anything is rendered."""
-    if not valid({"selected": selected}):
-        raise _refuse("stored_gate_invalid", "selected must map non-empty event ids to finite returns")
+    admit_selected(selected)  # before the ladder check, so selected is refused first
     if ladder is not None and not ladder_valid(ladder):
         raise _refuse("ladder_invalid", "ladder must map labels (not the as-run label) to {event_id: finite score}")
     st, live, label = agreement_parts(m0, selected, accepted_gap)
