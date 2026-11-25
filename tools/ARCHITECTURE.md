@@ -6,7 +6,7 @@ Standalone operator tools. `bounded_run.py` is the wrapper every heavy job runs 
 
 ## `orats_smoothed_vol.py`: experiment-side smoothed vol
 
-The production chain normalizer drops ORATS `smvVol`; this operator tool re-reads the raw cache into separate tables for fair-value fill experiments. No production path or `size_panel.py` closure file imports it; it writes no ledger row. Protected directories are the raw, curated and feature stores, `--raw-root` and `--curated-chains`.
+The production chain normalizer drops ORATS `smvVol`; this operator tool re-reads the raw cache into separate tables for fair-value fill experiments. No production path or `size_panel.py` closure file imports it; it writes no ledger row. Protected directories are the raw, curated and feature stores and `--raw-root`.
 
 Output root: `--out`, default `data/experiment/orats_smoothed_vol/`. Each table is split into `year=YYYY/month=MM.parquet`, sorted by its unique key.
 
@@ -14,10 +14,9 @@ Output root: `--out`, default `data/experiment/orats_smoothed_vol/`. Each table 
 |---|---|
 | `quotes/` | `hist/strikes`. Key `(ticker, obs_date, expiry, strike)`, built as the chain normalizer builds it from `tradeDate` and `expirDate`; join to `option_chains` on these four (both sides of a strike share the row). Values `smvVol`, `callMidIv`, `putMidIv`, `stockPrice`, as vendor-reported: sentinels become NaN, zeros stay zero. |
 | `rates/` | `hist/cores`. Key `(ticker, obs_date)`. Values `iRate5wk`, `iRateLt`. |
-| `coverage.json` | Per year (2017–2026) and `chain_kind`, plus `all`: curated rows, rows with a quote key, with `smvVol > 0` (`smv_share`), and with a rate. |
 | `manifest.json` | Per-table entry, skip and row counts, `duplicates_dropped`, and `conflicting_keys` (duplicated keys whose values differ). Written last. |
 
-Dividends: none are ingested. `dividend_fields` in `coverage.json` counts non-null rows for each parsed `hist/cores` field whose name contains `div` (empty: none present); presence does not establish meaning.
+Match coverage against `option_chains` is not reported yet. Dividends: none are ingested. `dividend_fields` in `manifest.json` counts non-null rows for each parsed `hist/cores` field whose name contains `div` (empty: none present); presence does not establish meaning.
 
 | Condition | Outcome |
 |---|---|
@@ -25,10 +24,10 @@ Dividends: none are ingested. `dividend_fields` in `coverage.json` counts non-nu
 | A payload has no non-null `smvVol` (quotes) or no non-null rate (rates) | Skipped and counted, so it cannot override a pull that had them. |
 | A row has an unusable key | Dropped and counted. |
 | A body is unreadable (over 256 MiB, either form) or its shape unrecognized | Counted and logged. Outputs and the manifest are still written; exit 1. Nothing is quarantined. |
-| A run stops after preflight | No manifest exists. The next run reuses unchanged entries in `--work-dir` (default under `/tmp`) with sound shards; others are reparsed. |
+| A run stops after preflight | No manifest exists. The next run reuses unchanged entries in `--work-dir` (default under `/tmp`) with unaltered shards; others are reparsed. A shard that changes before its merge fails the run. |
 | A run completes | Its shards and markers are removed; other files in `--work-dir` remain. A rerun rebuilds; the same cache and library versions give identical outputs. |
 | A metadata sidecar exceeds 1 MiB | The run fails on the shared listing's `ValueError`, naming the file, before writing anything. |
-| An output or work directory equals, contains or sits inside a protected one or each other; no curated chain file or `hist/strikes` entry | Refused with a message before writing anything. |
+| An output or work directory equals, contains or sits inside a protected one or each other; no `hist/strikes` entry | Refused with a message before writing anything. |
 | `--work-dir` cannot be created | The run fails and any previous manifest remains. |
 | Two runs share an output or work directory | Unsupported: there is no lock. |
 

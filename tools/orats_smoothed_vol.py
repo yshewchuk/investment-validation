@@ -15,7 +15,6 @@ import time
 import zlib
 from collections import Counter
 from contextlib import contextmanager
-from datetime import datetime
 from pathlib import Path
 
 # ruff: noqa: E402
@@ -24,26 +23,25 @@ sys.path.insert(0, str(ROOT))
 
 import numpy as np
 import pandas as pd
-import pyarrow.parquet as pq
 
 from engine import paths
 from engine.data.fetch import iter_cached
 from engine.data.normalize.common import mask_sentinels
 from engine.data.normalize.fetch_store import payload_shape
 
-TOOL_VERSION, LOG = "2", logging.getLogger("smvvol")
+TOOL_VERSION, LOG = "3", logging.getLogger("smvvol")
 MAX_META_BYTES, MAX_BODY_BYTES = 1 << 20, 1 << 28
 QKEYS, RKEYS = ["ticker", "obs_date", "expiry", "strike"], ["ticker", "obs_date"]
 QVALS, RATES = ["smvVol", "callMidIv", "putMidIv", "stockPrice"], ["iRate5wk", "iRateLt"]
 TABLES = {"quotes": ("hist/strikes", QKEYS, QVALS, ["smvVol"]),
           "rates": ("hist/cores", RKEYS, RATES, RATES)}
 DATE = "datetime64[ns]"
-BAD, YEARS, PROGRESS_S = ("unreadable", "unrecognized"), range(2017, 2027), 30.0
+BAD, PROGRESS_S = ("unreadable", "unrecognized"), 30.0
 
 
-def check_out_dir(path: Path, raw_root: Path, curated: Path, label: str) -> Path:
+def check_out_dir(path: Path, raw_root: Path, label: str) -> Path:
     resolved = path.resolve()
-    for target in (paths.RAW, paths.CURATED, paths.FEATURES, raw_root, curated):
+    for target in (paths.RAW, paths.CURATED, paths.FEATURES, raw_root):
         t = target.resolve()
         if resolved == t or t in resolved.parents or resolved in t.parents:
             raise SystemExit(f"{label} {resolved} overlaps {t}; refusing to write")
@@ -110,6 +108,13 @@ def parse_entry(table: str, entry, blob: bytes) -> tuple:
     return "ok", kept, {"rows_bad_key": int(bad.sum()), "rows_kept": len(kept)}, divs
 
 
+def _shard_digest(path: Path) -> str:
+    if path.stat().st_size > MAX_BODY_BYTES:
+        raise ValueError(f"shard {path} exceeds {MAX_BODY_BYTES} bytes")
+    with open(path, "rb") as fh:
+        return hashlib.file_digest(fh, "sha256").hexdigest()
+
+
 def _reusable_marker(marker_path: Path, stamp: list, shard_dir: Path, key: str):
     try:
         with open(marker_path, "rb") as fh:
@@ -117,8 +122,9 @@ def _reusable_marker(marker_path: Path, stamp: list, shard_dir: Path, key: str):
         marker = json.loads(raw) if len(raw) <= MAX_META_BYTES else None
         if marker is None or marker["stamp"] != stamp:
             return None
-        for month in marker["months"]:
-            pq.read_metadata(shard_dir / month / f"{key}.parquet")
+        for month, digest in marker["months"].items():
+            if _shard_digest(shard_dir / month / f"{key}.parquet") != digest:
+                return None
         return marker
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
@@ -140,12 +146,12 @@ def _shard_item(table: str, entry, work: Path) -> tuple:
         return "unreadable", None, str(exc)
     if status == "unrecognized":
         return "unrecognized", None, "payload shape unrecognized"
-    months = []
+    months = {}
     if frame is not None and not frame.empty:
         for month, part in frame.groupby(frame["obs_date"].dt.strftime("%Y-%m")):
             path = work / "shards" / table / month / f"{entry.key}.parquet"
             _atomic(path, lambda t, p=part: p.to_parquet(t, index=False, engine="pyarrow"))
-            months.append(month)
+            months[month] = _shard_digest(path)
     marker = {"stamp": stamp, "months": months, "counters": counters, "dividend_fields": divs}
     _atomic_json(marker_path, marker)
     return status, marker, ""
@@ -184,8 +190,12 @@ def merge_stage(work: Path, out: Path, markers: dict) -> dict:
         totals = Counter(rows_out=0, conflicting_keys=0)
         start = time.monotonic()
         for done, (month, entry_keys) in enumerate(sorted(index.items()), 1):
-            shards = [pd.read_parquet(work / "shards" / table / month / f"{k}.parquet")
-                      for k in entry_keys]
+            shards = []
+            for k in entry_keys:
+                path = work / "shards" / table / month / f"{k}.parquet"
+                if _shard_digest(path) != markers[table][k]["months"][month]:
+                    raise ValueError(f"shard {path} changed after it was written")
+                shards.append(pd.read_parquet(path))
             df = pd.concat(shards, ignore_index=True)
             conflicts = (df[cols].drop_duplicates().groupby(keys, sort=False).size() > 1).sum()
             final = df.sort_values([*keys, "fetched_at", "cache_key", "row_no"], kind="mergesort")
@@ -197,57 +207,6 @@ def merge_stage(work: Path, out: Path, markers: dict) -> dict:
                      table, month, done, len(index), len(final), _eta(done, len(index), start))
         result[table] = dict(totals)
     return result
-
-
-def _read_chains(curated: Path, year: int, month: int):
-    start, end = datetime(year, month, 1), datetime(year + (month == 12), month % 12 + 1, 1)
-    filters = [("obs_date", ">=", start), ("obs_date", "<", end)]
-    frames = [pq.read_table(f, columns=[*QKEYS, "chain_kind"], filters=filters).to_pandas()
-              for f in sorted(curated.glob(f"year={year}/part-*.parquet"))]
-    if not sum(map(len, frames)):
-        return None
-    df = pd.concat(frames, ignore_index=True)
-    df = df.astype({"ticker": str, "strike": float, "obs_date": DATE, "expiry": DATE})
-    df["chain_kind"] = df["chain_kind"].astype(object).fillna("unknown").astype(str)
-    return df
-
-
-def _read_out(out: Path, table: str, year: int, month: int, cols: list, empty: pd.DataFrame):
-    path = out / table / f"year={year}" / f"month={month:02d}.parquet"
-    return pd.read_parquet(path) if path.exists() else empty.reindex(columns=cols).iloc[:0]
-
-
-def coverage_stage(curated: Path, out: Path) -> list[dict]:
-    tallies: dict = {}
-    start = time.monotonic()
-    for i, year in enumerate(YEARS, 1):
-        for month in range(1, 13):
-            chains = _read_chains(curated, year, month)
-            if chains is None:
-                continue
-            quotes = _read_out(out, "quotes", year, month, QKEYS + ["smvVol"], chains)
-            rates = _read_out(out, "rates", year, month, RKEYS + RATES, chains)
-            m = chains.merge(quotes, on=QKEYS, how="left", indicator=True, validate="many_to_one")
-            r = m.merge(rates, on=RKEYS, how="left", validate="many_to_one")
-            smv = m["smvVol"].to_numpy(dtype=float)
-            flags = pd.DataFrame({"chain_kind": m["chain_kind"].to_numpy(),
-                                  "key": (m["_merge"] == "both").to_numpy(),
-                                  "smv": np.isfinite(smv) & (smv > 0),
-                                  "rates": r[RATES].notna().any(axis=1).to_numpy()})
-            for kind, g in flags.groupby("chain_kind"):
-                add = np.array([len(g), *g[["key", "smv", "rates"]].sum()], dtype=np.int64)
-                tallies[(year, kind)] = tallies.get((year, kind), 0) + add
-        LOG.info("[smvvol] coverage %d done: %d/%d years, ETA %.0f s",
-                 year, i, len(YEARS), _eta(i, len(YEARS), start))
-    rows = []
-    for year in YEARS:
-        kinds = sorted(k for y, k in tallies if y == year)
-        total = sum((tallies[(year, k)] for k in kinds), np.zeros(4, dtype=np.int64))
-        for kind, v in [(k, tallies[(year, k)]) for k in kinds] + [("all", total)]:
-            n = dict(zip(["rows", "key_matched", "smv_matched", "rates_matched"], map(int, v)))
-            share = round(n["smv_matched"] / n["rows"], 6) if n["rows"] else None
-            rows.append({"year": year, "chain_kind": kind, **n, "smv_share": share})
-    return rows
 
 
 def _table_counts(entries: list, markers: dict, counts: Counter, merged: dict) -> dict:
@@ -266,7 +225,7 @@ def _table_counts(entries: list, markers: dict, counts: Counter, merged: dict) -
     return result
 
 
-def _run(entries: list, curated: Path, out: Path, work: Path) -> int:
+def _run(entries: list, out: Path, work: Path) -> int:
     work.mkdir(parents=True, exist_ok=True)
     (out / "manifest.json").unlink(missing_ok=True)
     with _stage("shard"):
@@ -277,10 +236,7 @@ def _run(entries: list, curated: Path, out: Path, work: Path) -> int:
     divs: Counter = Counter()
     for m in markers["rates"].values():
         divs.update(m["dividend_fields"])
-    with _stage("coverage"):
-        rows = coverage_stage(curated, out)
-        _atomic_json(out / "coverage.json", {"coverage": rows, "dividend_fields": divs})
-    manifest = {"version": TOOL_VERSION, "tables": tables}
+    manifest = {"version": TOOL_VERSION, "tables": tables, "dividend_fields": divs}
     _atomic_json(out / "manifest.json", manifest)
     for name in ("shards", "markers"):
         shutil.rmtree(work / name, ignore_errors=True)
@@ -293,24 +249,21 @@ def _run(entries: list, curated: Path, out: Path, work: Path) -> int:
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--raw-root", type=Path, default=paths.RAW_FETCH)
-    p.add_argument("--curated-chains", type=Path, default=paths.CURATED / "option_chains")
     p.add_argument("--out", type=Path, default=paths.DATA / "experiment" / "orats_smoothed_vol")
     p.add_argument("--work-dir", type=Path, default=Path("/tmp/orats_smoothed_vol_work"))
     args = p.parse_args(sys.argv[1:] if argv is None else argv)
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(message)s")
-    raw_root, curated = args.raw_root.resolve(), args.curated_chains.resolve()
-    out = check_out_dir(args.out, raw_root, curated, "--out")
-    work = check_out_dir(args.work_dir, raw_root, curated, "--work-dir")
+    raw_root = args.raw_root.resolve()
+    out = check_out_dir(args.out, raw_root, "--out")
+    work = check_out_dir(args.work_dir, raw_root, "--work-dir")
     if out == work or out in work.parents or work in out.parents:
         raise SystemExit("--out and --work-dir must not equal or contain each other")
     found = [(name, e) for name, spec in TABLES.items()
              for e in iter_cached("orats", spec[0], root=raw_root, max_meta_bytes=MAX_META_BYTES)]
     entries = sorted(found, key=lambda it: (it[0], it[1].key))
-    if not list(curated.glob("year=*/part-*.parquet")):
-        raise SystemExit(f"no year=*/part-*.parquet under {curated}")
     if not any(table == "quotes" for table, _ in entries):
         raise SystemExit("zero hist/strikes entries in the raw cache")
-    return _run(entries, curated, out, work)
+    return _run(entries, out, work)
 
 
 if __name__ == "__main__":
