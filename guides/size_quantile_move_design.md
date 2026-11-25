@@ -156,7 +156,7 @@ One `spec.yaml` holds every fixed rule of **both parts**. Its PLANNED row, carry
 
 **EQ minus E**, on events both determine (drops counted), is the distribution's value for width choice, level and shape together. If both Q and Q_raw pass Stage A, EQ runs for each, both counted in the uncorrected multiplicity; if one passes, only for it (my reading). The Stage A gate is unchanged. Report per year and structure at F, mid and harsh, like other arms.
 
-**Clean years.** 2024 is **not** clean: the feature set and grid values used 2023-2024. 2025 is clean for EQ's width, selection and model-parameter choices (`k` uses no realised outcome; cutoffs, calibration, tails and pools use earlier data). It is **not a holdout**: the Stage A gate reads 2025, and EQ follows E's recommendation, made having seen 2025.
+**Clean years.** 2024 is **not** clean (features and grid used 2023-2024). 2025 is clean for EQ's width, selection and model parameters (`k` uses no realised outcome), but is **not a holdout**: the Stage A gate reads it, and E was recommended having seen it.
 
 ## 11. Split list (code slices for part 1; none starts until this design merges)
 

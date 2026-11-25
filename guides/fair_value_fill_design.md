@@ -23,7 +23,7 @@
 
 **Data facts (supervisor-checked 2026-11-25, not re-read here).** `engine/data/normalize/n_chains.py` drops `smvVol` from curated `option_chains`; the raw cache has it per strike. Open interest and both sizes exist only on `chain_kind=fetch` rows (2023-01-03 to 2025-12-31), about 75-80% of rows; `eod`, `t14` and `c2` rows have none, so earlier history has none.
 
-**The re-ingest tool** (`tools/orats_smoothed_vol.py`, another owner's, not yet merged) writes no production store and needs no paid backfill. F binds the content hash of its `manifest.json` (written last) and of every table file read. A missing manifest, or a manifest with a null `input_fingerprint` (some payloads unread), refuses. If the merged tool's columns differ from the table above, this file is amended before slice F1.
+**The re-ingest tool** (`tools/orats_smoothed_vol.py`, unmerged) writes no production store. F binds the content hash of its `manifest.json` (written last) and of every table file read. A missing manifest, or a manifest with a null `input_fingerprint` (some payloads unread), refuses. If the merged tool's columns differ from the table above, this file is amended before slice F1.
 
 **Units.** `spot`, strikes and quotes are dollars per share; vols and rates are annualised decimals. The raw units are confirmed from the re-ingest and pinned in each consumer's spec before registration, using no outcome. After conversion, a rate outside [-0.05, 0.20] is `rate_unknown`; a non-finite or non-positive vol is missing; a bound vol table whose median `smvVol` is outside (0.05, 5) refuses `vol_unit` (bounds mine).
 
@@ -32,9 +32,9 @@
 Per quote row, with `S` the row's curated `spot` (the one strike resolution uses; the re-ingest's `stockPrice` is not used), `T = max(expiry - obs_date, 0) / 365` in calendar days, and `V` the fair value, **clamped to [bid, ask]**:
 
 - `T = 0`: intrinsic value, then clamped.
-- **Calls:** European Black-Scholes. Under this model's zero-dividend rule (below) and a non-negative rate, that equals the model's American value; it is not so for a real dividend payer, and with a negative rate it is an approximation.
+- **Calls:** European Black-Scholes: the American value only under zero dividends and a non-negative rate.
 - **Puts:** American, by a Cox-Ross-Rubinstein tree with **200 steps** (mine), vectorised over rows, early exercise at every step. Vol is floored at 0.01; a tree probability outside (0, 1) is `no_fair_value`.
-- **Dividends: documented approximation, zero** (mine). The coverage of a causal dividend source is unconfirmed, and ORATS's own dividend inputs for `smvVol` are not carried, so a second source could disagree with them. Where a dividend falls before expiry, the omission under-values puts and over-values calls; the clamp keeps `V` inside the quote but does not bound its error against the true value. It is not corrected.
+- **Dividends: documented approximation, zero** (mine). Causal dividend coverage is unconfirmed, and ORATS's dividend inputs are not carried. A dividend before expiry makes F under-value puts and over-value calls; the clamp does not bound that error.
 - **Rate:** `iRate5wk` up to 35 calendar days to expiry, linear to `iRateLt` at 365, flat beyond; if one of the two is missing, the other is used (mine). The row is the ticker's for `obs_date`, else its latest earlier one within 7 calendar days; none: `rate_unknown`.
 
 Tests: published American put values; at zero rate the put tree matches the European put `engine.pnl_sim.black_scholes_put` within the tree's discretisation error, and the call matches that put by parity, `C = P + S - K`.
@@ -45,7 +45,7 @@ Tests: published American put values; at zero rate the put tree matches the Euro
 2. Otherwise the **fallback smile**: weighted least squares `iv = a + b*k + c*k^2`, `k = ln(K/S)/sqrt(T)`, on the fit set's stored `iv`, by `numpy.polyfit` with residual weight `1/max((ask - bid)/mid, 0.02)`. It needs at least 5 distinct strikes, with one or more below and one or more above `S`. Outside the fitted `k` range the edge value holds. All rows of the expiry use the smile.
 3. A fit that cannot be made, or a non-positive fitted value inside the fitted range: `no_fair_value` for every row of the expiry (fit rules mine).
 
-The two sources are never mixed within an expiry. Stored `iv` is ORATS's mid IV under ORATS's conventions, not this tree's, so a smile value is an approximation to `smvVol`; their gap is printed where both exist.
+Sources never mix within an expiry. The smile only approximates `smvVol` (stored `iv` follows ORATS's conventions); their gap is printed.
 
 ## 5. Fill
 
@@ -118,22 +118,22 @@ New constants are a **new constants id**. A consumer needs a new spec hash and P
 | Rule | Case | Result |
 | --- | --- | --- |
 | R1 inputs | snapshot, manifest or table hash does not bind; manifest absent or fingerprint null; required column absent; duplicate quote or vol key; vol unit check fails | refuse `EXPERIMENT_IDENTITY_CONFLICT` with a `details.reason`; no partial output; nothing imputed except the rules written above |
-| R1 per row | missing vol, rate or quote | the row statuses of sections 4 and 7, counted by reason; never silent, never zero |
-| R2 resources | cost is the put tree on unique rows | quarter chunks, each unique row priced once per run, under the consumer's `bounded_run` and declared limit; over it refuses `RESOURCE_LIMIT_EXCEEDED`, no partial report. The smoke measures time and memory first |
-| R3 determinism | no randomness, no clock | same bound inputs give the same values; results do not depend on row order, chunking or which structures are requested |
-| R4 replay | a consumer that stores leg tables | writes them atomically with a receipt binding input hashes and the F id; exact replay is read-only; a changed input under a receipt refuses, no repair. Scratch follows AGENTS.md |
+| R1 per row | missing vol, rate or quote | section 7 statuses, counted; never silent or zero |
+| R2 resources | put tree on unique rows | quarter chunks, each row priced once per run, under the consumer's `bounded_run` limit; over it refuses `RESOURCE_LIMIT_EXCEEDED`, no partial report. Smoke first |
+| R3 determinism | no randomness or clock | values never depend on row order, chunking or requested structures |
+| R4 replay | stored leg tables | atomic writes with a receipt binding input hashes and F id; replay read-only; changed input refuses |
 | R5 identity | `fvf_id` | content hash of F's source files and constants (pricer steps, rate, dividend and smile rules, concession, guard); a consumer's spec binds it, and a mismatch refuses |
 | R6 causality | all values | a row uses only its own `obs_date` quotes, vols and spot, and a rate row dated no later. Entry values never read exit-date rows. "Earlier" means data dates, never `computed_at`. Section 9 is the only fitted part |
 
-Progress logging follows AGENTS.md, with counts by status.
+Progress logging follows AGENTS.md.
 
 ## 11. Limits
 
-- Until real fills calibrate F, its constants are assumptions; no direction of error is claimed.
-- `smvVol` and quotes share a vendor. F leaves cross-strike no-arbitrage violations; the diagnostic measures them.
-- The concession ignores order size and spread-order fills inside the legs' sum.
-- In `exp_pnl_sim` only the entry cost changes: the simulated exit stays the engine's European, zero-rate value with **no concession**, so simulated returns are optimistic against F-scored exits. A trailing-rank gate absorbs a common level shift, not differences between names.
-- `smvVol` and rate coverage is unverified; a source mix varying by year or pull type is a confound.
+- Uncalibrated constants are assumptions; no direction of error is claimed.
+- F leaves cross-strike no-arbitrage violations (measured by the diagnostic).
+- The concession ignores order size and spread-order fills.
+- The `exp_pnl_sim` simulated exit stays European, zero-rate with **no concession**: optimistic against F-scored exits, and rank gating does not absorb differences between names.
+- `smvVol` and rate coverage is unverified; a changing source mix is a confound.
 
 ## 12. Split list (code slices; none starts until this design merges)
 
