@@ -120,15 +120,15 @@ Rules marked "mine" are judgement calls for the user's review.
 - **Sources.** `s` is Q (calibrated) or Q_raw (uncalibrated), each with its own tails; an arm suffixed `_s` uses only `s`. Both run whenever Stage A passes, each labelled with its own Stage A verdict. EQ alone runs only for a source that itself passed (section 10).
 - **Machinery.** EXP-188's production-exact rules as a library (its design section 18: strikes through `price_structure`, no zero-floor drop, entry and exit sessions, spread and market-cap terms, per-arm trailing cutoffs, exit rungs). No `size_pnl_*` or `size_width_*` file changes. The draw key is `event_id`, shared by all arms.
 - **Fill model F** (`guides/fair_value_fill_design.md`) is primary for **selection and scoring**: `debit_F` is the entry cost in `exp_pnl_sim`, in E's and EQ's `k` choice, in lots and in accounts; `debit_F` and `proceeds_F` give every deciding P&L and the selection-model target. The simulated exit inside `exp_pnl_sim` is unchanged (European, zero-rate, no concession). The spec pins the F design as merged at registration and its `fvf_id`. If carry and dividends (PR #2910, slice F7) are merged by then, F includes them; otherwise dividends are zero, as stated.
-- **Mid and harsh** are reported on the same F-selected taken set, from existing code: mid is `FillModel(0.5)`, harsh is every leg at alpha 0, entry and exit. F's three sensitivities are reported per trade and per family account. None decides or breaks a tie.
-- **Guard and statuses** (mine, as EXP-189 Amendment 1 A1.4 proposes in PR #2925): after geometry resolves, a leg that is not `ok` or an F guard failure is a counted **non-trade** for that arm (`f_<status or guard reason>`). It has no score and stays out of cutoff history; the event stays.
+- **Mid and harsh** are reported on the same F-selected taken set, from existing code: mid is `FillModel(0.5)`, harsh is every leg at alpha 0, entry and exit. F's three sensitivities (unknown liquidity 0, unknown 1, mid-floored; F design section 5) are reported per trade and per family account. None decides or breaks a tie.
+- **Guard and statuses** (mine, as EXP-189 Amendment 1 A1.4 proposes in PR #2925): after geometry resolves (a quote that fails resolution is already undetermined, 6.2), a leg that is not `ok` or an F guard failure is a counted **non-trade** for that arm (`f_<status or guard reason>`). It has no score and stays out of cutoff history; the event stays.
 - **Conservative exit.** An `unpriceable` exit leg, or exit rung 3, marks the structure at its worst-case payoff (EXP-188 design section 6: zero for the straddle, the defined-risk floor for put structures), labelled `exit_unquoted_worst_case`. F's `exit_fair_mid` rule applies. Negative `proceeds_F` is kept and flagged, not floored (mine). A held trade never leaves.
 
 ### 6.2 Universe, gate, populations
 
 A **candidate** is (event, structure), or an event for the straddle. Short vol (seven put-side structures; families: **centre-peaked** CND-PS, BFLY-P, BFLY-P5, RAMP7, CTR5; **twin** TWIN-P, TWIN-P5): market cap >= $10B and mean relative spread <= 25% on stored quotes, as production. Straddle: STR-THRU long legs, EXP-188 Amendment 5's universe (market cap >= $1B, `BAD_QUOTE` refused at mid cost, no spread term). No call-side short leg.
 
-Unless stated, an arm **takes** a candidate when its score is at or above `trailing_cutoff` (6 months strictly before the month, top 20%, at least 100 scores) over **that arm's own** earlier universe scores, per structure.
+Unless stated, an arm **takes** a candidate when its score (`exp_pnl_sim` on `debit_F`; N1 and N2: predicted return; ST and ST0: `P`) is at or above `trailing_cutoff` (6 months strictly before the month, top 20%, at least 100 scores) over **that arm's own** earlier universe scores, per structure.
 
 A row is **determined** for an arm when it has a decision or a counted non-trade (width declined, `ladder_too_coarse`, F status or guard, outside the universe, take rule not met). A fact the arm's rule needs but lacks makes it **undetermined, never "no"**: forecast, quantiles, pool, cutoff history, market cap, spread, implied move (ST, ST0), or, at geometry resolution (before F), an absent strike or unusable entry quote. Each candidate arm has **one paired population**: the rows determined by it and all its controls. Its account and theirs walk only those rows; drops are counted by arm, reason and year. The determined share of admitted candidates is reported, not gated.
 
@@ -149,7 +149,7 @@ A row is **determined** for an arm when it has a decision or a counted non-trade
 | **ST_s** | candidate | straddle | take on the probability that the move beats the implied move (6.6) |
 | ST0 | control for ST_s | straddle | the same rule from B0 |
 
-**E** is recomputed in this run. The spec pins EXP-189's design, every merged amendment (Amendment 1, PR #2925, is open now) and modules. Whatever fill that version uses, Stage B scores E under F, with the F guard a feasibility condition. E and EQ keep EXP-189's grid, ties, no-feasible-`k`, own-score selection, funding and account rules, without its fallback.
+**E** is recomputed in this run. The spec pins EXP-189's design, every merged amendment (Amendment 1, PR #2925, is open now) and modules. Whatever fill that version uses, Stage B scores E under F, with the F guard a feasibility condition. E and EQ keep EXP-189's grid, ties, no-feasible-`k`, own-score selection, funding and account rules, and the buildability fallback section 10 names, as that version defines it for arm E; SB0 writes the definition into the spec.
 
 **`QuantilePool_s`** exposes the two methods the simulators call, `draw` and `before`. `draw` calls the wrapped pool's `draw` (same M0 forecast, count and random stream), takes each drawn `err_move`'s rank `u = (rank + 0.5)/n` among the draws (ties in draw order; an empty draw passes through) and returns `Qinv_event(u) - forecast`, so the simulated move is the event's own quantile at `u`. `err_crush` is unchanged, keeping the historic move/crush rank dependence [D12]. D, WD and LWD wrap P0's pool; EQ wraps E's. `pnl_sim.expected_pnl` is unmodified; the fast path must match it within 1e-9 or the run aborts.
 
@@ -192,7 +192,7 @@ By arm, structure, family and year: candidates, determined share, trades, declin
 
 The EXP-188 / EXP-189 policy: **$200,000 cash-secured**; EXP-134's `margin.simulate` unchanged through the existing account module: cap 0.66 of current equity, `target_share` 0.25, expensive first, every short put secured at strike x 100; a straddle secured at its debit x 100. Entry cost `debit_F`, exit value `proceeds_F`. Accounts: each structure; centre-peaked five; twin pair; all seven (reported); straddle. Verdicts use the **family** account (centre-peaked, twin or straddle). Each period (2023H2, 2024, 2025) starts a fresh account. Mid and harsh accounts walk the same taken set at their own costs.
 
-**Breakeven alpha** reprices the arm's F-selected taken set on the alpha ladder {0, 0.25, 0.5, 0.75, 1}, entry and exit, with `engine.evaluate.breakeven_alpha_from_sweep` (no crossing: 0.0 if always positive, 1.0 if always negative). It tests that set's fill robustness, not its F return. At a high alpha a repriced debit can be non-positive; that trade leaves that alpha's mean, counted.
+**Breakeven alpha** reprices the arm's F-selected taken set on the alpha ladder {0, 0.25, 0.5, 0.75, 1}, entry and exit, with `engine.evaluate.breakeven_alpha_from_sweep`. With no crossing it returns None, which the caller maps to 0.0 if always positive and 1.0 if always negative. It tests that set's fill robustness, not its F return. At a high alpha a repriced debit can be non-positive; that trade leaves that alpha's mean, counted.
 
 ### 6.9 Success rule and multiplicity [D15]
 
@@ -209,8 +209,8 @@ W, D, WD, N1 and EQ are judged per family; TF on twin; ST on straddle. LW, LWD, 
 A candidate **passes** iff all hold:
 
 1. its family account return at F is **strictly** above every listed control's, in **each** of 2023H2, 2024 and 2025;
-2. its 2025 breakeven alpha is no more than that of P0, and of E, + 0.05 (straddle: ST0's + 0.05);
-3. short vol: at F in 2025, its stand-alone structure account loses to P0's in at most 1 of 5 (centre-peaked) or in neither (twin).
+2. its 2025 breakeven alpha is at most P0's + 0.05 **and** at most E's + 0.05 (straddle: at most ST0's + 0.05);
+3. short vol only, comparing each stand-alone structure account with P0's at F in 2025: at most 1 of the five centre-peaked accounts loses; neither twin account loses.
 
 Requiring E as well as P0 (items 1 and 2) is my reading of "second control"; the margin and guard counts are mine. Results against P0 alone are printed. No trades in a period fails; an uncomputable comparison is `not_testable`.
 
@@ -242,7 +242,7 @@ Progress logging follows AGENTS.md.
 
 ### 6.11 Registration and Stage B limits
 
-Under section 9's single `spec.yaml`, slice B0 adds this section's fixed rules (arms, `tau` set and rule, features and configuration, fill pins, accounts, success rule) **before** the supervisor registers the **new PLANNED row** with the full spec hash. A later spec change needs an amendment and another row. No agent writes `experiments/LEDGER.csv`; non-recorded runs use `--no-ledger`. A 50-ticker smoke records time and peak RSS before the full run and tunes nothing.
+Under section 9's single `spec.yaml`, slice SB0 adds this section's fixed rules (arms, `tau` set and rule, features and configuration, fill pins, accounts, success rule) **before** the supervisor registers the **new PLANNED row** with the full spec hash. A later spec change needs an amendment and another row. No agent writes `experiments/LEDGER.csv`; non-recorded runs use `--no-ledger`. A 50-ticker smoke records time and peak RSS before the full run and tunes nothing.
 
 - The simulated exit is more optimistic than F's (F design section 11); width searches (E, EQ, `tau`) may favour that gap.
 - Years before 2023 have no stored size or open interest, and unverified vol and rate coverage, so N1/N2's training mix changes by era.
@@ -322,18 +322,18 @@ Estimates: non-test code lines / test lines / doc words. Part 1:
 | Q5b | Arm tables, bootstraps, scored share, pass rule | ~280 / ~250 / 40 | Q5a |
 | Q6 | Stage A driver, report, 50-ticker smoke with fit timing, runbook | ~130 / ~100 / 100 | Q5b |
 
-Part 2. **B1-B9b are written only after a Stage A pass.**
+Part 2 (`SB` ids; B0-B3 are section 5's baselines). **SB1-SB9b are written only after a Stage A pass.**
 
 | Slice | Scope | Size | After |
 | --- | --- | --- | --- |
-| B0 | Stage B rules in `spec.yaml`, with spec tests | ~40 / ~80 / 30 | this PR, Q1; before the PLANNED row |
-| B1 | F adapter: bound loads, leg tables, entry guard, exits, mid and harsh views (imports EXP-189's seam where it fits) | ~150 / ~170 / 40 | A passes, F4, F5 (F7 when 6.1 requires it) |
-| B2 | Trade-everything pricing, causal exit reader, receipts | ~150 / ~170 / 40 | B1 |
-| B3 | `QuantilePool`, fast-path equivalence | ~110 / ~140 / 40 | A passes |
-| B4 | Universe, cutoffs, row statuses, P0, D, TF | ~160 / ~170 / 40 | B2, B3 |
-| B5 | W, LW, WD, LWD, `tau` sweep and walk-forward choice | ~160 / ~180 / 40 | B4 |
-| B6 | E and EQ on pinned EXP-189 modules | ~140 / ~160 / 30 | B4, those modules merged |
-| B7 | N1/N2 features, annual fits, selection | ~170 / ~190 / 40 | B4 |
-| B8 | ST, ST0, probability diagnostics, `G_PROD` | ~140 / ~150 / 30 | B1-B3 |
-| B9a | Paired populations, accounts, breakeven, bootstraps, success table | ~170 / ~180 / 40 | B5-B8 |
-| B9b | Stage B driver, report, 50-ticker smoke, runbook | ~150 / ~100 / 100 | B9a |
+| SB0 | Stage B rules in `spec.yaml`, with spec tests | ~40 / ~80 / 30 | this PR, Q1; before the PLANNED row |
+| SB1 | F adapter: bound loads, leg tables, entry guard, exits, mid and harsh views (imports EXP-189's seam where it fits) | ~150 / ~170 / 40 | A passes, F4, F5 (F7 when 6.1 requires it) |
+| SB2 | Trade-everything pricing, causal exit reader, receipts | ~150 / ~170 / 40 | SB1 |
+| SB3 | `QuantilePool`, fast-path equivalence | ~110 / ~140 / 40 | A passes |
+| SB4 | Universe, cutoffs, row statuses, P0, D, TF | ~160 / ~170 / 40 | SB2, SB3 |
+| SB5 | W, LW, WD, LWD, `tau` sweep and walk-forward choice | ~160 / ~180 / 40 | SB4 |
+| SB6 | E and EQ on pinned EXP-189 modules | ~140 / ~160 / 30 | SB4, those modules merged |
+| SB7 | N1/N2 features, annual fits, selection | ~170 / ~190 / 40 | SB4 |
+| SB8 | ST, ST0, probability diagnostics, `G_PROD` | ~140 / ~150 / 30 | SB1-SB3 |
+| SB9a | Paired populations, accounts, breakeven, bootstraps, success table | ~170 / ~180 / 40 | SB5-SB8 |
+| SB9b | Stage B driver, report, 50-ticker smoke, runbook | ~150 / ~100 / 100 | SB9a |
