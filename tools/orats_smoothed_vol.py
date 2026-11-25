@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import gzip
 import hashlib
+import io
 import json
 import logging
 import os
@@ -74,9 +75,9 @@ def _eta(done: int, total: int, start: float) -> float:
     return (total - done) * (time.monotonic() - start) / done
 
 
-def parse_entry(table: str, entry) -> tuple:
+def parse_entry(table: str, entry, blob: bytes) -> tuple:
     _, keys, values, required = TABLES[table]
-    with gzip.open(entry.path, "rb") as fh:
+    with gzip.GzipFile(fileobj=io.BytesIO(blob)) as fh:
         body = fh.read(MAX_BODY_BYTES + 1)
     if len(body) > MAX_BODY_BYTES:
         raise ValueError(f"decompressed body exceeds {MAX_BODY_BYTES} bytes")
@@ -109,16 +110,32 @@ def parse_entry(table: str, entry) -> tuple:
     return "ok", kept, {"rows_bad_key": int(bad.sum()), "rows_kept": len(kept)}, divs
 
 
+def _reusable_marker(marker_path: Path, stamp: list, shard_dir: Path, key: str):
+    try:
+        with open(marker_path, "rb") as fh:
+            raw = fh.read(MAX_META_BYTES + 1)
+        marker = json.loads(raw) if len(raw) <= MAX_META_BYTES else None
+        if marker is None or marker["stamp"] != stamp:
+            return None
+        for month in marker["months"]:
+            pq.read_metadata(shard_dir / month / f"{key}.parquet")
+        return marker
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
 def _shard_item(table: str, entry, work: Path) -> tuple:
     marker_path = work / "markers" / table / f"{entry.key}.json"
     try:
         with open(entry.path, "rb") as fh:
-            stamp = [TOOL_VERSION, (entry.meta or {}).get("fetched_at"),
-                     hashlib.file_digest(fh, "sha256").hexdigest()]
-        old = json.loads(marker_path.read_text(encoding="utf-8")) if marker_path.exists() else {}
-        if old.get("stamp") == stamp:
-            return "resumed", old, ""
-        status, frame, counters, divs = parse_entry(table, entry)
+            blob = fh.read(MAX_BODY_BYTES + 1)
+        if len(blob) > MAX_BODY_BYTES:
+            raise ValueError(f"compressed body exceeds {MAX_BODY_BYTES} bytes")
+        stamp = [TOOL_VERSION, (entry.meta or {}).get("fetched_at"), hashlib.sha256(blob).hexdigest()]
+        marker = _reusable_marker(marker_path, stamp, work / "shards" / table, entry.key)
+        if marker is not None:
+            return "resumed", marker, ""
+        status, frame, counters, divs = parse_entry(table, entry, blob)
     except (OSError, EOFError, ValueError, zlib.error) as exc:
         return "unreadable", None, str(exc)
     if status == "unrecognized":

@@ -172,15 +172,62 @@ def test_resume_after_merge_crash(tmp_path, monkeypatch):
     parsed = []
     real = tool.parse_entry
 
-    def counting(table, entry):
-        parsed.append(entry.key)
-        return real(table, entry)
+    def counting(*args):
+        parsed.append(args[1].key)
+        return real(*args)
 
     monkeypatch.setattr(tool, "parse_entry", counting)
     assert tool.main(args) == 0
     assert parsed == []
     assert tool.main(_args(raw, chains, tmp_path / "fresh", tmp_path / "fresh_work")) == 0
     assert _tree(out) == _tree(tmp_path / "fresh")
+
+
+def test_resume_reparses_damaged_stage(tmp_path, monkeypatch):
+    raw, chains = _world(tmp_path)
+    out, work = tmp_path / "out", tmp_path / "work"
+    args = _args(raw, chains, out, work)
+
+    def crash(*_a, **_k):
+        raise RuntimeError("simulated merge crash")
+
+    monkeypatch.setattr(tool, "merge_stage", crash)
+    with pytest.raises(RuntimeError):
+        tool.main(args)
+    monkeypatch.undo()
+
+    (work / "shards" / "quotes" / "2025-01" / f"{K_EARLY_BIG}.parquet").unlink()
+    (work / "shards" / "quotes" / "2025-01" / f"{K_LATE_SMALL}.parquet").write_bytes(b"junk")
+    (work / "markers" / "rates" / f"{K_RATES}.json").write_bytes(b"{not json")
+
+    parsed = []
+    real = tool.parse_entry
+
+    def counting(*args):
+        parsed.append(args[1].key)
+        return real(*args)
+
+    monkeypatch.setattr(tool, "parse_entry", counting)
+    assert tool.main(args) == 0
+    assert sorted(parsed) == sorted([K_EARLY_BIG, K_LATE_SMALL, K_RATES])
+    assert tool.main(_args(raw, chains, tmp_path / "fresh", tmp_path / "fresh_work")) == 0
+    assert _tree(out) == _tree(tmp_path / "fresh")
+
+
+def test_digest_matches_parsed_bytes(tmp_path, monkeypatch):
+    raw, chains = _world(tmp_path)
+    out = tmp_path / "out"
+    real = tool.parse_entry
+
+    def tamper(table, entry, blob):
+        if entry.key == K_LATE_SMALL:
+            Path(entry.path).write_bytes(b"junk")
+        return real(table, entry, blob)
+
+    monkeypatch.setattr(tool, "parse_entry", tamper)
+    assert tool.main(_args(raw, chains, out, tmp_path / "work")) == 0
+    q = pd.read_parquet(out / "quotes" / "year=2025" / "month=01.parquet").set_index("strike")
+    assert q.loc[100.0, "smvVol"] == 0.25
 
 
 def test_unreadable_body_is_counted(tmp_path):
@@ -247,20 +294,45 @@ def test_changed_body_same_size_is_reparsed(tmp_path, monkeypatch):
     assert q.loc[100.0, "smvVol"] == 0.35
 
 
-def test_body_size_cap_counts_unreadable(tmp_path, monkeypatch):
+def test_body_size_cap_counts_unreadable(tmp_path, monkeypatch, caplog):
     raw, chains = _world(tmp_path)
     out = tmp_path / "out"
     monkeypatch.setattr(tool, "MAX_BODY_BYTES", 10)
+    caplog.set_level("WARNING", logger="smvvol")
     assert tool.main(_args(raw, chains, out, tmp_path / "work")) == 1
     manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["tables"]["quotes"]["unreadable"] == 3
     assert manifest["tables"]["rates"]["unreadable"] == 1
+    assert "compressed body exceeds 10 bytes" in caplog.text
+    assert "decompressed body" not in caplog.text
+
+
+def test_decompressed_cap_counts_unreadable(tmp_path, monkeypatch, caplog):
+    raw, chains = _world(tmp_path)
+    out = tmp_path / "out"
+    cap = 20000
+    big = gzip.compress(json.dumps(_payload([_quote("SPY", 100.0, 0.2)] * 2000)).encode("utf-8"))
+    big_compressed = len(big)
+    big_decompressed = len(gzip.decompress(big))
+    assert big_compressed < cap < big_decompressed
+    _entry(raw, "hist/strikes", "6" * 64, None, "2025-01-12T00:00:00+00:00", body=big)
+    for p in raw.rglob("*.body.gz"):
+        if p.name == f"{'6' * 64}.body.gz":
+            continue
+        assert len(p.read_bytes()) < cap
+        assert len(gzip.decompress(p.read_bytes())) < cap
+    monkeypatch.setattr(tool, "MAX_BODY_BYTES", cap)
+    caplog.set_level("WARNING", logger="smvvol")
+    assert tool.main(_args(raw, chains, out, tmp_path / "work")) == 1
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["tables"]["quotes"]["unreadable"] == 1
+    assert "decompressed body exceeds 20000 bytes" in caplog.text
 
 
 def test_meta_size_cap_refuses_before_writing(tmp_path, monkeypatch):
     raw, chains = _world(tmp_path)
     out = tmp_path / "out"
     monkeypatch.setattr(tool, "MAX_META_BYTES", 10)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="exceeds cap"):
         tool.main(_args(raw, chains, out, tmp_path / "work"))
     assert not out.exists()

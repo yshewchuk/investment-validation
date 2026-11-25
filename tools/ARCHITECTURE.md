@@ -24,8 +24,8 @@ Dividends: none are ingested. `dividend_fields` in `coverage.json` counts non-nu
 | Several rows share a key | The latest `fetched_at` wins (a missing or unparseable stamp sorts oldest), then the greatest cache key, then the later body row. The winner is kept whole, even where its values are NaN. |
 | A payload has no non-null `smvVol` (quotes) or no non-null rate (rates) | Skipped and counted, so it cannot override a pull that had them. |
 | A row has an unusable key | Dropped and counted. |
-| A body is unreadable (including over 256 MiB decompressed) or its shape unrecognized | Counted and logged. Outputs and the manifest are still written; exit 1. Nothing is quarantined. |
-| A run stops early | No manifest exists, so the outputs are incomplete. The next run reuses each parsed entry in `--work-dir` (default under `/tmp`) whose `fetched_at`, compressed-body SHA-256 and tool version are unchanged. |
+| A body is unreadable (over 256 MiB, either form) or its shape unrecognized | Counted and logged. Outputs and the manifest are still written; exit 1. Nothing is quarantined. |
+| A run stops after preflight | No manifest exists. The next run reuses unchanged entries in `--work-dir` (default under `/tmp`) with sound shards; others are reparsed. |
 | A run completes | Its shards and markers are removed; other files in `--work-dir` remain. A rerun rebuilds; the same cache and library versions give identical outputs. |
 | A metadata sidecar exceeds 1 MiB | The run fails on the shared listing's `ValueError`, naming the file, before writing anything. |
 | An output or work directory equals, contains or sits inside a protected one or each other; no curated chain file or `hist/strikes` entry | Refused with a message before writing anything. |
