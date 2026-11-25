@@ -89,8 +89,12 @@ def write_month(out, period, frames):
         frame.to_parquet(tmp, index=False)
         with open(tmp, "r+b") as handle: os.fsync(handle.fileno())
         sha = decisions._file_sha256(tmp)
-        if not os.path.lexists(final): os.replace(tmp, final); receipts._fsync_dir(directory)
-        elif decisions._file_sha256(final) != sha: raise Refusal(_CONFLICT, f"e_choices month {period} differs from this run's rows", {"reason": "month_freeze_changed"})
+        try:
+            os.link(tmp, final)          # create-only: never replaces an existing month
+            receipts._fsync_dir(directory)
+        except FileExistsError:
+            pass
+        if decisions._file_sha256(final) != sha: raise Refusal(_CONFLICT, f"e_choices month {period} differs from this run's rows", {"reason": "month_freeze_changed"})
     finally:
         tmp.unlink(missing_ok=True)
     return {"period": str(period), "sha256": sha, "rows": len(frame), "taken": int((frame["status"] == "taken").sum())}

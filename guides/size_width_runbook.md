@@ -67,9 +67,9 @@ python3 tools/bounded_run.py --heavy --cores 8 -- python3 experiments/EXP-189_sh
 
 ## Arm E per-event choices (`e_choices/`)
 
-Both stages write `<out-dir>/e_choices/<period>.parquet` for every output month, next to `months/` (inner:
-2023H2-2024; outer: 2025, each written after that month's frozen rows and before its labels are read). It is kept for
-later analysis only: no gate, objective, tuning or account reads it.
+Both stages write `<out-dir>/e_choices/<period>.parquet` for every output month. The inner stage (2023H2-2024) has no
+`months/` files and has already loaded its labels. The outer stage (2025) writes each choice month after that month's
+`months/` rows and before it reads that month's labels. The files are kept for later analysis only: no gate, objective, tuning or account reads it.
 
 - **Rows:** one per simulated candidate event and structure, whatever the decision. An event with no simulation is
   dropped from the sweep (as from `months/`), so it has no row.
