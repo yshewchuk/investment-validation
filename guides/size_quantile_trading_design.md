@@ -66,7 +66,7 @@ Controls only: **LW** uses `forecast_params(name, kappa * M0)`, `kappa` the medi
 
 ## 4. Learned selection models (N1-N4)
 
-**Trade-everything pricing** [N3]. Entry and exit are priced for **every** candidate (event x structure) of each geometry (P0, E, W, LW; D, F-twin and N use P0's; WD uses W's, LWD LW's), taken or not. This supplies the training rows, and each geometry's "trade every event" P&L is reported under F, mid and harsh, with and without the guard.
+**Trade-everything pricing** [N3]. Entry and exit are priced for **every** candidate (event x structure) of each geometry (P0, E, W, LW; D, F-twin and N use P0's; WD uses W's, LWD LW's), and for every straddle, taken or not. This supplies the training rows, and each geometry's "trade every event" P&L is reported under F, mid and harsh, with and without the guard.
 
 **Models** [N1]: two per feature set, **one pooling the five centre-peaked structures, one the TWIN pair**. `HistGradientBoostingRegressor(loss="squared_error")`, because ranking needs expected return. One fixed configuration, never selected: `max_leaf_nodes` 7, `min_samples_leaf` 300, other settings as part 1's grid (mine). Target: the candidate's return on debit under F, `(exit_F - debit_F)/debit_F`, worst-case exits included, no clipping.
 
