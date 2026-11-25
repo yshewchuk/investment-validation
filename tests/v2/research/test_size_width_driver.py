@@ -24,7 +24,7 @@ from experiments.size_pnl_shortvol import NAMES, Refusal
 from experiments.size_width_sizing import GRID
 from experiments.size_width_success import LADDER, breakeven_alpha
 from experiments.size_width_sweep import _TAKEN, RET_COLS, WINDOWS, Sweep
-from tests.v2.research.test_size_pnl_driver import BASE, EVENTS, OK, PLAN_FRAME, chunk, sources, use_chunks
+from tests.v2.research.test_size_pnl_driver import BASE, EVENTS, FACTS, OK, PLAN_FRAME, chunk, sources, use_chunks
 from tests.v2.research.test_size_pnl_shortvol import chunk_of
 
 CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
@@ -423,6 +423,32 @@ def test_a_scoped_run_prices_its_ids_from_the_full_pool_history(tmp_path, m0, pr
     assert august in full_pools
 
 
+def test_a_scoped_run_drops_nan_fact_history_rows_as_a_full_run_does(tmp_path, m0, pricing, monkeypatch):
+    """The facts exclusion covers the whole history: E1 (2023, outside the scope) has a NaN fact, so both a run scoped to E2 and a full run drop it from the pool history."""
+    real_facts = FACTS.reindex  # the EXP-188 facts, with E1's pre_iv30 missing
+
+    def facts(ids):
+        return real_facts(list(ids)).assign(pre_iv30=lambda f: f["pre_iv30"].where(f.index != "E1"))
+
+    def run(out, ids):
+        pools = []
+        monkeypatch.setattr(driver, "build_pool", lambda table, labels: pools.append((set(table.index.astype(str)), set(labels.index.astype(str)))))
+        use_chunks(monkeypatch, [("2024Q3", chunk("E1", "E2"))])
+        try:
+            driver.run(sources(facts=facts), "inner", out, event_ids=ids, prereg=OK)
+        except OpsError:  # a full run's errmodel fit has too few rows (as in the EXP-188 tests); its pools are recorded before it
+            pass
+        return pools
+
+    scoped_pools = run(tmp_path / "scoped", ["E2"])
+    full_pools = run(tmp_path / "full", None)
+    scoped_tables = {frozenset(t) for t, _ in scoped_pools}
+    full_tables = {frozenset(t) for t, _ in full_pools}
+    assert scoped_tables and full_tables
+    assert all("E1" not in t for t in scoped_tables | full_tables)
+    assert scoped_tables == full_tables  # the same pool table set for the August month in both
+
+
 def test_a_scoped_run_over_admitted_ids_prices_more_than_zero_events_with_the_real_pool(tmp_path, monkeypatch):
     """End to end with nothing stubbed on the pricing path: the real PRICING, pool and simulation. The M0 table is scoped to the
     ids of the production frame, so the 2023 history reaches the pool only if the driver reads production whole (the scope
@@ -499,6 +525,7 @@ def test_a_scoped_inner_that_prices_nothing_refuses_before_its_summary(tmp_path,
         driver.run(sources(), "inner", tmp_path, event_ids=["E2"], prereg=OK)
     assert caught.value.code == CONFLICT
     assert caught.value.details["reason"] == "smoke_priced_nothing"
+    assert caught.value.details["stage"] == "inner"
     assert not (tmp_path / "receipts" / "inner_summary.json").exists()
 
 
@@ -512,6 +539,7 @@ def test_a_scoped_outer_that_prices_nothing_refuses_before_its_summary(tmp_path,
         driver.run(sources(), "outer", out, event_ids=ids, prereg=OK)
     assert caught.value.code == CONFLICT
     assert caught.value.details["reason"] == "smoke_priced_nothing"
+    assert caught.value.details["stage"] == "outer"
     assert not (out / "receipts" / "outer_summary.json").exists()
 
 

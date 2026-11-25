@@ -115,11 +115,13 @@ def _load(src, stage, ids, receipt):
         raise Refusal(_CONFLICT, "the plan window holds no events", {"reason": "empty_population"})
     inner_window = base._plan_window(full, base.INNER, ids)
     stage_ids = {str(e) for e in plan["event_id"]}
-    wanted = (stage_ids | {str(e) for e in inner_window["event_id"]}) & set(ready["M0"]["table"].index.astype(str))
+    full_inner = base._plan_window(full, base.INNER, None)  # the unscoped inner window: the history a full run drops by NaN facts
+    full_stage = base._plan_window(full, base._window(stage), None)
+    wanted = ({str(e) for e in full_stage["event_id"]} | {str(e) for e in full_inner["event_id"]}) & set(ready["M0"]["table"].index.astype(str))
     facts_all = base._load_facts(src, wanted)
     ready = base._drop_facts_missing(src, ready, facts_all)
     labels = readers.read_labels(src.fetch, src.admitted, start=base.INNER[0], end=base.OUTER[0], event_ids=None)
-    unlabelled = base._unlabelled(base._plan_window(full, base.INNER, None), labels)  # the full-run rule for the history
+    unlabelled = base._unlabelled(full_inner, labels)  # the full-run rule for the history
     _log(f"facts_missing={len(base._facts_missing(facts_all))} unlabelled={len(unlabelled)}")
     ready = base._drop_ids(ready, unlabelled)
     table = ready["M0"]["table"]

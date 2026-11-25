@@ -31,8 +31,8 @@ python3 experiments/EXP-189_short_vol_width_tuning/run.py --stage report --no-le
   --sources experiments.size_pnl_sources:build_sources --out-dir <smoke-dir>
 ```
 
-The ids limit only the events priced. Pools, the error-model fit and the fake use the whole history, so the fake
-draws run as in a full run (the facts exclusion alone checks only the smoke ids). `smoke_no_fake` appears only when
+The ids limit only the events priced. Pools, the error-model fit and the fake use the whole history, with a full run's
+exclusions (facts included); the fake draws price only the smoke months. `smoke_no_fake` appears only when
 that history has too few pairs. A stage that prices no event in any month refuses `smoke_priced_nothing`. Expect few
 or no trades: the trade bar needs 100 earlier scored rows per structure from the smoke's own sweep (`thin_history`), so
 tuned arms are `k_defaulted` (fewer than 300 trades). The ids are receipted as `scope`, so a smoke
