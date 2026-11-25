@@ -49,9 +49,9 @@ New: the output is **monotone**, it is judged on **conditional** sharpness (info
 
 **Grid** [D5]: `learning_rate` 0.03, `max_leaf_nodes` {7, 15}, `min_samples_leaf` {300, 1000}, `max_iter` {500, 1500}: 8 configurations, **one shared by all levels**, lowest event-weighted mean 7-level pinball of raw sorted outputs. Selection is walk-forward: 2024 uses 2023 pinball, 2025 uses 2023-24, and 2023 uses the fixed default (leaves 7, leaf 300, 500 iterations). Ties: fewer leaves, then larger leaf, then fewer iterations. Main fits: 7 x 8 x 3 = 168.
 
-**Non-crossing** [D6]: **sort** the seven outputs per event (rearrangement never raises summed pinball loss over the levels). Not chosen: a base quantile plus non-negative offsets, which needs a custom sequential fit.
+**Non-crossing** [D6]: **sort** the seven outputs per event (this never raises an event's summed pinball loss over the levels). Not chosen: a base quantile plus non-negative offsets, which needs a custom sequential fit.
 
-**Causal conformal calibration** [D7]. For month m and level q, `delta_q` is the empirical q-quantile of `y - qhat_q` over the arm's own out-of-sample predictions whose labels were available before m began, trailing 12 months, at least 500 events. Apply `qhat_q + delta_q`, **sort again, floor at 0**. Fewer than 500: unscored (`calibration_burn_in`). No label of month m or later enters. Arm `Q_raw` (no calibration) is reported.
+**Causal conformal calibration** [D7]. For month m and level q, `delta_q` is the empirical q-quantile of `y - qhat_q` over the arm's own out-of-sample predictions whose labels were available before m began, trailing 12 months, at least 500 events (numpy's default linear method, as for all quantiles here; no coverage guarantee is claimed). Apply `qhat_q + delta_q`, **sort again, floor at 0**. Fewer than 500: unscored (`calibration_burn_in`). No label of month m or later enters. Arm `Q_raw` (no calibration) is reported.
 
 **Full distribution** (simulation, probabilities) [D8]: inverse CDF linear between the seven knots. Above p90, quantiles of `(y - q90)/max(q90 - q50, 0.5)` over strictly earlier calibrated predictions with `y > q90` (same window), scaled by the event's width; below p10 likewise with `q50 - q10`, floored at 0. Under 50 donors in a tail: unscored (`tail_pool_thin`). The 0.5-point width floor is my judgement call.
 
@@ -71,7 +71,7 @@ New: the output is **monotone**, it is judged on **conditional** sharpness (info
 
 **Metrics** per period, quarter and pooled, per arm: pinball per level and mean; coverage of p25-p75 and p10-p90 (inclusive) and each level; CRPS of the full distribution (B0 from its bucket draws); raw **crossing rate** (events and adjacent pairs); median width `q75 - q25`; MAE of p50 beside M0's.
 
-**Conditional tests.** Cells are quarter x B0's own forecast decile, so forecast level, the only thing B0's width uses, is held nearly fixed. `W = q75 - q25`, `e = |y - q50|`:
+**Conditional tests.** Cells are quarter x B0's bucket index (production's decile at that event's cutoff), so forecast level, which sets B0's width, is held nearly fixed. Cells under 30 events, or with constant `W` or `e`, are skipped and counted. `W = q75 - q25`, `e = |y - q50|`:
 
 - Spearman(`W`, `e`) within cells, event-weighted, with a ticker bootstrap; B0's value printed beside it.
 - `W` terciles within cells, pooled by period: mean `e`, realised interquartile range of `y` and both coverages per tercile.
@@ -79,19 +79,17 @@ New: the output is **monotone**, it is judged on **conditional** sharpness (info
 
 **Pre-registered pass rule** [D10]. Only Q can pass. All of:
 
-1. **Pinball:** Q's mean is below B0's in each of the three periods and in at least 8 of 10 quarters; the paired 90% bootstrap intervals by quarter **and** by ticker (10,000 resamples, fixed seed) exclude 0.
+1. **Pinball:** Q's mean is below B0's in each of the three periods and in at least 8 of 10 quarters; for the per-event difference Q minus B0, the 90% percentile bootstrap intervals by quarter **and** by ticker (10,000 resamples, fixed seed) lie below 0.
 2. **Conditional sharpness:** in each period the within-cell Spearman is positive and the wide tercile's mean `e` exceeds the narrow tercile's; the pooled ticker interval for the Spearman excludes 0.
 3. **Calibration guard:** for each of the two bands, `|coverage - nominal|` is no worse than B0's in at least 5 of 10 quarters.
 
 No magnitude cutoff. The quarter counts are my judgement calls; raw counts are printed. B1, B2, `Q_raw` and S are reported with the same tables; a pooled pinball loss to B1 or B2 is flagged in the headline, not gated. **Fail:** Stage B is not run. A pass for S or `Q_raw` alone is a lead for a new pre-registration.
 
-Walk-forward selection keeps no year judged by a configuration chosen on it.
-
 ## 6. Stage B: trading (only if A passes)
 
 EXP-188's production-exact machinery as a library (entry rule, per-structure trailing cutoffs, `marks_mid` and harsh marks, exits). **P0, production, is recomputed in the same run** as the control: board widths at the pinned commit [D11] and, unlike EXP-188's 2023+ pool, the native full-history `ResidualPool` (as B0). Q output before 2023-07 serves only as calibration, tail and cutoff history; comparisons use events determined in both arms.
 
-**Distribution draws.** A per-event `QuantilePool` wraps production's pool and exposes the two methods the simulators call, `draw` and `before`. `draw` calls production's draw (same M0 forecast, count and random stream), takes each drawn `err_move`'s rank `u = (rank + 0.5) / n` among the draws, and returns `Qinv_event(u) - forecast`, so the simulated move is the event's own quantile at `u`. `err_crush` is returned unchanged, so the move / crush rank dependence of the historic pairs is kept [D12]. `pnl_sim.expected_pnl` is unmodified; the fast path must match it within 1e-9.
+**Distribution draws.** A per-event `QuantilePool` wraps production's pool and exposes the two methods the simulators call, `draw` and `before`. `draw` calls production's draw (same M0 forecast, count and random stream), takes each drawn `err_move`'s rank `u = (rank + 0.5) / n` among the draws (ties in draw order; an empty draw passes through), and returns `Qinv_event(u) - forecast`, so the simulated move is the event's own quantile at `u`. `err_crush` is returned unchanged, so the move / crush rank dependence of the historic pairs is kept [D12]. `pnl_sim.expected_pnl` is unmodified; the fast path must match it within 1e-9.
 
 **Arms.**
 
@@ -99,7 +97,7 @@ EXP-188's production-exact machinery as a library (entry rule, per-structure tra
 | --- | --- | --- |
 | P0 | `forecast_params(name, M0)` | production |
 | W | `forecast_params(name, Q_event(tau))` | production (M0, residual pool) on the new geometry |
-| LW (control for W) | `forecast_params(name, kappa * M0)`; `kappa` is the trailing 12-month median of `Q(tau) / M0`, strictly earlier events | as W |
+| LW (control for W) | `forecast_params(name, kappa * M0)`; `kappa` is the median `Q(tau) / M0` over the prior 12 months, strictly earlier events, at least 100 | as W |
 | D | production | `exp_pnl_sim` with `QuantilePool` |
 | WD, LWD | as W, LW | `QuantilePool` |
 | F (TWIN pair) | production | production, and `R = (q75 - q25)/q50` at or below its trailing median [D13] |
@@ -109,17 +107,17 @@ EXP-188's production-exact machinery as a library (entry rule, per-structure tra
 
 **Why LW is needed.** A low quantile mostly narrows every strike, which is the level effect EXP-189 already tunes with a global multiple. LW has W's typical level without its per-event variation; **W counts only if it also beats LW.**
 
-**Filter and straddle.** F's direction (narrow band kept: twins want an accurate median) is fixed now; the other half is printed. The F cutoff needs 100 prior scores, strictly before the month, 6-month window, like ST's. F is **not** a test of the M0 / E-log gap finding; band width is a different quantity. ST uses EXP-188 Amendment 5's universe, with ST0's rule differing only in the distribution; `G_PROD` is printed labelled "not production-faithful".
+**Filter and straddle.** F's direction (narrow band kept: twins want an accurate median) is fixed now; the other half is printed. F's and ST's cutoffs use the `trailing_cutoff` window rule: 6 months strictly before the month, at least 100 scores. F is **not** a test of the M0 / E-log gap finding; band width is a different quantity. ST uses EXP-188 Amendment 5's universe, with ST0's rule differing only in the distribution; `G_PROD` is printed labelled "not production-faithful".
 
 **Outputs.** By structure, family and year, at `marks_mid`: P&L per candidate event and per taken trade, trades, declines; **breakeven alpha**; harsh alpha-0 result (reported only); quarter and ticker bootstraps against each control. **Accounts: $200,000 cash-secured**, the EXP-188 / EXP-189 policy (`margin.simulate`: cap 0.66 of current equity, `target_share` 0.25, expensive first, short puts secured at strike x 100; straddle secured at its debit). Accounts: each structure, the centre-peaked five, the TWIN pair, all seven, straddle.
 
 **Success rule** [D15]. W, D and WD are judged per family (centre-peaked, twin); F on the twin account; ST on the straddle account. A candidate passes iff:
 
-- its account return at `marks_mid` beats its control's in **each** of 2023H2, 2024 and 2025 (P0; ST0 for ST; each period a fresh account), **and** W and WD also beat LW and LWD;
+- its account return (ending over starting equity, minus 1; no deposits) at `marks_mid` beats its control's in **each** of 2023H2, 2024 and 2025 (P0; ST0 for ST; each period a fresh account), **and** W and WD also beat LW and LWD;
 - its 2025 breakeven alpha is no more than P0's (ST0's) + 0.05;
 - for the centre-peaked family, it loses to P0 in at most 1 of 5 stand-alone structure accounts in 2025; for the twin family (W, D, WD, F), in neither.
 
-The margin and guards are judgement calls. That is eight candidates with no multiplicity correction, so one chance pass is plausible; all are printed. ST is evidence only and cannot recommend a change. A pass is a **proposal**: any board change is a separate user decision, with the DYN-SV chooser review (EXP-188 Decision 3).
+The margin and guards are judgement calls. Eight candidates, no multiplicity correction: one chance pass is plausible. ST is evidence only and cannot recommend a change. A pass is a **proposal**: any board change is a separate user decision, with the DYN-SV chooser review (EXP-188 Decision 3).
 
 ## 7. Failure semantics (R1-R6)
 
@@ -171,7 +169,7 @@ Own `spec.yaml` (levels, grid, selection, calibration, tail rule, baselines, pas
 
 ## 11. Split list (code slices; none started until this design merges)
 
-Estimates: non-test code lines / test lines / doc words. Each is within the AGENTS.md limits (code target about 150).
+Estimates: non-test code lines / test lines / doc words.
 
 | Slice | Scope | Size | After |
 | --- | --- | --- | --- |
