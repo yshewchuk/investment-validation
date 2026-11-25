@@ -111,6 +111,7 @@ def test_end_to_end(tmp_path):
     assert manifest["tables"]["rates"]["non_null"] == {
         "iRate5wk": 2, "iRateLt": 2, "borrow30": 1, "borrow2yr": 1, "annIdiv": 1,
         "annActDiv": 1, "divAmt": 1, "divDate": 1, "assetType": 1}
+    assert manifest["tables"]["rates"]["conflicting_keys_all_columns"] == 0
 
     assert manifest["version"] == "4"
     assert manifest["units"] == {"iRate5wk": "percent", "iRateLt": "percent", "borrow30": "percent", "borrow2yr": "percent",
