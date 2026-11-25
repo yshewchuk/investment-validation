@@ -1,8 +1,7 @@
 """EXP-189 driver: the width sweep's inner (2023H2-2024) and outer (2025) stages over EXP-188's inputs (design sections 3-6).
 
 Every sweep is built on ``PRICING``, the one pricing seam. The inner stage holds every quarter chunk in memory (W3's contract:
-the fake and the anchor re-use the months). The outer stage freezes each 2025 month before its labels are read (R6). Both stages
-run the tolerance bands and the nearest-feasible fallback with its T8 tables and T9 (``size_width_flex``)."""
+the fake and the anchor re-use the months). The outer stage freezes each 2025 month before its labels are read (R6)."""
 import math
 import os
 import sys

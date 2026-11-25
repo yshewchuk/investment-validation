@@ -162,9 +162,7 @@ def test_decline_table_shares_by_hand():
                                                     "structure_unresolved": 1}
     assert cell["taken"]["share"] == pytest.approx(2 / 6) and cell["ladder_too_coarse"]["share"] == pytest.approx(2 / 6)
     assert sum(r["share"] for r in rows if r["structure"] == NAME) == pytest.approx(1.0)
-    pooled = {r["reason"]: r["share"] for r in rows if r["structure"] == "all"}
-    assert pooled == pytest.approx({"taken": 2 / 6, "below_cutoff": 1 / 6, "ladder_too_coarse": 2 / 6,
-                                    "structure_unresolved": 1 / 6})
+    assert {r["structure"] for r in rows} == {NAME}
 
 
 def test_tables_bundles_the_three_tables_and_the_unavailable_count_as_plain_json():

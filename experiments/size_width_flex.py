@@ -11,7 +11,6 @@ from experiments.size_width_fallback import FallbackSweep, accounts, recovery, t
 from experiments.size_width_sweep import E_ARM, INNER, WINDOWS
 
 LABELS = ("production", "A", "B", "C", "D")  # arms with fixed per-structure factors (E has none)
-_CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 def curves(tuned_b, tuned_c, anchor, min_trades):
@@ -65,7 +64,7 @@ def outer(frozen, flex_inner, rec, months, total, base, out, inputs_hash, sessio
     labels = ["production"] + ([label_t] if label_t not in (None, "production") else [])
     for label in labels:
         if (got := flex_inner.get(label)) is None or got["factors"] != {n: float(frozen[label][n]) for n in NAMES}:
-            raise Refusal(_CONFLICT, "inner fallback results do not match the frozen factors", {"reason": "tuning_receipt_changed"})
+            raise Refusal("EXPERIMENT_IDENTITY_CONFLICT", "inner fallback results do not match the frozen factors", {"reason": "tuning_receipt_changed"})
     window = WINDOWS["2025"]
     fbs = _run({label: frozen[label] for label in labels}, months, total, out, inputs_hash, sessions, pricing, True, "outer")
     sets = {}
@@ -119,6 +118,5 @@ def render(inner_summary, outer_body):
     ad = fx["adoption"]
     details = ", ".join(f"{k}={ad[k]}" for k in ("reason", "beats", "alpha_ok", "phi") if ad.get(k) is not None)
     verdict = f"Adoption: yes at phi={ad['phi']}." if ad["adopt"] else f"Adoption: no ({details})."
-    note = " Arm E has no fixed factors, so only k = 1 is reported." if fx["factors_label"] is None else ""
-    parts.append(f"{verdict} Recommendation: {fx['recommendation']}; factors_label: {fx['factors_label']}.{note}\n")
+    parts.append(f"{verdict} Recommendation: {fx['recommendation']}; factors_label: {fx['factors_label']}.\n")
     return "\n".join(parts)

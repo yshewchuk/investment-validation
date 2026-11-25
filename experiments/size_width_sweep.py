@@ -68,7 +68,6 @@ class Sweep:
 
     def add_month(self, chunk, events, pool, *, output, sessions, draws=DRAWS, sims=None):
         """Simulate once, score every (structure, k) and E, decide on the accumulated history. ``output`` False (burn-in) only adds history.
-        ``sims`` reuses a ``simulate`` result, so several sweeps over one month share one simulation.
         ``sessions`` maps event_id -> (entry_date, exit_date); a missing event leaves NaT dates and the account refuses it.
         Returns the month's fresh taken rows only (a frame with the ``_TAKEN`` columns plus ``arm``, and the ``RET_COLS`` columns when ``ladder`` is true; empty when ``output`` is False).
         The month's declined decisions are not returned: they are in ``declined_rows()``, which this call resets along with ``fresh``."""

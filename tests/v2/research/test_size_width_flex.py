@@ -1,14 +1,19 @@
 """EXP-189 flex: the curves, the factor target, the 2025 stage's pre-stated rules (with stubs), and the fallback's pricing seam.
 Synthetic fixtures only."""
+import numpy as np
+import pandas as pd
 import pytest
 
+from engine.structures import BUY, SELL
 from experiments import size_pnl_shortvol as sv
+from experiments import size_width_band
+from experiments import size_width_driver as driver
 from experiments import size_width_flex as flex
 from experiments.size_pnl_pool import build_pool
 from experiments.size_pnl_shortvol import NAMES, Refusal
 from experiments.size_width_band import PHIS, write_bands
 from experiments.size_width_fallback import FallbackSweep
-from experiments.size_width_sweep import E_ARM
+from experiments.size_width_sweep import E_ARM, Sweep
 from tests.v2.research.test_size_pnl_shortvol import _tables, chunk_of, events_for
 
 CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
@@ -149,3 +154,117 @@ def test_fallback_scores_and_recovers_through_the_pricing_it_is_given(tmp_path):
     fb.add_month(chunk, events_for("A"), POOL, output=False, sessions=SESSIONS, draws=200)
     assert "score_events" in seam.calls and "resolve" in seam.calls
     assert [t["rho"] for t in fb.trials] == [pytest.approx(2.55)]
+
+
+# ---- scored values by hand, through the fallback stages -----------------------
+
+class OracleStub:
+    """The pricing stub of the scored-values oracle. Only NAME trades: T events are taken at production width; R events are
+    declined ladder_too_coarse there and recovered at the first rung. Per-share P&L is edge - alpha, edge 0.8 (T) or 0.88 (R)."""
+    @staticmethod
+    def simulate(chunk, events, pool, **kw):
+        return {str(e): "sim" for e in events["event_id"]}
+
+    @staticmethod
+    def score_events(chunk, events, sims, name, *, alpha=0.5):
+        rows = []
+        for ev in events.to_dict("records"):
+            eid, status, reason = str(ev["event_id"]), "scored", None
+            if name != NAME:
+                status, reason = "undetermined", "structure_unresolved"
+            elif eid.startswith("R") and abs(ev["pred_move"] - 5.0) < 1e-9:
+                status, reason = "undetermined", "ladder_too_coarse"
+            rows.append({"event_id": eid, "event_date": ev["event_date"], "structure": name, "width": np.nan,
+                         "entry_cost": 1.0, "rel_spread": 0.0, "mcap_usd": ev["mcap_usd"], "exp_pnl_sim": 0.01,
+                         "status": status, "reason": reason, "alpha": alpha})
+        return pd.DataFrame(rows, columns=sv.SCORE_COLS)
+
+    @staticmethod
+    def resolve(chunk, i, name, pred):
+        return [{"name": "long", "strike": 100.0, "side": BUY, "qty": 1.0},
+                {"name": "short", "strike": 90.0, "side": SELL, "qty": 1.0}], None
+
+    @staticmethod
+    def decide(scored):
+        out = scored.copy()
+        scored_rows = out["status"] == "scored"
+        out.loc[scored_rows, "status"] = "taken"
+        out.loc[scored_rows, "reason"] = None
+        return out
+
+    @staticmethod
+    def score(chunk, events, decisions, name, alpha, *, drop_unquoted=False, mid_marks=False, repriced=False):
+        mine = decisions[(decisions["status"] == "taken") & (decisions["structure"] == name)]
+        ids = mine["event_id"].tolist()
+        pnl = [(0.8 if eid.startswith("T") else 0.88) - alpha for eid in ids]
+        return pd.DataFrame({"event_id": pd.Series(ids, dtype=object), "structure": [name] * len(ids),
+                             "entry_cost": [1.0] * len(ids), "exit_value": [1.0 + p for p in pnl],
+                             "pnl_per_share": pnl, "pnl_dollars": [100 * p for p in pnl]},
+                            columns=["event_id", "structure", "entry_cost", "exit_value", "pnl_per_share", "pnl_dollars"])
+
+    @staticmethod
+    def secured(chunk, events, decisions, name):
+        mine = decisions[(decisions["status"] == "taken") & (decisions["structure"] == name)]
+        return pd.DataFrame({"event_id": pd.Series(mine["event_id"].tolist(), dtype=object),
+                             "secured_per_contract": pd.Series([5000.0] * len(mine), dtype=float)})
+
+
+def _assert_t9(rows, n):
+    """One NAME row in tier ge_10B: n declined events, all recovered at rho 1.05; the n taken base trades are the T events."""
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row["structure"], row["tier"]) == (NAME, "ge_10B")
+    assert (row["declined"], row["recovered"], row["fallback_infeasible"]) == (n, n, 0)
+    assert row["share"] == pytest.approx(1.0) and row["rho"] == {"1.05": n}
+    assert row["recovered_trades"] == n and row["recovered_ret"] == pytest.approx(0.38) and row["recovered_pnl"] == pytest.approx(38.0)
+    assert row["taken_trades"] == n and row["taken_ret"] == pytest.approx(0.30) and row["taken_pnl"] == pytest.approx(30.0)
+
+
+def test_fallback_inner_and_outer_scored_values_match_the_hand_computation(tmp_path, monkeypatch):
+    # Hand computation. Per-share P&L is edge - alpha: at mid (alpha 0.5) T is 0.80 - 0.5 = 0.30 and R is 0.88 - 0.5 = 0.38.
+    # Account 200,000; headroom 0.66 * 200,000 = 132,000; want 0.25 * 132,000 / 5,000 = 6.6 -> 6 contracts (still 6.6 after T's gain).
+    # T gain = 6 * 100 * 0.30 = 180; R gain = 6 * 100 * 0.38 = 228.
+    # Per window: base total_return = 180 / 200,000 = 0.0009; fallback = 408 / 200,000 = 0.00204.
+    # First rho: rungs are multiples of 0.05 without 1.0, nearest by |log rho|, so 1.05 comes before 0.95 and scores first.
+    # Breakeven alpha of mean return per trade: base is T only, 0.80 - a -> 0.80; fallback mean of T and R is 0.84 - a -> 0.84.
+    # adopt: 0.84 <= 0.80 + 0.05, so alpha_ok.
+    monkeypatch.setattr(size_width_band, "MIN_RECOVERED", 1)
+    spans = {"T1": ("2023-08-01", "2023-08-02"), "R1": ("2023-09-05", "2023-09-06"),
+             "T2": ("2024-02-01", "2024-02-02"), "R2": ("2024-03-05", "2024-03-06"),
+             "T3": ("2025-02-01", "2025-02-02"), "R3": ("2025-03-05", "2025-03-06")}
+    sessions = {eid: (pd.Timestamp(a), pd.Timestamp(b)) for eid, (a, b) in spans.items()}
+    months = [({"event_id": np.array([eid])},
+               pd.DataFrame({"event_id": [eid], "event_date": [pd.Timestamp(a)], "pred_move": [5.0], "mcap_usd": [20e9]}),
+               True, None) for eid, (a, _b) in spans.items()]
+    none = {"lo": None, "hi": None, "peak_k": None, "flags": ["no_positive_peak"]}
+    wide = {"lo": 0.5, "hi": 3.0, "peak_k": 1.0, "flags": []}
+    body = {n: {"primary": "B", "curves": {"B": {str(p): none for p in PHIS}}} for n in NAMES}
+    body[NAME] = {"primary": "B", "curves": {"B": {str(p): wide for p in PHIS}}}
+    write_bands(tmp_path, body, "H")
+    stub, factors = OracleStub(), {n: 1.0 for n in NAMES}
+    base = Sweep(ladder=True, pricing=stub)
+    for chunk, events, _output, pool in months:
+        base.add_month(chunk, events, pool, output=True, sessions=sessions)
+    inner = flex.inner({"production": factors}, iter(months[:4]), 4, base, tmp_path, "H", sessions, stub)
+    got = flex.outer({"production": factors}, inner, None, iter(months[4:]), 2, base, tmp_path, "H", sessions, stub, driver._stats)
+
+    for p in ("0.8", "0.9", "0.95"):
+        cell = inner["production"]["phis"][p]
+        assert cell["recovery"]["recovered"] == 2
+        assert cell["recovery"]["recovered_ret"] == pytest.approx(0.38) and cell["recovery"]["taken_ret"] == pytest.approx(0.30)
+        for w in ("2023H2", "2024"):
+            assert cell["accounts"][w]["fallback"] == pytest.approx(0.00204)
+            assert cell["accounts"][w]["base"] == pytest.approx(0.0009)
+        _assert_t9(cell["t9"], 2)
+    assert inner["production"]["choice"] == {"phi": 0.8, "flags": []}
+
+    for p in ("0.8", "0.9", "0.95"):
+        cell = got["sets"]["production"]["phis"][p]
+        for w in ("2023H2", "2024", "2025"):
+            assert cell["accounts"][w]["fallback"] == pytest.approx(0.00204)
+            assert cell["accounts"][w]["base"] == pytest.approx(0.0009)
+        assert cell["alpha"]["fallback"] == pytest.approx(0.84) and cell["alpha"]["base"] == pytest.approx(0.80)
+        _assert_t9(cell["t9"], 1)
+    adoption = got["adoption"]
+    assert adoption["adopt"] is True and adoption["phi"] == 0.8
+    assert adoption["beats"] is True and adoption["alpha_ok"] is True

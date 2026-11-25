@@ -8,9 +8,7 @@ from experiments import size_pnl_shortvol as sv
 from experiments.size_width_band import tier
 from experiments.size_width_sweep import Sweep, in_window
 
-TIERS = ("ge_10B", "1B_10B", "lt_1B", "unknown")
 QUANTILES = (10, 25, 50, 75, 90)
-BUCKETS = ("lt_0.9", "0.9_1.1", "gt_1.1")
 
 
 def bucket(ratio):
@@ -51,34 +49,33 @@ class DeviationSweep(Sweep):
                                    "ret": row["exit_value_mid"] / row["entry_cost"] - 1.0})
 
 
-def _cells(sweep, windows, column, values):
+def _cells(sweep, windows, column):
     """(window, structure, value, cell) for every non-empty cell of the finite-ratio rows; windows are half-open on event date."""
     frame = pd.DataFrame(sweep.deviation, columns=["structure", "event_id", "event_date", "mcap_usd", "ratio", "ret"])
     frame["ratio"] = pd.to_numeric(frame["ratio"], errors="coerce").astype(float)
     frame = frame[np.isfinite(frame["ratio"])].assign(tier=lambda f: f["mcap_usd"].map(tier), bucket=lambda f: f["ratio"].map(bucket))
     for label, window in windows.items():
         inside = in_window(frame, window)
-        cells = ((name, v, inside[(inside["structure"] == name) & (inside[column] == v)]) for name in sv.NAMES for v in values)
-        yield from ((label, name, v, cell) for name, v, cell in cells if not cell.empty)
+        for (name, value), cell in inside.groupby(["structure", column]):
+            yield label, name, value, cell
 
 
 def quantile_table(sweep, windows):
     """Numpy percentiles (linear interpolation) of the realised/target ratio per (window, structure, tier)."""
     return [{"window": w, "structure": s, "tier": t, "n": len(c),
              **{f"q{p}": float(v) for p, v in zip(QUANTILES, np.percentile(c["ratio"], QUANTILES))}}
-            for w, s, t, c in _cells(sweep, windows, "tier", TIERS)]
+            for w, s, t, c in _cells(sweep, windows, "tier")]
 
 
 def bucket_table(sweep, windows):
     """Mean realised return per (window, structure, bucket); descriptive only (snap deviation tracks price level and spacing)."""
     return [{"window": w, "structure": s, "bucket": b, "n": len(c), "mean_ret": float(c["ret"].astype(float).mean())}
-            for w, s, b, c in _cells(sweep, windows, "bucket", BUCKETS)]
+            for w, s, b, c in _cells(sweep, windows, "bucket")]
 
 
 def decline_table(sweep, windows):
-    """Share of each outcome ("taken" included) per (window, structure, tier) over the production candidates; "all" pools the seven."""
+    """Share of each outcome ("taken" included) per (window, structure, tier) over the production candidates."""
     decided = {n: sweep.pricing.decide(pd.concat(f, ignore_index=True)) for n in sv.NAMES if (f := sweep.scored.get((n, 1.0)))}
-    decided = {**decided, "all": pd.concat(list(decided.values()), ignore_index=True)} if decided else decided
     rows = []
     for label, window in windows.items():
         for name, frame in decided.items():
