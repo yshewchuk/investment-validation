@@ -92,10 +92,28 @@ def _refused(exc, reason, code="EXPERIMENT_IDENTITY_CONFLICT"):
     assert exc.value.details["reason"] == reason
 
 
-def _sizes(root, rels):
-    """Decoded in-memory size of each table, as load_tables counts it."""
-    return {rel: int(fvi._parse((root / rel).read_bytes(), rel.split("/")[0], rel).memory_usage(index=True, deep=True).sum())
-            for rel in rels}
+def _plan(root, rels):
+    """(rel, running total before, footer estimate, measured decoded size) per table, as load_tables admits them."""
+    rows, running = [], 0
+    for rel in rels:
+        blob, kind = (root / rel).read_bytes(), rel.split("/")[0]
+        estimate = fvi._estimate(blob, kind, rel)
+        measured = int(fvi._parse(blob, kind, rel).memory_usage(index=True, deep=True).sum())
+        rows.append((rel, running, estimate, measured))
+        running += measured
+    return rows
+
+
+def _parquet_bytes(tmp_path, frame, **kwargs):
+    path = tmp_path / "scratch.parquet"
+    frame.to_parquet(path, index=False, **kwargs)
+    return path.read_bytes()
+
+
+def _no_decode(monkeypatch):
+    def boom(*args, **kwargs):
+        raise AssertionError("pd.read_parquet must not run for a refused table")
+    monkeypatch.setattr(pd, "read_parquet", boom)
 
 
 def test_happy_load_selects_columns_scales_and_hashes(tmp_path):
@@ -260,33 +278,100 @@ def test_oversize_table_refused(tmp_path, monkeypatch):
     _refused(exc, "input_too_large", code="RESOURCE_LIMIT_EXCEEDED")
 
 
+Q2_REL = "quotes/year=2024/month=02.parquet"
+
+
 def test_aggregate_budget_refuses_when_quote_files_sum_over(tmp_path):
-    # Each quote file is under the budget on its own; the running total crosses at the second file.
+    # Each quote file is admitted on its own; the running total crosses at the second file.
     q2 = QUOTES.assign(obs_date=pd.to_datetime(["2024-01-03"] * 4))
-    root, file_sha, manifest_sha = _setup(tmp_path, files={"quotes/year=2024/month=02.parquet": q2})
-    sizes = _sizes(root, [QUOTE_REL, "quotes/year=2024/month=02.parquet", RATE_REL])
-    q_total = sizes[QUOTE_REL] + sizes["quotes/year=2024/month=02.parquet"]
-    assert max(sizes[QUOTE_REL], sizes["quotes/year=2024/month=02.parquet"]) < q_total - 1
+    root, file_sha, manifest_sha = _setup(tmp_path, files={Q2_REL: q2})
+    (_, _, e1, m1), (_, before2, e2, m2), _ = _plan(root, [QUOTE_REL, Q2_REL, RATE_REL])
+    budget = before2 + max(e2, m2) - 1  # just below the second file's admitted size
+    assert max(e1, m1) <= budget
     with pytest.raises(FairValueRefusal) as exc:
-        _load(root, file_sha, manifest_sha, max_total_bytes=q_total - 1)
+        _load(root, file_sha, manifest_sha, max_total_bytes=budget)
     _refused(exc, "input_too_large", code="RESOURCE_LIMIT_EXCEEDED")
-    assert exc.value.details["path"] == "quotes/year=2024/month=02.parquet"
-    assert exc.value.details["total_bytes"] == q_total
-    assert exc.value.details["max_total_bytes"] == q_total - 1
+    assert exc.value.details["path"] == Q2_REL
+    assert exc.value.details["total_bytes"] == before2 + max(e2, m2)
+    assert exc.value.details["max_total_bytes"] == budget
 
 
 def test_aggregate_budget_exact_total_accepted_and_rates_count(tmp_path):
     q2 = QUOTES.assign(obs_date=pd.to_datetime(["2024-01-03"] * 4))
-    root, file_sha, manifest_sha = _setup(tmp_path, files={"quotes/year=2024/month=02.parquet": q2})
-    sizes = _sizes(root, [QUOTE_REL, "quotes/year=2024/month=02.parquet", RATE_REL])
-    total = sum(sizes.values())
-    tables = _load(root, file_sha, manifest_sha, max_total_bytes=total)
+    root, file_sha, manifest_sha = _setup(tmp_path, files={Q2_REL: q2})
+    plan = _plan(root, [QUOTE_REL, Q2_REL, RATE_REL])
+    # Smallest budget that admits every table: each table needs running total + max(estimate, measured).
+    needed = max(before + max(est, meas) for _, before, est, meas in plan)
+    tables = _load(root, file_sha, manifest_sha, max_total_bytes=needed)
     assert len(tables.vols) == 8
+    # The rates file counts: the budget exceeds what the two quote files alone add up to.
+    assert needed > sum(meas for _, _, _, meas in plan[:2])
     with pytest.raises(FairValueRefusal) as exc:
-        _load(root, file_sha, manifest_sha, max_total_bytes=total - 1)
+        _load(root, file_sha, manifest_sha, max_total_bytes=needed - 1)
     _refused(exc, "input_too_large", code="RESOURCE_LIMIT_EXCEEDED")
-    assert exc.value.details["path"] == RATE_REL  # the rates file is the one that crosses
-    assert exc.value.details["total_bytes"] == total
+    crossing = next(rel for rel, before, est, meas in plan if before + max(est, meas) == needed)
+    assert exc.value.details["path"] == crossing
+    assert exc.value.details["total_bytes"] == needed
+
+
+def test_over_budget_by_estimate_refused_before_decode(tmp_path, monkeypatch):
+    root, file_sha, manifest_sha = _setup(tmp_path)
+    _no_decode(monkeypatch)
+    with pytest.raises(FairValueRefusal) as exc:
+        _load(root, file_sha, manifest_sha, max_total_bytes=1)
+    _refused(exc, "input_too_large", code="RESOURCE_LIMIT_EXCEEDED")
+    assert exc.value.details["path"] == QUOTE_REL
+
+
+def test_missing_required_column_refused_before_decode(tmp_path, monkeypatch):
+    root, file_sha, manifest_sha = _setup(tmp_path, files={QUOTE_REL: QUOTES.drop(columns=["smvVol"])})
+    _no_decode(monkeypatch)
+    with pytest.raises(FairValueRefusal) as exc:
+        _load(root, file_sha, manifest_sha)
+    _refused(exc, "required_column")
+    assert exc.value.details["columns"] == ["smvVol"]
+
+
+def test_compressible_table_refused_by_row_estimate_before_decode(tmp_path, monkeypatch):
+    big = pd.concat([QUOTES] * 50_000, ignore_index=True)  # 200_000 rows of identical values
+    budget = 10_000_000
+    root, file_sha, manifest_sha = _setup(tmp_path, files={QUOTE_REL: big})
+    assert (root / QUOTE_REL).stat().st_size * 10 < budget  # far below the budget on disk
+    assert len(big) * fvi.DECODED_ROW_BYTES > budget  # but rows * DECODED_ROW_BYTES is not
+    _no_decode(monkeypatch)
+    with pytest.raises(FairValueRefusal) as exc:
+        _load(root, file_sha, manifest_sha, max_total_bytes=budget)
+    _refused(exc, "input_too_large", code="RESOURCE_LIMIT_EXCEEDED")
+    assert exc.value.details["path"] == QUOTE_REL
+
+
+def test_uncompressed_column_size_refused_before_decode(tmp_path, monkeypatch):
+    # Few rows, long distinct tickers, no dictionary: the uncompressed chunk size is what exceeds the budget.
+    wide = QUOTES.assign(ticker=[f"{i}" + "A" * 10_000 for i in range(4)])
+    blob = _parquet_bytes(tmp_path, wide, use_dictionary=False)
+    root, file_sha, manifest_sha = _setup(tmp_path, files={QUOTE_REL: blob})
+    budget = 20_000
+    assert 4 * fvi.DECODED_ROW_BYTES < budget  # rows * DECODED_ROW_BYTES alone would admit it
+    _no_decode(monkeypatch)
+    with pytest.raises(FairValueRefusal) as exc:
+        _load(root, file_sha, manifest_sha, max_total_bytes=budget)
+    _refused(exc, "input_too_large", code="RESOURCE_LIMIT_EXCEEDED")
+    assert exc.value.details["path"] == QUOTE_REL
+    assert exc.value.details["total_bytes"] >= 40_000  # the estimate is the uncompressed size
+
+
+def test_post_decode_check_still_fires(tmp_path, monkeypatch):
+    big = pd.concat([QUOTES] * 12_500, ignore_index=True)  # 50_000 rows of identical values
+    root, file_sha, manifest_sha = _setup(tmp_path, files={QUOTE_REL: big})
+    monkeypatch.setattr(fvi, "DECODED_ROW_BYTES", 0)  # estimate falls back to the uncompressed size
+    ((_, _, estimate, measured),) = _plan(root, [QUOTE_REL])
+    assert estimate < measured
+    budget = (estimate + measured) // 2  # admitted by the estimate, refused by the measured size
+    with pytest.raises(FairValueRefusal) as exc:
+        _load(root, file_sha, manifest_sha, max_total_bytes=budget)
+    _refused(exc, "input_too_large", code="RESOURCE_LIMIT_EXCEEDED")
+    assert exc.value.details["path"] == QUOTE_REL
+    assert exc.value.details["total_bytes"] == measured
 
 
 def test_aggregate_budget_constant_read_at_call_time(tmp_path, monkeypatch):

@@ -22,12 +22,15 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 QUOTE_KEYS = ["ticker", "obs_date", "expiry", "strike", "right"]
 QUOTE_COLUMNS = QUOTE_KEYS + ["bid", "ask", "iv", "spot", "quote_repaired", "open_interest", "bid_size", "ask_size", "chain_kind"]
 VOL_KEYS = ["ticker", "obs_date", "expiry", "strike"]
 RATE_KEYS = ["ticker", "obs_date"]
 RATE_COLUMNS = ["iRate5wk", "iRateLt"]
+NEEDED_COLUMNS = {"quotes": VOL_KEYS + ["smvVol"], "rates": RATE_KEYS + RATE_COLUMNS}
 RATE_BOUNDS = (-0.05, 0.20)
 RATE_RULE_VALUES = {"rate_out_of_range": ("missing", "row_unknown"), "rate_empty_row": ("rate_unknown", "earlier_row")}
 VOL_MEDIAN_BOUNDS = (0.05, 5.0)
@@ -37,6 +40,7 @@ LONG_DAYS = 365
 MAX_MANIFEST_BYTES = 1 << 20
 MAX_TABLE_BYTES = 1 << 30
 MAX_TOTAL_TABLE_BYTES = 2 << 30
+DECODED_ROW_BYTES = 128  # conservative decoded bytes per row of the needed columns; used for admission before decoding
 _TABLE_RE = re.compile(r"(quotes|rates)/year=[0-9]{4}/month=(0[1-9]|1[0-2])\.parquet")
 _COUNTED = ["usable_quote", "smvvol_positive", "rate_found", "open_interest_known", "bid_size_known", "ask_size_known"]
 _LOG = logging.getLogger("fair_value_inputs")
@@ -109,21 +113,42 @@ def _check_manifest(blob):
                 raise FairValueRefusal("manifest_unread_payloads", f"{kind}.{key} must be integer 0", table=kind, key=key)
 
 
-def _parse(blob, kind, rel):
-    """Parse bytes already hashed; on failure, re-read without columns= to tell required_column from unreadable."""
-    needed = VOL_KEYS + ["smvVol"] if kind == "quotes" else RATE_KEYS + RATE_COLUMNS
+def _estimate(blob, kind, rel):
+    """Footer only: refuse unreadable or incomplete tables, else bound the decoded size of the needed columns."""
+    needed = NEEDED_COLUMNS[kind]
     try:
-        return _norm(pd.read_parquet(io.BytesIO(blob), columns=needed), needed)
-    except (ValueError, KeyError, OSError):
-        pass
-    try:
-        full = pd.read_parquet(io.BytesIO(blob))
-    except (ValueError, KeyError, OSError) as err:
+        pf = pq.ParquetFile(io.BytesIO(blob))
+        meta, names = pf.metadata, pf.schema_arrow.names
+    except (ValueError, OSError, KeyError, pa.ArrowException) as err:
         raise FairValueRefusal("table_unreadable", "table is not readable parquet", path=rel) from err
-    absent = [c for c in needed if c not in full.columns]
+    absent = [c for c in needed if c not in names]
     if absent:
         raise FairValueRefusal("required_column", "table lacks required columns", path=rel, columns=absent)
-    raise FairValueRefusal("table_unreadable", "table is not readable parquet", path=rel)
+    chunk_bytes = 0
+    for g in range(meta.num_row_groups):
+        group = meta.row_group(g)
+        for c in range(group.num_columns):
+            chunk = group.column(c)
+            if chunk.path_in_schema.split(".")[0] in needed:
+                chunk_bytes += chunk.total_uncompressed_size
+    return max(meta.num_rows * DECODED_ROW_BYTES, chunk_bytes)
+
+
+def _admit(blob, kind, rel, total, budget):
+    """Refuse before any decode when the running total plus the footer estimate would exceed the budget."""
+    estimate = _estimate(blob, kind, rel)
+    if total + estimate > budget:
+        raise FairValueRefusal("input_too_large", "table estimate exceeds the total memory budget",
+                               code="RESOURCE_LIMIT_EXCEEDED", path=rel, total_bytes=total + estimate, max_total_bytes=budget)
+
+
+def _parse(blob, kind, rel):
+    """Decode the needed columns in the single pd.read_parquet call; read or normalisation failure is table_unreadable."""
+    needed = NEEDED_COLUMNS[kind]
+    try:
+        return _norm(pd.read_parquet(io.BytesIO(blob), columns=needed), needed)
+    except (ValueError, KeyError, OSError, pa.ArrowException) as err:
+        raise FairValueRefusal("table_unreadable", "table is not readable parquet", path=rel) from err
 
 
 def bind_quotes(frame, *, snapshot_id, expected_snapshot_id):
@@ -176,6 +201,7 @@ def load_tables(root, *, manifest_sha256, file_sha256, vol_scale, rate_scale,
         if hashes[rel] != file_sha256[rel]:
             raise FairValueRefusal("table_hash", "table file hash differs from the pin", path=rel)
         kind = rel.split("/")[0]
+        _admit(blob, kind, rel, total, budget)
         frame = _parse(blob, kind, rel)
         total += int(frame.memory_usage(index=True, deep=True).sum())  # concat peaks at about twice the retained size
         if total > budget:

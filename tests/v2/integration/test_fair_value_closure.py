@@ -21,13 +21,19 @@ CLOSURES = {
     "size-search": ["experiments/size_search.py", "experiments/magnitude_search_worker.py",
                     "engine/models/registry.json"],
 }
+ENTRY_FILES = {
+    "size-panel": ["experiments/size_panel.py"],
+    "size-search": ["experiments/size_search.py", "experiments/magnitude_search_worker.py"],
+}
 
 
 @pytest.mark.parametrize("name", list(CLOSURES))
 def test_fair_value_modules_are_outside_closure(name):
     found = sorted(p.relative_to(ROOT).as_posix() for p in (ROOT / "experiments").glob("fair_value_*.py"))
     assert found and "experiments/fair_value_inputs.py" in found
-    assert not set(found) & set(source_closure(ROOT, CLOSURES[name]))
+    closure = set(source_closure(ROOT, CLOSURES[name]))
+    assert set(ENTRY_FILES[name]) <= closure  # a non-empty closure: the disjointness check below is not vacuous
+    assert not set(found) & closure
 
 
 @pytest.mark.parametrize("name", list(CLOSURES))
