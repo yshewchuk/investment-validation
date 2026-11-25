@@ -936,7 +936,7 @@ Freeze precedes all selected outer evaluation, with zero fit retries and unchang
 The CLI reuses the bounded staged-input reader, strict duplicate-key decoder, typed spec/reference admission and shared canonical JSON stream. Collection preserves the existing outer report identity and uses a read-only
 SQLite connection. No persisted report framework, scheduler, ledger, final-read or release authority.
 
-Each invocation revalidates bindings/evidence, without cross-call admission caching. The CLI calls `seal_search_run`/`run_search`. Direct engine dependencies: contracts, data, foundation, ops.
+Each invocation revalidates bindings/evidence, without cross-call admission caching. The CLI calls `seal_search_run`/`run_search`. Direct engine dependencies: contracts, data, foundation, models, ops, research.
 
 | Condition | Enforced outcome |
 |---|---|

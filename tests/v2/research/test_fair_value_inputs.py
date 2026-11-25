@@ -129,7 +129,8 @@ def test_happy_load_selects_columns_scales_and_hashes(tmp_path):
     assert rates.loc["AAA", "iRateLt"] == pytest.approx(0.041)
     assert np.isnan(rates.loc["BBB", "iRate5wk"])
     assert set(tables.hashes) == set(file_sha) | {"manifest.json"}
-    assert tables.hashes[QUOTE_REL] == file_sha[QUOTE_REL]
+    for rel, digest in tables.hashes.items():  # manifest and every table: sha256 of the bytes on disk
+        assert digest == _sha((root / rel).read_bytes())
 
 
 def test_happy_load_detects_swapped_scales(tmp_path):
@@ -142,6 +143,28 @@ def test_happy_load_detects_swapped_scales(tmp_path):
     assert rates.loc["AAA", "iRate5wk"] == pytest.approx(0.053)
     assert rates.loc["AAA", "iRateLt"] == pytest.approx(0.041)
     assert np.isnan(rates.loc["BBB", "iRate5wk"])
+
+
+def test_load_nan_smvvol_becomes_missing(tmp_path):
+    root, file_sha, manifest_sha = _setup(tmp_path, files={QUOTE_REL: QUOTES.assign(smvVol=[25.0, NAN, 30.0, NAN])})
+    vols = _load(root, file_sha, manifest_sha).vols.set_index("strike")["smvVol"]
+    assert vols[100.0] == pytest.approx(0.25) and vols[90.0] == pytest.approx(0.30)
+    assert np.isnan(vols[110.0]) and np.isnan(vols[95.0])
+
+
+def test_load_rate_bounds_inclusive_after_conversion(tmp_path):
+    # rate_scale 0.01: -5.0 and 20.0 convert to exactly -0.05 and 0.20 (kept); -5.01 and 20.01 convert to -0.0501 and 0.2001 (nulled).
+    rates = pd.DataFrame({
+        "ticker": ["AAA", "BBB", "CCC", "DDD"], "obs_date": pd.to_datetime(["2024-01-02"] * 4),
+        "iRate5wk": [-5.0, 20.0, -5.01, 4.0], "iRateLt": [-5.0, 20.0, 4.0, 20.01],
+        "borrow30": 0.2, "annIdiv": 0.0, "divDate": "", "assetType": "stock",
+    })
+    root, file_sha, manifest_sha = _setup(tmp_path, files={RATE_REL: rates})
+    got = _load(root, file_sha, manifest_sha).rates.set_index("ticker")
+    assert got.loc["AAA", "iRate5wk"] == pytest.approx(-0.05) and got.loc["AAA", "iRateLt"] == pytest.approx(-0.05)
+    assert got.loc["BBB", "iRate5wk"] == pytest.approx(0.20) and got.loc["BBB", "iRateLt"] == pytest.approx(0.20)
+    assert np.isnan(got.loc["CCC", "iRate5wk"]) and got.loc["CCC", "iRateLt"] == pytest.approx(0.04)
+    assert got.loc["DDD", "iRate5wk"] == pytest.approx(0.04) and np.isnan(got.loc["DDD", "iRateLt"])
 
 
 def test_missing_scale_argument_is_a_type_error(tmp_path):
@@ -453,8 +476,9 @@ def test_bind_drops_extra_columns_keeps_index_and_allows_empty():
     frame.index = [7, 3]
     out = fvi.bind_quotes(frame, snapshot_id="s", expected_snapshot_id="s")
     assert list(out.columns) == fvi.QUOTE_COLUMNS
-    assert list(out.index) == [7, 3]
-    assert fvi.bind_quotes(frame.iloc[:0], snapshot_id="s", expected_snapshot_id="s").empty
+    pd.testing.assert_frame_equal(out, frame[fvi.QUOTE_COLUMNS])  # values, dtypes and index preserved
+    empty = fvi.bind_quotes(frame.iloc[:0], snapshot_id="s", expected_snapshot_id="s")
+    pd.testing.assert_frame_equal(empty, frame.iloc[:0][fvi.QUOTE_COLUMNS])
 
 
 @pytest.mark.parametrize("override,column", [
@@ -505,12 +529,22 @@ def test_lookup_rate_cases(lookup_tables, ticker, days, expected):
     np.testing.assert_allclose(got.to_numpy(), [expected], rtol=1e-9)
 
 
-def test_lookup_rate_is_independent_of_row_order(lookup_tables):
-    rows = pd.concat([_query(t, "2024-01-10", d) for t, d, _ in LOOKUP_CASES], ignore_index=True)
-    base = fvi.lookup_rate(rows, lookup_tables)
-    order = np.random.default_rng(0).permutation(len(rows))
-    shuffled = fvi.lookup_rate(rows.iloc[order], lookup_tables)
-    pd.testing.assert_series_equal(shuffled.sort_index(), base.sort_index())
+def test_lookup_rate_is_independent_of_row_order():
+    # Rate table and query rows are both unsorted, with two obs_dates per ticker: a missing sort changes or breaks the result.
+    rates = pd.DataFrame({
+        "ticker": ["BBB", "AAA", "BBB", "AAA"],
+        "obs_date": pd.to_datetime(["2024-01-02", "2024-01-08", "2024-01-08", "2024-01-02"]),
+        "iRate5wk": [0.02, 0.06, 0.07, 0.04],
+        "iRateLt": [0.02, 0.05, 0.06, 0.03],
+    })
+    rows = pd.concat([_query("BBB", "2024-01-10", 200), _query("AAA", "2024-01-10", 0), _query("AAA", "2024-01-03", 0),
+                      _query("BBB", "2024-01-10", 0), _query("AAA", "2024-01-09", 200), _query("AAA", "2024-01-10", 365)],
+                     ignore_index=True)
+    # Hand-computed: BBB 01-08 row at 200 days = 0.07 + 0.5 * (0.06 - 0.07); AAA 01-08 row at 0 days = 0.06;
+    # AAA query on 01-03 uses the 01-02 row = 0.04; BBB at 0 days = 0.07; AAA 01-08 row at 200 days = 0.06 + 0.5 * (0.05 - 0.06);
+    # AAA at 365 days = rL 0.05.
+    expected = [0.065, 0.06, 0.04, 0.07, 0.055, 0.05]
+    np.testing.assert_allclose(fvi.lookup_rate(rows, rates).to_numpy(), expected, rtol=1e-9)
 
 
 def test_attach_vol_shares_strike_across_rights_and_keeps_order():
@@ -720,11 +754,18 @@ def _coverage_tables():
     return fvi.InputTables(vols=vols, rates=rates, hashes={}, rate_rules={})
 
 
+COVERAGE_COLUMNS = ["year", "chain_kind", "rows", "usable_quote", "usable_quote_share", "smvvol_positive",
+                    "smvvol_positive_share", "rate_found", "rate_found_share", "open_interest_known",
+                    "open_interest_known_share", "bid_size_known", "bid_size_known_share", "ask_size_known",
+                    "ask_size_known_share"]
+
+
 def test_entry_coverage_counts_by_year_and_chain_kind():
     emitted = []
     out = fvi.entry_coverage(_entry_rows(), _coverage_tables(), snapshot_id="s", expected_snapshot_id="s",
                              emit=emitted.append)
-    assert len(emitted) == 1 and emitted[0].startswith("[fvf] entry input coverage\n")
+    assert emitted == ["[fvf] entry input coverage\n" + out.to_string(index=False)]
+    assert list(out.columns) == COVERAGE_COLUMNS
     cols = ["year", "chain_kind", "rows", "usable_quote", "smvvol_positive", "rate_found",
             "open_interest_known", "bid_size_known", "ask_size_known"]
     assert out[cols].values.tolist() == [
@@ -742,7 +783,8 @@ def test_entry_coverage_empty_input_still_emits():
     out = fvi.entry_coverage(_chain().iloc[:0], _coverage_tables(), snapshot_id="s", expected_snapshot_id="s",
                              emit=emitted.append)
     assert out.empty and len(emitted) == 1
-    assert list(out.columns)[:3] == ["year", "chain_kind", "rows"] and "rate_found_share" in out.columns
+    assert list(out.columns) == COVERAGE_COLUMNS
+    assert emitted == ["[fvf] entry input coverage\n" + out.to_string(index=False)]
 
 
 def test_entry_coverage_invalid_table_value_refused_before_emit():
