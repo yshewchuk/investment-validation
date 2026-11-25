@@ -95,7 +95,7 @@ Neither imports a new module; `engine/fills.py` and `engine/structures.py` do no
 
 No magnitude cutoff; quarter counts are mine. B1-B3 and S get the same tables; a pooled pinball loss to B1, B2 or B3 is flagged in the headline, not gated.
 
-**Verdict.** Stage A passes if **Q or Q_raw** passes. Both then enter Stage B, each labelled with its own verdict. **Multiplicity:** two eligible arms give two tries, uncorrected (they are highly correlated). Neither passing: Stage B is not run.
+**Verdict.** Stage A passes if **Q or Q_raw** passes. Both then enter Stage B, each labelled with its own verdict. **Multiplicity:** two eligible arms give two tries, uncorrected (they are highly correlated). Otherwise Stage B is not run.
 
 **Periods used for selection** (the report repeats this) [D15]: the grid choice for year Y uses years before Y; B3's identity used 2023-2024; feature set and grid values used 2023-2024. **2025 is the clean test**: no fitted or selected quantity uses it, though its EXP-188 results shaped the design.
 
