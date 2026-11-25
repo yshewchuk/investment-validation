@@ -1,17 +1,17 @@
 # Fair-value marks and spread-aware fills, model F (shared design)
 
-**Status: design only.** A shared experiment-side module for EXP-190 Stage B (`guides/size_quantile_move_design.md`, section 6) and for EXP-189 Amendment 1, which its own owner writes. This file changes no EXP-188 or EXP-189 file or spec. A consumer adopts F in its own spec and pre-registration. Content: user decisions of 2026-11-25; constants and rules marked "mine" are my judgement calls inside them.
+**Status: design only.** A shared experiment-side module for EXP-190 Stage B (`guides/size_quantile_move_design.md`, section 6) and EXP-189 Amendment 1 (its owner's work); no EXP-188 or EXP-189 file or spec changes here. A consumer adopts F in its own spec and pre-registration. Content: user decisions of 2026-11-25; rules marked "mine" are my judgement calls inside them.
 
 ## 1. Why
 
-- **EXP-105 diagnostics** (`reports/exp-105_log_diagnostics.md` §8.5, untracked, supervisor-local). STR-THRU's edge was concentrated in the widest-quoted names, though not confined to them: the widest relative-spread quintile (median 0.597) earned +9.87% per trade and supplied 48.9% of summed returns. The whole book earned +4.04% at mid and -1.42% at alpha 0.40; its capital-weighted breakeven alpha is 0.423. Mid is a real price only where quotes are narrow.
-- **EXP-133** (`guides/exp133_structure_search.md` §4, §6). A vendor mid surface violates no-arbitrage, and a per-event search over strikes harvests it: 43.6% of the entries of its TWIN-P5 width-and-anchor arm violated it (44.6% for the free search, 1.0% for the fixed incumbent). Its `zero_cost` bug also showed that a refusal applied at one fill price compares different books.
+- **EXP-105 diagnostics** (`reports/exp-105_log_diagnostics.md` §8.5, untracked, supervisor-local). STR-THRU's widest relative-spread quintile (median 0.597) earned +9.87% per trade and 48.9% of summed returns. The whole book earned +4.04% at mid and -1.42% at alpha 0.40; capital-weighted breakeven alpha 0.423.
+- **EXP-133** (`guides/exp133_structure_search.md` §4, §6). Per-event search over strikes harvests a vendor mid surface's no-arbitrage violations: 43.6% of its TWIN-P5 width-and-anchor arm's entries violated it (free search 44.6%, fixed incumbent 1.0%). Its `zero_cost` bug showed that a refusal applied at one fill price compares different books.
 
 ## 2. Module boundary
 
-- New modules `experiments/fair_value_*` (not named for one experiment). Imports: numpy, pandas, and `engine.fills.MIN_MEANINGFUL_COST`. `engine/fills.py`, `engine/structures.py`, `engine/pnl_sim.py`, `engine/chain_index.py` and the production normalizer do not change. No sealed v14 closure imports F; the first slice tests both closure hashes (part 1 section 3) unchanged.
-- F prices **resolved legs**. It does not choose expiries or strikes, decide timing, gate on scores, or size positions. The consumer resolves legs with its own pricer.
-- **Tool check.** QuantLib is not installed, and adding it would change the pinned environment that sealed runs record. The need is one American put pricer on numpy. No IV solver is needed. The existing helpers (`engine.pnl_sim.black_scholes_put` and the one in `engine/v2/scoring/stages.py`) are European with zero rates; `pnl_sim` is in the v14 closure, so F is a new pricer and only compares with it in tests.
+- New modules `experiments/fair_value_*`. Imports: numpy, pandas, and `engine.fills.MIN_MEANINGFUL_COST`. `engine/fills.py`, `engine/structures.py`, `engine/pnl_sim.py`, `engine/chain_index.py` and the production normalizer do not change. No sealed v14 closure imports F; the first slice tests both closure hashes (part 1 section 3) unchanged.
+- F prices **resolved legs** only; the consumer resolves them and owns timing, gating and sizing.
+- **Tool check.** Adding QuantLib (not installed) would change the pinned environment sealed runs record; one American put pricer on numpy suffices, with no IV solver. `engine.pnl_sim.black_scholes_put` and the `engine/v2/scoring/stages.py` helper are European with zero rates, and `pnl_sim` is in the v14 closure, so F is a new pricer.
 
 ## 3. Inputs
 
@@ -21,9 +21,9 @@
 | Vol table | `smvVol` per (ticker, `obs_date`, expiry, strike); no `right`, so both rights share it | experiment re-ingest of the raw ORATS cache, `quotes` table |
 | Rate table | `iRate5wk`, `iRateLt` per (ticker, `obs_date`) | the same re-ingest, `rates` table (ORATS cores) |
 
-**Data facts (supervisor-checked 2026-11-25, not re-read here).** The curated `option_chains` has no `smvVol` (`engine/data/normalize/n_chains.py` drops it); the raw cache has `smvVol`, `callMidIv` and `putMidIv` per strike. Open interest and both sizes exist only on `chain_kind=fetch` rows (2023-01-03 to 2025-12-31), about 75-80% of rows; `eod`, `t14` and `c2` rows have none, so earlier history has none.
+**Data facts (supervisor-checked 2026-11-25, not re-read here).** `engine/data/normalize/n_chains.py` drops `smvVol` from curated `option_chains`; the raw cache has it per strike. Open interest and both sizes exist only on `chain_kind=fetch` rows (2023-01-03 to 2025-12-31), about 75-80% of rows; `eod`, `t14` and `c2` rows have none, so earlier history has none.
 
-**The re-ingest tool** (`tools/orats_smoothed_vol.py`) is a separate owner's work, in progress and not yet merged; it writes no production store and needs no paid backfill. F reads its two tables and binds the content hash of its `manifest.json` (written last) and of every table file read. A missing manifest, or a manifest with a null `input_fingerprint` (some payloads unread), refuses. If the merged tool's columns differ from the table above, this file is amended before slice F1.
+**The re-ingest tool** (`tools/orats_smoothed_vol.py`, another owner's, not yet merged) writes no production store and needs no paid backfill. F binds the content hash of its `manifest.json` (written last) and of every table file read. A missing manifest, or a manifest with a null `input_fingerprint` (some payloads unread), refuses. If the merged tool's columns differ from the table above, this file is amended before slice F1.
 
 **Units.** `spot`, strikes and quotes are dollars per share; vols and rates are annualised decimals. The raw units are confirmed from the re-ingest and pinned in each consumer's spec before registration, using no outcome. After conversion, a rate outside [-0.05, 0.20] is `rate_unknown`; a non-finite or non-positive vol is missing; a bound vol table whose median `smvVol` is outside (0.05, 5) refuses `vol_unit` (bounds mine).
 
@@ -65,7 +65,7 @@ With `s = (ask - bid)/mid`:
 
 0.5 favours neither rows with sizes nor rows without. Missing sizes follow the pull type, hence the era, so two **sensitivities** re-mark the same taken set, entry and exit, with every unknown set to 0 and to 1. They never decide a verdict.
 
-**Scale.** With `V` at mid, F equals ladder alpha `0.5 - c/2`: 0.375 for the tightest liquid quote, 0.125 at `s >= 0.50`, 0 when also thin on both counts. All are below EXP-105's breakeven 0.423. With `V` away from mid, one side can fill **better than mid** (at `V = ask`, `c = 0.25` sells at alpha 0.75). That follows from marking at the vendor's smoothed value, and a search could favour such legs. So F reports the share of better-than-mid fills by side, and a third sensitivity, **mid-floored F** (a buy never below mid, a sell never above), re-marks the same taken set.
+**Scale.** With `V` at mid, F equals ladder alpha `0.5 - c/2`: 0.375 for the tightest liquid quote, 0.125 at `s >= 0.50`, 0 when also thin on both counts. All are below EXP-105's breakeven 0.423. With `V` away from mid, one side can fill **better than mid** (at `V = ask`, `c = 0.25` sells at alpha 0.75). A search could favour such legs, so F reports their share by side, and a third sensitivity, **mid-floored F** (a buy never below mid, a sell never above), re-marks the same taken set.
 
 ## 6. Structure level
 
@@ -86,7 +86,7 @@ The guard is evaluated **once**, at entry, and never at exit. A skip is a non-tr
 
 ## 7. Outputs
 
-- **Leg table**, one row per quote row: `status` (`ok`, `unpriceable`, `no_fair_value`, `rate_unknown`), `V`, vol, source (`smvvol`, `smile`, `intrinsic`), rate, clamp side, `s`, `fill_buy`, `fill_sell`, `c_buy`, `c_sell`, thin, unknown and repaired flags, plus the three sensitivity fill pairs. A structure is a signed dot product over these rows, so a consumer's per-ladder fast path keeps its shape.
+- **Leg table**, one row per quote row: `status` (`ok`, `unpriceable`, `no_fair_value`, `rate_unknown`), `V`, vol, source (`smvvol`, `smile`, `intrinsic`), rate, clamp side, `s`, `fill_buy`, `fill_sell`, `c_buy`, `c_sell`, thin, unknown and repaired flags, plus the three sensitivity fill pairs. A structure is a signed dot product over these rows.
 - **Entry result:** the three debits, `spread_sum`, guard result, leg flags.
 - **Exit result:** `proceeds_F`, flags, or `unpriceable`.
 
@@ -125,19 +125,19 @@ New constants are a **new constants id**. A consumer needs a new spec hash and P
 | R5 identity | `fvf_id` | content hash of F's source files and constants (pricer steps, rate, dividend and smile rules, concession, guard); a consumer's spec binds it, and a mismatch refuses |
 | R6 causality | all values | a row uses only its own `obs_date` quotes, vols and spot, and a rate row dated no later. Entry values never read exit-date rows. "Earlier" means data dates, never `computed_at`. Section 9 is the only fitted part |
 
-Progress logging follows AGENTS.md: stage start and end, rows done/total, rate, ETA, RSS, and counts by status; never per row.
+Progress logging follows AGENTS.md, with counts by status.
 
 ## 11. Limits
 
-- F is a model of fills, not a measurement. Until real fills calibrate it, its constants are assumptions, and no direction of error against real fills is claimed.
-- `smvVol` and the end-of-day quote come from one vendor, and the clamp trusts the quote. F does not remove no-arbitrage violations across strikes; the diagnostic measures what is left.
-- The concession ignores order size and does not credit a spread order that fills inside the sum of its legs.
-- In `exp_pnl_sim` only the entry cost changes: the simulated exit stays the engine's European, zero-rate model value with **no concession**, so simulated returns are optimistic against F-scored exits. A trailing-rank gate absorbs a common level shift, not the difference between names.
-- Coverage of `smvVol` and rates is not verified here; a source mix that changes by year or pull type remains a confound.
+- Until real fills calibrate F, its constants are assumptions; no direction of error is claimed.
+- `smvVol` and quotes share a vendor. F leaves cross-strike no-arbitrage violations; the diagnostic measures them.
+- The concession ignores order size and spread-order fills inside the legs' sum.
+- In `exp_pnl_sim` only the entry cost changes: the simulated exit stays the engine's European, zero-rate value with **no concession**, so simulated returns are optimistic against F-scored exits. A trailing-rank gate absorbs a common level shift, not differences between names.
+- `smvVol` and rate coverage is unverified; a source mix varying by year or pull type is a confound.
 
 ## 12. Split list (code slices; none starts until this design merges)
 
-Estimates: non-test code lines / test lines / doc words. The re-ingest tool is the separate owner's PR and is not counted.
+Estimates: non-test code lines / test lines / doc words, excluding the re-ingest tool.
 
 | Slice | Scope | Size | After |
 | --- | --- | --- | --- |
