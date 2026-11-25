@@ -1,5 +1,5 @@
 """EXP-188 pricing twin (experiments/size_pnl_pricing.py): the SHORTVOL and STRADDLE copies must agree with the originals
-bit for bit, and the driver's scoring must not depend on which pricer is wired. Synthetic ladders and a stub pool only."""
+bit for bit, and the driver's scoring must not depend on which pricer is wired. Synthetic ladders and synthetic pool tables only."""
 import numpy as np
 import pandas as pd
 import pytest
@@ -186,11 +186,30 @@ def test_short_vol_snapshot_is_reused_per_event_and_fresh_for_a_new_chunk():
     chunk = chunk_of(("A", {}), ("B", {}))
     first = pricing.SHORTVOL.chain_snapshot(chunk, 1)
     assert pricing.SHORTVOL.chain_snapshot(chunk, 1) is first
+    pricing.SHORTVOL.chain_snapshot(chunk, 0)
+    assert pricing.SHORTVOL.chain_snapshot(chunk, 1) is first  # the cache holds several events of one chunk
     moved = chunk_of(("A", {}), ("B", {}), entry=lambda k: (quote(k)[0] + 0.5, quote(k)[1] + 0.5))
     fresh = pricing.SHORTVOL.chain_snapshot(moved, 1)
     assert fresh is not first and pricing.SHORTVOL.chain_snapshot(moved, 1) is fresh
+    assert pricing.SHORTVOL.chain_snapshot(chunk, 1) is not first  # the cache holds one chunk only
     _same(fresh.rows, sv.chain_snapshot(moved, 1).rows)  # the new quotes, not the cached old ones
     assert not np.array_equal(fresh.rows["bid"].to_numpy(), first.rows["bid"].to_numpy())
+
+
+def test_short_vol_real_pricing_builds_one_snapshot_per_event(monkeypatch):
+    built, original = [], sd.chain_snapshot
+
+    def counting(*args, **kwargs):
+        built.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(sd, "chain_snapshot", counting)  # the SHORTVOL copy's build reaches this through its `straddle` global
+    chunk = _ladders()  # a fresh chunk object
+    for name in sv.NAMES:
+        pricing.SHORTVOL.resolve_priced(chunk, 0, name, PRED, FillModel(0.5))
+    assert len(built) == 1
+    pricing.SHORTVOL.resolve_priced(chunk, 1, sv.NAMES[0], PRED, FillModel(0.5))
+    assert len(built) == 2
 
 
 def test_straddle_puts_only_and_full_snapshots_are_distinct():
