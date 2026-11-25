@@ -39,9 +39,10 @@ MARKS_NOTE = ("the headline marks for every per-trade table, contrast and the T1
 MARKS_NOTE_PRIMARY = ("The decisions carry no marks_mid columns, so the headline fell back to the stored primary marks (rung-2 zero-bid legs at alpha 0) "
                       "and the report is not on the mid basis.")
 AMENDMENT_6_STRADDLE_NOTE = ("Amendment 6 (2026-11-24, post-hoc revision by the user): the straddle rule is production's STR-THRU gate "
-                             "G_PROD only (R_L and R_L2 removed); H2 is evaluated on G_PROD over E_str. H2 is production-faithful only if "
-                             "the M0 gate agreement section reaches its bar or the user accepts the gap; the 2025 gate rows alone cannot "
-                             "supply the 2024 full-year sign, so an H2 verdict that requires 2024 reads not_testable.")
+                             "G_PROD only (R_L and R_L2 removed); H2 is evaluated on G_PROD over E_str. "
+                             "Straddle verdicts (H2, and H3 through its straddle leg): \"agreement 0.40 inside the live domain, "
+                             "gap accepted by the user 2026-11-25; not fully production-faithful\" (the 0.40 is the recorded full7 measurement in design section 18, not computed from this run). "
+                             "The 2025 gate rows alone cannot supply the 2024 full-year sign, so an H2 verdict that requires 2024 reads not_testable.")
 # name -> (predicted sign, arm -> legs, arms). A leg is (book, arm_or_rule value, sign); d = sum(sign * (median - mean)).
 # Judgement call: H3 pairs each short-vol arm with the straddle leg G_PROD over E_str (Amendment 6); H2 is G_PROD alone.
 HYPOTHESES = {

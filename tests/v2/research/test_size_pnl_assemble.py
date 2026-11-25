@@ -292,6 +292,24 @@ def test_t10_section_discloses_amendment_5(tmp_path):
     assert "Amendment 6 (2026-11-24, post-hoc revision by the user): the straddle rule is production's STR-THRU gate G_PROD only" in "\n".join(_section_lines(text, "### T10"))
 
 
+STRADDLE_LABEL = ('Straddle verdicts (H2, and H3 through its straddle leg): "agreement 0.40 inside the live domain, '
+                  'gap accepted by the user 2026-11-25; not fully production-faithful"')
+
+
+def test_t10_straddle_label_replaces_the_production_faithful_condition_on_both_bases(tmp_path):
+    # With a mid column the headline T10 is the mid basis and the harsh T10 is the harsh basis; both carry the note.
+    out = build(tmp_path, rows_fn=_with_mid)
+    assemble_mod.assemble(out, plan_frame(), admitted=None)
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    assert "T10 reads the mid marks" in "\n".join(_section_lines(text, "### T10 Verdicts"))
+    assert STRADDLE_LABEL in "\n".join(_section_lines(text, "### T10 Verdicts"))
+    assert "T10 here reads the harsh fills" in "\n".join(_section_lines(text, SENS_T10))
+    assert STRADDLE_LABEL in "\n".join(_section_lines(text, SENS_T10))
+    assert "not computed from this run" in "\n".join(_section_lines(text, "### T10 Verdicts"))
+    assert "not computed from this run" in "\n".join(_section_lines(text, SENS_T10))
+    assert "H2 is production-faithful only if" not in text
+
+
 def test_same_plan_frame_as_the_receipt_succeeds(tmp_path):
     out = build(tmp_path)
     assemble_mod.assemble(out, plan_frame(), admitted=None)

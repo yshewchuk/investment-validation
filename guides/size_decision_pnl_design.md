@@ -418,7 +418,7 @@ Jaccard over M0's covered events, diagnostics only: 0.312 as run; 0.400 if the s
 3. The user accepts the remaining gap (0.400 against the 0.5 bar), so G_PROD is the primary straddle rule (slice A6-3a). Straddle verdicts must still be labelled "agreement 0.40 inside the live domain, gap accepted by the user 2026-11-25; not fully production-faithful".
 4. The real straddle test moves to EXP-190 (a distribution-based "move beats the implied move" arm).
 
-No rule, threshold, bar or spec change follows. **The report code does not yet do this** (#2890): the agreement section scores every covered event (0.312 as run) and refuses below the bar without `--accept-gate-gap`, whose text appears only in that section; the straddle verdict rows do not carry the label.
+No rule, threshold, bar or spec change follows. The T10 verdict sections print that label, naming H2 and H3, as fixed text stating that 0.40 is the recorded full7 figure. **The report does not yet compute the live-domain figure** (#2890): the agreement section scores every covered event (0.312 as run) and refuses below the bar without `--accept-gate-gap`.
 
 **Slice impact.** Rows 3-4, 10 and 16 route resolution through `price_structure`, which runs about 600,000 times (7 structures x 12 models x ~7,000 events; the straddle adds one per model-event). If the 50-ticker smoke shows it too slow, the fallback is to keep the local resolver and add a runtime parity preflight over a fixed sample against `price_structure` (like the fast-path preflight), refusing on any difference; the audit row then reads "re-implements, held by preflight".
 
