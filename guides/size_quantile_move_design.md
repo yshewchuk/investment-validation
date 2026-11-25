@@ -23,7 +23,7 @@ Reading: each strategy wants a different point of the distribution.
 | EXP-112, EXP-115 | Residual pools by forecast decile, now `ResidualPool` (10 buckets): 80% coverage 0.7276 to 0.7934; no established trade effect | The bar. Its width varies only with forecast level |
 | EXP-114 | Quantile regression of the **residual** had the worst conditioned coverage (0.7516); `sigma_model_oof` had the best CRPS but lost on coverage | Quantiles of the **move**, causally calibrated; scale returns as arm S |
 | EXP-173 | Surface-conditioned scale lowered 80% coverage (0.7932 to 0.7748) | Quantile fits, not a rescaled residual |
-| `SUPER_SIZE/STAGE2_DESIGN.md` §3 | HGB q = 0.1/0.5/0.9, no crossing repair; never run | 7 monotone levels |
+| `experiments/SUPER_SIZE/STAGE2_DESIGN.md` §3 | HGB q = 0.1/0.5/0.9, no crossing repair; never run | 7 monotone levels |
 
 New: output judged on **conditional** sharpness (information beyond forecast level).
 
@@ -97,7 +97,7 @@ No magnitude cutoff; quarter counts are mine. B1-B3 and S get the same tables; a
 
 **Verdict.** Stage A passes if **Q or Q_raw** passes. Both then enter Stage B, each labelled with its own verdict. **Multiplicity:** two eligible arms give two tries, uncorrected (they are highly correlated). Otherwise Stage B is not run.
 
-**Periods used for selection** (the report repeats this) [D15]: the grid choice for year Y uses years before Y; B3's identity used 2023-2024; feature set and grid values used 2023-2024. **2025 is the clean test**: no fitted or selected quantity uses it, though its EXP-188 results shaped the design.
+**Periods used for selection** (the report repeats this) [D15]: the grid choice for year Y uses years before Y; B3's identity, the feature set and the grid values used 2023-2024; **the Stage A gate, which decides whether Stage B runs, uses 2023H2, 2024 and 2025.** **2025 is the clean test for those model choices only:** no feature set, grid value, configuration or baseline identity is chosen on it (its monthly calibration, tail and L pools use earlier 2025 labels, causally). It is **not a clean holdout**: Stage B scores 2025 only after a pass that read 2025 outcomes, which can flatter its 2025 result, and EXP-188's 2025 results shaped the design. Only the forward period after the data end is independent.
 
 ## 6. Stage B (part 2)
 
@@ -140,16 +140,16 @@ One `spec.yaml` holds every fixed rule of **both parts**. Its PLANNED row, carry
 | D3, D4, D6, D8, D9, D12 | Defaults: per-level quantile HGB; refit per fold; sort; scaled empirical tails; the bar is B0; crush draws rank-coupled to historic pairs |
 | D5 | v14's hyperparameter grid (model parameters only, not feature sets or targets), selected walk-forward on mean pinball; trim near v14's winners if too large (4 configurations: not trimmed) |
 | D7 | Q and Q_raw both eligible in Stage A, both carried into Stage B; added multiplicity stated |
-| D10 | Default rule; "more accurate" means lower mean pinball loss. The L comparison closes #2871's sharpness gap |
+| D10 | Default rule; "more accurate" means lower mean pinball loss. The L comparison addresses #2871's sharpness gap, within the limit section 5 states |
 | D11 | EXP-189 recommended its **arm E** (per event and structure, the width multiplier k in 0.5..3.0 maximising `exp_pnl_sim`). E is a **second** Stage B control beside production |
 | D13 | Default twin filter; the band-width ratio is also a selection-model feature |
 | D14 (changed) | Width quantile chosen **walk-forward** per family (centre-peaked, TWIN pair) from {p10, p25, p40, p50, p60, p75}: 2024 uses the best on 2023H2, 2025 the best on 2023H2-2024; every quantile printed per year |
-| D15 | Default rule; the report states the periods used for any selection; 2025 is the clean test |
+| D15 | Default rule; the report states the periods used for any selection; 2025 is the clean test (section 5: for model and parameter choices; not a holdout, since the Stage A gate reads it) |
 | N1 | Learned **selection model per family** (one centre-peaked, one twin): HGB predicting each candidate trade's return under F, from calibrated quantiles, band-width ratios, option-implied move, entry cost, breakevens relative to spot and M0's forecast; top 20% by predicted return, trailing window; production widths; walk-forward on out-of-sample quantile features only. |
 | N2 | Its control: the same model **without** quantile features. The gap is the value of the distribution |
 | N3 | Trade-everything pricing: exits priced for every candidate, to train N1/N2 and to report "trade every event" P&L per arm |
-| N4 | Quantile walk-forward reaches back to the earliest year with stored option chains (section 4) |
-| F | **Fair-value marks and spread-aware fills**, default for Stage B scoring, selection and the N1/N2 target; mid and harsh still reported. Per leg: Black-Scholes (American adjustment, dividends, rates) at ORATS `smvVol`, clamped to [bid, ask]; fill = fair value plus a concession rising with relative spread (and thin size or open interest where available); structure guard on fill-over-fair and on summed spreads over net debit. Form and constants pre-registered, not tuned; calibration from the user's real fills, if provided, stated. Experiment-side only. Missing `smvVol`: a per-expiry smooth smile. Motivation: EXP-105 diagnostics; EXP-133's no-arbitrage caveat |
+| N4 | Quantile walk-forward reaches back to the earliest year with stored option chains, made precise by section 4's Y0 rule (coverage and training-history floors) |
+| F | **Fair-value marks and spread-aware fills**, default for Stage B scoring, selection and the N1/N2 target; mid and harsh still reported. Per leg: Black-Scholes (American adjustment, dividends, rates) at ORATS `smvVol` (not stored in `option_chains`; part 2 must extract it from cached raw payloads), clamped to [bid, ask]; fill = fair value plus a concession rising with relative spread (and thin size or open interest where available); structure guard on fill-over-fair and on summed spreads over net debit. Form and constants pre-registered, not tuned; calibration from the user's real fills, if provided, stated. Experiment-side only. Missing `smvVol`: a per-expiry smooth smile. Motivation: EXP-105 diagnostics; EXP-133's no-arbitrage caveat |
 
 ## 11. Split list (code slices for part 1; none starts until this design merges)
 
