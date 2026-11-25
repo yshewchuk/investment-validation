@@ -127,6 +127,8 @@ def test_missing_liquidity_column_refuses_before_pricing(monkeypatch):
         ff.leg_fills(quotes, no_vols())
     assert err.value.details == {"reason": "column_missing", "table": "quotes",
                                  "columns": ["ask_size", "open_interest"]}
+    assert err.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert str(err.value) == f"EXPERIMENT_IDENTITY_CONFLICT: {err.value.details['reason']}"
 
 
 def test_entry_known_answer_qty_weighted_debits():
@@ -153,7 +155,13 @@ def test_guard_first_match_and_each_reason():
     assert res.outcome == "skip" and res.skip_reason == "fill_over_fair"
     assert res.debit_mid == near(0.4) and res.debit_fair == near(0.4)
     assert res.debit_F == near(0.588333, tol=1e-5) and res.spread_sum == near(0.6)
-    assert res.sensitivity_debits["midfloor"] is not None
+    # fill_over_fair case: call buy fills 1.13; put sell fills 13/24 (c = 7/12); no unknown or thin terms, so
+    # all three sensitivity debits equal debit_F
+    assert res.debit_mid == near(0.4) and res.debit_fair == near(0.4) and res.spread_sum == near(0.6)
+    assert res.debit_F == near(0.588333, tol=1e-5)
+    assert res.sensitivity_debits["unknown0"] == near(0.588333, tol=1e-5)
+    assert res.sensitivity_debits["unknown1"] == near(0.588333, tol=1e-5)
+    assert res.sensitivity_debits["midfloor"] == near(0.588333, tol=1e-5)
 
     # spread_over_debit alone: debit_fair 1, debit_F about 1.227, spread_sum 1.4
     res = ff.structure_entry(legs_of(row(100, "C", 9.65, 10.35, spot=110.0), row(100, "P", 8.65, 9.35, spot=91.0),
@@ -182,6 +190,22 @@ def test_guard_boundary_is_strict():
     res = ff.structure_entry(legs_of(row(100, "C", 0.0, 2.0, spot=105.0), sides=["buy"], qtys=[1.0]))
     assert res.outcome == "enter" and res.skip_reason is None
     assert res.debit_F == res.spread_sum == near(2.0)
+    assert res.debit_mid == near(1.0) and res.debit_fair == near(2.0)
+    assert res.sensitivity_debits["unknown0"] == near(2.0)
+    assert res.sensitivity_debits["unknown1"] == near(2.0)
+    assert res.sensitivity_debits["midfloor"] == near(2.0)
+
+
+def test_guard_exact_float_boundaries():
+    m = ff.MIN_MEANINGFUL_COST
+    n = np.nextafter(m, 1)
+    assert ff._guard(1.0, 1.0, 1.25, 1.0) is None  # fill diff exactly 0.25 * debit_fair is not a skip
+    assert ff._guard(1.0, 1.0, np.nextafter(1.25, 2), 1.0) == "fill_over_fair"
+    assert ff._guard(1.0, 1.0, 1.0, np.nextafter(1.0, 2)) == "spread_over_debit"
+    assert ff._guard(1.0, 1.0, 1.0, 1.0) is None
+    assert ff._guard(m, 1.0, 1.0, 0.0) == "not_a_debit"
+    assert ff._guard(1.0, m, 1.0, 0.0) == "not_a_debit"
+    assert ff._guard(n, n, n, 0.0) is None
 
 
 def test_undetermined_entry_when_a_leg_is_rate_unknown():
@@ -204,6 +228,8 @@ def test_exit_mirrors_entry_on_the_same_rows():
     assert entry.leg_flags[0]["thin_size"] == 0.5 and entry.leg_flags[0]["unknown_size"] is True
     mirror = ff.structure_exit(legs.assign(side=["sell", "buy", "sell"]))
     assert mirror.outcome == "ok"
+    # entry: buy 2 @ 1.0625 (c 0.625), sell 1 @ 0.79375 (c 0.825), buy 1 @ 6.0283333 (c 17/60)
+    assert entry.debit_F == near(7.3595833333, tol=1e-9)
     assert mirror.proceeds_F == near(-entry.debit_F)
     for v in ff.VARIANTS:
         assert mirror.sensitivity_proceeds[v] == near(-entry.sensitivity_debits[v])
@@ -218,6 +244,19 @@ def test_exit_fair_mid_fallback_for_rate_unknown_leg():
     assert ex.proceeds_F == near(0.955)  # V = mid 1, sell at 1 - 0.45 * 0.1
     assert ex.leg_flags[0]["exit_fair_mid"] is True and ex.leg_flags[0]["status"] == "rate_unknown"
     assert ex.sensitivity_proceeds["unknown0"] == near(0.955)
+    assert ex.sensitivity_proceeds["unknown1"] == near(0.955)
+    assert ex.sensitivity_proceeds["midfloor"] == near(0.955)
+
+
+def test_exit_fair_mid_fallback_with_unknown_liquidity_sensitivities():
+    leg = legs_of(row(100, "C", 0.9, 1.1, spot=101.0, expiry=EXP, rate=NAN, bsz=None, asz=None, oi=None),
+                  sides=["buy"], qtys=[1.0])
+    ex = ff.structure_exit(leg)
+    assert ex.outcome == "ok" and ex.exit_fair_mid is True
+    assert ex.proceeds_F == near(0.9425)  # V = mid 1, sell at 1 - 0.575 * 0.1
+    assert ex.sensitivity_proceeds["unknown0"] == near(0.955)  # sell at 1 - 0.45 * 0.1
+    assert ex.sensitivity_proceeds["unknown1"] == near(0.93)  # sell at 1 - 0.70 * 0.1
+    assert ex.sensitivity_proceeds["midfloor"] == near(0.9425)  # min(sell fill 0.9425, mid 1)
 
 
 def test_exit_fair_mid_fallback_for_no_fair_value_ignores_stored_fills():
@@ -227,6 +266,9 @@ def test_exit_fair_mid_fallback_for_no_fair_value_ignores_stored_fills():
     assert ex.proceeds_F == near(-1.045)  # opening sell buys back at 1 + 0.45 * 0.1
     assert ex.exit_negative is True and ex.exit_fair_mid is True
     assert ex.leg_flags[0]["status"] == "no_fair_value"
+    assert ex.sensitivity_proceeds["unknown0"] == near(-1.045)
+    assert ex.sensitivity_proceeds["unknown1"] == near(-1.045)
+    assert ex.sensitivity_proceeds["midfloor"] == near(-1.045)
 
 
 def test_exit_unpriceable_leg_gives_none_and_reports_fallback():
@@ -250,6 +292,11 @@ def test_negative_proceeds_kept_and_return_below_minus_one():
 def test_exit_has_no_guard_for_a_wide_quote():
     ex = ff.structure_exit(legs_of(row(100, "C", 0.0, 2.0, spot=105.0), sides=["buy"], qtys=[1.0]))
     assert ex.outcome == "ok" and ex.proceeds_F == near(0.5)  # sell at 2 - 0.75 * 2
+    assert ex.exit_fair_mid is False and ex.exit_negative is False
+    for v in ff.VARIANTS:
+        assert ex.sensitivity_proceeds[v] == near(0.5)
+    assert ex.leg_flags[0]["exit_fair_mid"] is False and ex.leg_flags[0]["thin_size"] == 0.0
+    assert ex.leg_flags[0]["unknown_size"] is False
 
 
 @pytest.mark.parametrize("call", [ff.structure_entry, ff.structure_exit])
@@ -258,12 +305,20 @@ def test_exit_has_no_guard_for_a_wide_quote():
     lambda d: d.assign(qty=[0.0, 1.0]),
     lambda d: d.assign(qty=[None, 1.0]),
     lambda d: d.assign(status=[NAN, "ok"]),
+    lambda d: d.assign(qty=[-1.0, 1.0]),
+    lambda d: d.assign(qty=[float("inf"), 1.0]),
+    lambda d: d.assign(qty=[NAN, 1.0]),
+    lambda d: d.assign(qty=pd.Series(["x", 1.0], dtype=object)),
+    lambda d: d.assign(status=["bogus", "ok"]),
+    lambda d: d.assign(side=[None, "sell"]),
     lambda d: d.iloc[:0],
 ])
 def test_leg_invalid_refusals(call, bad):
     with pytest.raises(FairValueRefusal) as err:
         call(bad(base_legs()))
     assert err.value.details["reason"] == "leg_invalid"
+    assert err.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert str(err.value) == f"EXPERIMENT_IDENTITY_CONFLICT: {err.value.details['reason']}"
 
 
 @pytest.mark.parametrize("call", [ff.structure_entry, ff.structure_exit])
@@ -271,6 +326,8 @@ def test_missing_legs_column_refuses(call):
     with pytest.raises(FairValueRefusal) as err:
         call(base_legs().drop(columns=["side"]))
     assert err.value.details == {"reason": "column_missing", "table": "legs", "columns": ["side"]}
+    assert err.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert str(err.value) == f"EXPERIMENT_IDENTITY_CONFLICT: {err.value.details['reason']}"
 
 
 def test_row_order_independent_and_inputs_not_mutated():
@@ -283,6 +340,17 @@ def test_row_order_independent_and_inputs_not_mutated():
     pd.testing.assert_frame_equal(quotes, before)
     shuffled = ff.leg_fills(quotes.sample(frac=1, random_state=7), no_vols())
     pd.testing.assert_frame_equal(shuffled.sort_index(), out.sort_index())
+    # hand-computed rows, looked up by original index in the shuffled output
+    # row 0: call K100 spot 101, quote 0.9/1.1, all liquidity known: c 0.45
+    assert shuffled.loc[0, "c_buy"] == near(0.45)
+    assert shuffled.loc[0, "fill_buy"] == near(1.045) and shuffled.loc[0, "fill_sell"] == near(0.955)
+    # row 1: put K100 spot 99, quote 0.75/1.25, bid size unknown: c_buy 0.75 (sell side has unknown term)
+    assert shuffled.loc[1, "c_buy"] == near(0.75)
+    assert shuffled.loc[1, "fill_buy"] == near(1.1875) and shuffled.loc[1, "fill_sell"] == near(0.79375)
+    # row 2: call K95 spot 101, quote 5.9/6.1 (V 6), OI 50 thin: c 23/60
+    assert shuffled.loc[2, "c_buy"] == near(23 / 60)
+    assert shuffled.loc[2, "fill_buy"] == near(6.0383333333, tol=1e-9)
+    assert shuffled.loc[2, "fill_sell"] == near(5.9616666667, tol=1e-9)
     assert list(out.columns) == list(fvl.OUT_COLUMNS) + ff.FILL_COLUMNS
     legs = out.assign(side=["buy", "sell", "buy", "sell"], qty=[1.0, 1.0, 2.0, 1.0])
     snapshot = legs.copy()

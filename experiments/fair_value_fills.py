@@ -6,6 +6,7 @@ Callers pass legs they resolved. Entry and exit are separate calls, so entry val
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 
 import numpy as np
@@ -90,6 +91,10 @@ def _fills(f: pd.DataFrame) -> dict:
     return out
 
 
+def _log(message: str) -> None:
+    print(f"[fv_fills] {message}", file=sys.stderr, flush=True)
+
+
 def _thin(values: np.ndarray, below: float) -> np.ndarray:
     with np.errstate(invalid="ignore"):
         return np.where(np.isnan(values), UNKNOWN_THIN, (values < below).astype(float))
@@ -108,7 +113,7 @@ def leg_fills(quotes: pd.DataFrame, vol_table: pd.DataFrame) -> pd.DataFrame:
     bid_size, ask_size = fvl.float_array(quotes["bid_size"]), fvl.float_array(quotes["ask_size"])
     oi = fvl.float_array(quotes["open_interest"])
     unk_bid, unk_ask, unk_oi = np.isnan(bid_size), np.isnan(ask_size), np.isnan(oi)
-    fvl._log(f"unknown liquidity rows={len(table)} bid_size={int(unk_bid.sum())} "
+    _log(f"unknown liquidity rows={len(table)} bid_size={int(unk_bid.sum())} "
              f"ask_size={int(unk_ask.sum())} open_interest={int(unk_oi.sum())}")
     cols = {"s": s, "thin_size_buy": _thin(ask_size, THIN_SIZE_BELOW),
             "thin_size_sell": _thin(bid_size, THIN_SIZE_BELOW), "thin_oi": _thin(oi, THIN_OI_BELOW),
