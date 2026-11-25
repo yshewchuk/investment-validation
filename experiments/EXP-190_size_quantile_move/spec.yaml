@@ -1,6 +1,6 @@
 id: "EXP-190"
-title: "Per-event quantile model of earnings moves (Stage A)"
-hypothesis: "Can one model give each event a sharper usable |move| distribution than production, and help trading?"
+title: "Earnings-move quantile model (Stage A)"
+hypothesis: "Can one model beat production's per-event |move| distribution?"
 type: distribution_skill
 strategy: "*"
 price_source: "none in Stage A"
@@ -56,7 +56,7 @@ distribution_tails:
   rule: "above p90: quantiles of (y - q90) / max(q90 - q50, floor) over strictly earlier predictions with y > q90 (same window), scaled by event width; below p10 likewise with q50 - q10, floored at 0. Thin pool: unscored (tail_pool_thin)"
 zero_median:
   threshold: 1.0e-09
-  rule: "ratio over q50 (W / q50) undetermined when q50 <= threshold: counted zero_median, never 0/0."
+  rule: "ratio over q50 (W / q50) undetermined when q50 <= threshold: counted zero_median, never 0/0; quantiles stay valid."
 
 baselines:
   B0: {name: "production forecast + ResidualPool (bar)", rule: "stored tier-4 pred_abs_move; native full-history pool, strictly earlier; quantiles of max(f + err_move, 0) over the exact rows draw samples: forecast bucket, or whole earlier pool when bucket under MIN_POOL; refused draw unscored"}
@@ -65,6 +65,8 @@ baselines:
   B3: {name: "best v14 point model, own pool", rule: "sealed lead-1 predictions of M3 (v14 MAE winner, per sealed selection record); B0's construction on M3's own strictly earlier residuals (from 2023). If M3 lacks HMOSXLP, lowest inner-MAE HMOSXLP candidate with stored predictions; missing year: not_testable"}
 
 stage_a:
+  min_scored_share: 0.80  # per period/arm; below: not_testable (scored_share_below_floor); always reported
+  settlements: "design section 5, settlements 1-9, apply"
   population: "events where judged arm and B0 both have output; drops counted by reason and year; B1-B3 on common subsets"
   periods: ["2023H2", "2024", "2025"]
   quarters: 10
@@ -81,7 +83,7 @@ stage_a:
     min_events: 500
     bins: "min(20, n // 100) equal-count bins of earlier q50, per month, from arm's own out-of-sample (q50, y) pairs"
     value: "p75 minus p25 of earlier y in event's q50 bin (end bin outside edges)"
-    burn_in: "under min_events: event leaves both comparisons (level_width_burn_in)"
+    burn_in: "under min_events: event leaves only conditional tests, W, L, B0 (level_width_burn_in)"
     tests: "L goes through same tests on same events and cells as W"
   pass_rule:
     - "accuracy: arm's mean pinball below B0's in each period and in at least 8 of 10 quarters; for per-event difference (arm minus B0), 90% percentile bootstrap intervals by quarter and by ticker lie below 0"
@@ -95,8 +97,8 @@ stage_a:
 failure_semantics:
   R1: "panel, folds, dictionary, M0 or M3 series do not bind: refuse EXPERIMENT_IDENTITY_CONFLICT; nothing rebuilt or imputed. A merely absent M3 year is B3 not_testable."
   fit_failed: "fold's arm is fit_failed, no retry. Q_raw fit failure makes Stage A not_testable; calibration failure affects Q only."
-  abstention: "burn-in, thin tail pool, level-width burn-in, non-finite output: unscored (an abstention, not 'no'), counted; leaves paired population"
-  zero_median: "ratio undetermined, counted; quantiles stay valid"
+  abstention: "burn-in, thin tail pool, non-finite output: unscored (an abstention, not 'no'), counted; leaves paired population"
+  level_width: "burn-in or empty bin: no L, counted; only conditional tests"
   R2: "quarter or year chunks; over-limit refuses RESOURCE_LIMIT_EXCEEDED, no partial report"
   R3_R4: "fixed seeds; receipts atomic, immutable, bound to inputs; changed input refuses"
   R5: "arm ids hash source, level set and configuration"
@@ -105,6 +107,5 @@ failure_semantics:
 stage_b:
   status: pending_part_2
   decisions_recorded_in: "design section 10 (D1, D11-D15, N1-N4, F, EQ)"
-  rule: "write every Stage B rule here before settled"
 
 amendments: []

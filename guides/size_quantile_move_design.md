@@ -1,6 +1,6 @@
 # Per-event quantile model of the earnings move (design, EXP-190, part 1: Stage A)
 
-**Status: Q1 built.** Experiment **EXP-190** (user, 2026-11-25; Q1 re-checks the ledger id). This revision supersedes PR #2869. **Part 1** (this file) is the model and Stage A, which does no trading. **Part 2** (`guides/size_quantile_trading_design.md`, a later design PR) is Stage B: fills, trading arms and success rule. **[D1]**-style tags point to section 10.
+**Status: design; code lands slice by slice** (section 11). Experiment **EXP-190** (user, 2026-11-25; Q1 re-checks the ledger id). This revision supersedes PR #2869. **Part 1** (this file) is the model and Stage A, which does no trading. **Part 2** (`guides/size_quantile_trading_design.md`, a later design PR) is Stage B: fills, trading arms and success rule. **[D1]**-style tags point to section 10.
 
 ## 1. Question and evidence
 
@@ -99,6 +99,18 @@ No magnitude cutoff; quarter counts are mine. B1-B3 and S get the same tables; a
 
 **Periods used for selection** (the report repeats this) [D15]: the grid choice for year Y uses years before Y; B3's identity, the feature set and the grid values used 2023-2024; **the Stage A gate, which decides whether Stage B runs, uses 2023H2, 2024 and 2025.** **2025 is the clean test for those model choices only:** no feature set, grid value, configuration or baseline identity is chosen on it (its monthly calibration, tail and L pools use earlier 2025 labels, causally). It is **not a clean holdout**: Stage B scores 2025 only after a pass that read 2025 outcomes, which can flatter its 2025 result, and EXP-188's 2025 results shaped the design. Only the forward period after the data end is independent.
 
+**Settlements (supervisor-recommended 2026-11-25, for the user's review on this PR, Q5a).** These are not user decisions, except item 4. Q5a implements items 2, 6, 7, 9, the CRPS function of item 8 and the `L` reasons used by item 3; the rest lands in Q5b.
+
+1. **Spearman bootstrap.** In a used cell with `n` events and rank residuals `rW`, `re`, each event gets `n * rW * re / sqrt(sum(rW^2) * sum(re^2))` (0 in a zero-`W` cell; `L` alike). Their mean is the event-weighted cell correlation. The `size_pnl_contrast` ticker bootstrap runs on them, and on their per-event difference for `W` minus `L`; ranks and residuals stay fixed across resamples. The seed is a parameter, default 188.
+2. **Tercile difference** is taken inside each cell (top minus bottom tercile mean `e`) and weighted by cell event count; a zero-residual cell counts as 0. Events are ordered by residual, ties by event id, and split with `np.array_split`. The pooled-event tercile table is report only.
+3. **Level-width burn-in** removes an event only from the conditional tests (`W`, `L` and B0's comparison value); it stays in accuracy and coverage.
+4. **Minimum scored share: settled by the user 2026-11-25** (closes that point of #2879). `min_scored_share = 0.80` (the default), applied per period and per arm to the share of paired events the arm actually scores. Below it the arm is `not_testable`, reason `scored_share_below_floor`; the share is always reported. User's reason: known input discrepancies may leave some events unscored, and 80% is still solid. Q5b implements it and must first state the share's denominator here.
+5. **Missing data.** A period with no paired event or no usable cell, or a bootstrap with fewer than two groups, makes that arm `not_testable`. A missing quarter does not count towards a quarter requirement, which stays "of 10".
+6. **Zero `e` residual.** A cell where `e` varies but its residual is all zero (the correlation would be 0/0) is skipped for both `W` and `L`, under its own count.
+7. **`L` bins with tied `q50`.** Edges are numpy linear-method quantiles with duplicates removed; a value on an edge goes to the lower bin, for earlier and current events alike. **Added by the Q5a owner, beyond the accepted recommendations:** if ties leave the event's bin with no earlier `y`, the event has no `L` (`level_width_empty_bin`) and is treated as in item 3.
+8. **CRPS** uses the section 4 tail rule for every arm. Tails are built upstream: the metric takes each event's piecewise-linear quantile function as `(u, x)` points and integrates it exactly.
+9. **Crossing rate** is the share of events where any neighbouring pair of raw quantiles is strictly out of order.
+
 ## 6. Stage B (part 2)
 
 Fill model **F** is shared with EXP-189, so it is specified first and on its own: `guides/fair_value_fill_design.md`. Part 2 specifies how Stage B uses it, with controls (production P0, EXP-189 arm E), quantile-driven arms (including EQ, section 10), selection models and their control, accounts and success rule. Section 10 records its settled decisions.
@@ -109,7 +121,8 @@ Fill model **F** is shared with EXP-189, so it is specified first and on its own
 | --- | --- |
 | R1 panel, folds, dictionary, M0 or M3 series do not bind | refuse `EXPERIMENT_IDENTITY_CONFLICT`; nothing rebuilt or imputed. A merely absent M3 year is B3 `not_testable` for that year |
 | A fit fails | that fold's arm is `fit_failed`, no retry. Q_raw's fits failing makes Stage A `not_testable`; a calibration failure affects Q only |
-| Burn-in, thin tail pool, level-width burn-in, non-finite output | unscored (an abstention, not "no"), counted; leaves the paired population |
+| Burn-in, thin tail pool, non-finite output | unscored (an abstention, not "no"), counted; leaves the paired population |
+| Level-width burn-in or empty bin | no `L`, counted; leaves only the conditional tests (section 5, settlements 3 and 7) |
 | `zero_median` | ratio undetermined, counted; quantiles stay valid |
 | R2 cost | quarter or year chunks; over-limit refuses `RESOURCE_LIMIT_EXCEEDED`, no partial report |
 | R3, R4 | fixed seeds; receipts atomic, immutable, bound to inputs; a changed input refuses |
@@ -171,5 +184,6 @@ Estimates: non-test code lines / test lines / doc words. Part 2 lists Stage B's 
 | Q3c | Arm S | ~80 / ~90 / 20 | Q3a |
 | Q4a | B0, B1, B2 | ~140 / ~160 / 60 | Q2 |
 | Q4b | B3: bind M3 predictions, pool, quantiles | ~90 / ~110 / 40 | Q4a |
-| Q5 | Metrics, conditional tests, L, bootstraps, pass rule | ~200 / ~220 / 60 | Q3b, Q4b (may start on fixtures) |
-| Q6 | Stage A driver, report, 50-ticker smoke with fit timing, runbook | ~130 / ~100 / 100 | Q5 |
+| Q5a | Per-event and per-cell metrics: pinball, coverage, CRPS, crossing, `L`, cell scores | ~240 / ~220 / 60 | Q3b, Q4b (may start on fixtures) |
+| Q5b | Arm tables, bootstraps, scored share, pass rule | ~280 / ~250 / 40 | Q5a |
+| Q6 | Stage A driver, report, 50-ticker smoke with fit timing, runbook | ~130 / ~100 / 100 | Q5b |

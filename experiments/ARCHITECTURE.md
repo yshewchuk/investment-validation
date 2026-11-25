@@ -930,12 +930,12 @@ The evidence helper separately consumes native history admission and research st
 
 ## Magnitude search orchestration
 
-`v2_magnitude_search_run` composes public plan, journal, trial and outer APIs. Separate `seal`, `run` and read-only `collect` commands keep explicit ownership; run never migrates or seals implicitly. A distinct driver seal binds plan/ref and full driver source closure; atomic absence guards prevent blessing started library journals. Run and CLI collection
-require that exact binding, without changing the scientific report hash. The same pre-work roster check (unfinished claims, premature selections) gates serial and bounded-worker execution; each fit child stays single-threaded (including MLP), preserving request identity and the parent/child memory contract.
+`v2_magnitude_search_run` composes public plan, journal, trial and outer APIs. Separate `seal`, `run` and read-only `collect` commands keep explicit ownership. A distinct driver seal binds plan/ref and full driver source closure. Run and CLI collection
+require that exact binding. The same pre-work roster check (unfinished claims, premature selections) gates serial and bounded-worker execution; each fit child stays single-threaded (including MLP), preserving request identity and the parent/child memory contract.
 Freeze precedes all selected outer evaluation, with zero fit retries and unchanged winner policy.
 
-The CLI reuses the bounded staged-input reader, strict duplicate-key decoder, typed spec/reference admission and shared canonical JSON stream. Output has a configured UTF-8 byte budget (table below). Collection preserves the existing outer report identity and uses a read-only
-SQLite connection. No persisted report framework, scheduler, ledger, final-read or release authority is introduced.
+The CLI reuses the bounded staged-input reader, strict duplicate-key decoder, typed spec/reference admission and shared canonical JSON stream. Collection preserves the existing outer report identity and uses a read-only
+SQLite connection. No persisted report framework, scheduler, ledger, final-read or release authority.
 
 Each invocation revalidates bindings/evidence, with no cross-call admission cache. The CLI calls `seal_search_run`/`run_search`. Direct engine dependencies are contracts, data, foundation and ops.
 
@@ -955,6 +955,10 @@ Each invocation revalidates bindings/evidence, with no cross-call admission cach
 | CLI typed `OpsError`/`DataError`; unexpected builtin failure | Preserve the complete typed `Problem` in one refusal document, exit 2; unexpected builtin errors propagate. An opened connection closes in either case. |
 | Output exceeds the byte budget or output staging fails with an artifact, filesystem or SQLite error | Report bytes are discarded; only the refusal document reaches stdout, emitting `RESOURCE_LIMIT_EXCEEDED` or sanitized `RESOURCE_UNAVAILABLE`. Other staging errors are unexpected builtin failures and propagate. Prior journal commits remain. |
 | Stdout write or flush failure | The original stream error propagates with no retry and no second document; downstream may have received a prefix, and stdout remains caller-owned. |
+
+### `size_quantile_metrics`
+
+Pure; no I/O or caller. `crps_quantile`, `level_width`, `cell_scores` refuse bad input (`ValueError`; non-finite history drops); others assume finite aligned rows. No width: `level_width_burn_in`/`level_width_empty_bin`. Cell skips: `cell_small`, `constant_e`, `zero_e_residual`.
 
 ### Qualified SIZE panel (opt-in)
 
