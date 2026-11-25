@@ -33,10 +33,29 @@ def _euro_put(spot, strike, years, vol, rate):
     return call - spot + strike * math.exp(-rate * years)
 
 
+def _bs_call(spot, strike, years, vol, rate):
+    """Black-Scholes call, zero dividends; math.erf only, independent of the module."""
+
+    def ncdf(x):
+        return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+    sd = vol * math.sqrt(years)
+    d1 = (math.log(spot / strike) + (rate + 0.5 * vol * vol) * years) / sd
+    d2 = d1 - sd
+    return spot * ncdf(d1) - strike * math.exp(-rate * years) * ncdf(d2)
+
+
 def test_european_call_published_values():
     # Hull textbook: S=42, K=40, r=0.10, vol=0.20, T=0.5.
     assert float(fvp.european_call(42.0, 40.0, 0.5, 0.20, 0.10)) == pytest.approx(4.759, abs=0.005)
     assert float(fvp.european_call(100.0, 100.0, 1.0, 0.2, 0.05)) == pytest.approx(10.4506, abs=1e-4)
+
+
+def test_european_call_negative_rate_value():
+    value = float(fvp.european_call(100.0, 100.0, 1.0, 0.2, -0.02))
+    assert value == pytest.approx(_bs_call(100.0, 100.0, 1.0, 0.2, -0.02), abs=1e-10)
+    # Hand-derived: d1 = 0, d2 = -0.2, call = 50 - 100*exp(0.02)*N(-0.2) = 7.07602.
+    assert value == pytest.approx(7.0760, abs=1e-3)
 
 
 # Longstaff & Schwartz (2001) Table 1, finite-difference column: K=40, r=0.06.
@@ -186,6 +205,11 @@ def test_put_vol_floor_but_call_is_not_floored():
     assert float(fvp.european_call(100.0, 100.0, 1.0, 0.001, 0.0)) < float(
         fvp.european_call(100.0, 100.0, 1.0, 0.01, 0.0)
     )
+    # Floored put value: European ATM zero-rate value 100*(2N(0.01*sqrt(0.5)/2)-1) = 0.2821.
+    assert float(fvp.american_put(100.0, 100.0, 0.5, 0.001, 0.0)) == pytest.approx(0.282, abs=0.01)
+    # Unfloored zero-rate ATM calls at years 1.0.
+    assert float(fvp.european_call(100.0, 100.0, 1.0, 0.001, 0.0)) == pytest.approx(0.039894, abs=1e-5)
+    assert float(fvp.european_call(100.0, 100.0, 1.0, 0.01, 0.0)) == pytest.approx(0.398939, abs=1e-5)
 
 
 def test_tree_probability_outside_unit_interval_is_nan():
@@ -215,6 +239,18 @@ def test_batch_equals_single_rows_and_is_order_independent():
         np.testing.assert_array_equal(batch, singles)
         reverse = func(spot[::-1], strike[::-1], years[::-1], vol[::-1], rate[::-1])
         np.testing.assert_array_equal(batch[::-1], reverse)
+
+    # Anchors so that constant outputs cannot pass.
+    calls = fvp.european_call(
+        np.array([42.0, 100.0]), np.array([40.0, 100.0]), np.array([0.5, 1.0]),
+        np.array([0.2, 0.2]), np.array([0.10, 0.05]),
+    )
+    np.testing.assert_allclose(calls, [4.759, 10.4506], rtol=0, atol=0.005)
+    puts = fvp.american_put(
+        np.array([36.0, 50.0]), np.array([40.0, 50.0]), np.array([1.0, 5.0 / 12.0]),
+        np.array([0.2, 0.4]), np.array([0.06, 0.10]),
+    )
+    np.testing.assert_allclose(puts, [4.4867, 4.28], rtol=0, atol=0.01)
 
 
 def test_broadcast_shape_dtype_and_no_mutation():

@@ -54,10 +54,11 @@ def _put_tree(spot, strike, years, vol, rate):
         s, k, pr, sig = spot[ok], strike[ok], p[ok], vsq[ok]
         q = 1.0 - pr
         disc = np.exp(-rate[ok] * dt[ok])
+        # Column c holds spot * exp((c - n) * sig), so node m of step i (exponent 2m - i) sits at column n - i + 2m.
+        ladder = s[:, None] * np.exp(np.arange(-n, n + 1, dtype=float)[None, :] * sig[:, None])
 
         def nodes(i):
-            m = np.arange(i + 1)
-            return s[:, None] * np.exp((2.0 * m - i)[None, :] * sig[:, None])
+            return ladder[:, n - i : n + i + 1 : 2]
 
         values = np.maximum(k[:, None] - nodes(n), 0.0)
         for i in range(n - 1, -1, -1):
@@ -70,7 +71,7 @@ def _put_tree(spot, strike, years, vol, rate):
 def american_put(spot, strike, years, vol, rate) -> np.ndarray:
     """American put value per row: CRR tree, TREE_STEPS steps, early exercise at every step.
 
-    Years <= 0 is expired (intrinsic). Vol is floored at PUT_VOL_FLOOR.
+    Years <= 0 is expired (intrinsic). A positive vol below PUT_VOL_FLOOR is raised to it; vol <= 0 is missing (NaN).
     """
     shape, s, k, t, v, r, expired, live = _prepare(spot, strike, years, vol, rate)
     out = np.full(s.shape, np.nan)

@@ -974,4 +974,4 @@ EXP-188: `size_pnl_{inputs,outer_inputs}` bind v14 and 2025 forecasts; `size_pnl
 
 ## Fair-value pricer (fill model F)
 
-`fair_value_pricer` (NumPy only): unclamped, zero-dividend American put and European call; no production caller ([design §4](../guides/fair_value_fill_design.md)). NaN (no value): invalid spot, strike or years; unexpired with invalid volatility or rate; put-tree probability outside (0,1). Expired: intrinsic. Only puts floor volatility (0.01).
+`fair_value_pricer` (NumPy only): unclamped, zero-dividend American put and European call; no production caller ([design §4](../guides/fair_value_fill_design.md)). NaN (no value): invalid spot, strike or years; unexpired with invalid volatility or rate; put-tree probability outside (0,1). Expired: intrinsic. Only puts floor positive volatility (0.01).
