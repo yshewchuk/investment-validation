@@ -38,7 +38,16 @@ TABLES = {"quotes": ("hist/strikes", QKEYS, QVALS, ["smvVol"]),
           "rates": ("hist/cores", RKEYS, RATES, RATES)}
 DATE = "datetime64[ns]"
 BAD, PROGRESS_S = ("unreadable", "unrecognized"), 30.0
-CODE_DIGEST = hashlib.sha256(b"".join(Path(f).read_bytes() for f in (
+
+
+def _source_bytes(path) -> bytes:
+    with open(path, "rb") as fh:
+        data = fh.read(MAX_META_BYTES + 1)
+    if len(data) > MAX_META_BYTES:
+        raise SystemExit(f"source {path} exceeds {MAX_META_BYTES} bytes")
+    return data
+
+CODE_DIGEST = hashlib.sha256(b"".join(_source_bytes(f) for f in (
     __file__, inspect.getfile(payload_shape), inspect.getfile(mask_sentinels)))).hexdigest()
 
 
@@ -111,11 +120,16 @@ def parse_entry(table: str, entry, blob: bytes) -> tuple:
     return "ok", kept, {"rows_bad_key": int(bad.sum()), "rows_kept": len(kept)}, divs
 
 
-def _shard_digest(path: Path) -> str:
-    if path.stat().st_size > MAX_BODY_BYTES:
-        raise ValueError(f"shard {path} exceeds {MAX_BODY_BYTES} bytes")
+def _shard_bytes(path: Path) -> bytes:
     with open(path, "rb") as fh:
-        return hashlib.file_digest(fh, "sha256").hexdigest()
+        blob = fh.read(MAX_BODY_BYTES + 1)
+    if len(blob) > MAX_BODY_BYTES:
+        raise ValueError(f"shard {path} exceeds {MAX_BODY_BYTES} bytes")
+    return blob
+
+
+def _shard_digest(path: Path) -> str:
+    return hashlib.sha256(_shard_bytes(path)).hexdigest()
 
 
 def _seal(marker: dict) -> str:
@@ -202,9 +216,10 @@ def merge_stage(work: Path, out: Path, markers: dict) -> dict:
             shards = []
             for k in entry_keys:
                 path = work / "shards" / table / month / f"{k}.parquet"
-                if _shard_digest(path) != markers[table][k]["months"][month]:
+                blob = _shard_bytes(path)
+                if hashlib.sha256(blob).hexdigest() != markers[table][k]["months"][month]:
                     raise ValueError(f"shard {path} changed after it was written")
-                shards.append(pd.read_parquet(path))
+                shards.append(pd.read_parquet(io.BytesIO(blob)))
             df = pd.concat(shards, ignore_index=True)
             conflicts = (df[cols].drop_duplicates().groupby(keys, sort=False).size() > 1).sum()
             final = df.sort_values([*keys, "fetched_at", "cache_key", "row_no"], kind="mergesort")

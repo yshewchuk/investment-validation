@@ -263,6 +263,39 @@ def test_digest_matches_parsed_bytes(tmp_path, monkeypatch):
     assert q.loc[100.0, "smvVol"] == 0.25
 
 
+def test_merge_parses_verified_bytes(tmp_path, monkeypatch):
+    raw = _world(tmp_path)
+    out, work = tmp_path / "out", tmp_path / "work"
+    real_bytes, real_merge = tool._shard_bytes, tool.merge_stage
+    in_merge = False
+
+    def flagged_merge(*args):
+        nonlocal in_merge
+        in_merge = True
+        try:
+            return real_merge(*args)
+        finally:
+            in_merge = False
+
+    def tamper_after_read(path):
+        blob = real_bytes(path)
+        if in_merge:
+            Path(path).write_bytes(b"junk")
+        return blob
+
+    monkeypatch.setattr(tool, "merge_stage", flagged_merge)
+    monkeypatch.setattr(tool, "_shard_bytes", tamper_after_read)
+    assert tool.main(_args(raw, out, work)) == 0
+    q = pd.read_parquet(out / "quotes" / "year=2025" / "month=01.parquet").set_index("strike")
+    assert q.loc[100.0, "smvVol"] == 0.25
+
+
+def test_source_bytes_cap(monkeypatch):
+    monkeypatch.setattr(tool, "MAX_META_BYTES", 10)
+    with pytest.raises(SystemExit, match="exceeds 10 bytes"):
+        tool._source_bytes(tool.__file__)
+
+
 def test_merge_refuses_changed_shard(tmp_path, monkeypatch):
     raw = _world(tmp_path)
     out, work = tmp_path / "out", tmp_path / "work"
