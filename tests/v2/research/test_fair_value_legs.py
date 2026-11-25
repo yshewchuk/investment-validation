@@ -27,6 +27,12 @@ def smv_of(K):
     return 0.40 + 0.001 * (K - 100.0)  # clearly apart from iv_curve
 
 
+def quad_iv(K):
+    """Exact quadratic in k = ln(K/SPOT)/sqrt(T), the fit variable."""
+    k = np.log(np.asarray(K, dtype=float) / SPOT) / np.sqrt(T)
+    return 0.25 - 0.03 * k + 0.05 * k * k
+
+
 def smile_rows(strikes, iv_of, bid=0.5, ask=1.5):
     return [(float(K), r, bid, ask, iv_of(K), SPOT, False, RATE) for K in strikes for r in ("C", "P")]
 
@@ -47,6 +53,32 @@ def vols_frame(strikes=(), smv=(), expiry=EXP):
     df.insert(1, "obs_date", OBS)
     df.insert(2, "expiry", expiry)
     return df
+
+
+def assert_unavailable(rows):
+    """Rows with no fair value: V and vol NaN, no clamp side."""
+    assert rows.V.isna().all() and rows.vol.isna().all()
+    assert all(s is None for s in rows.clamp_side)
+
+
+def _fit_expected(q, weighted=True):
+    """Independent lstsq on the fit set (puts K<=SPOT, calls K>SPOT), weights 1/max(rel, 0.02), k clipped."""
+    strike, right = q["strike"].to_numpy(dtype=float), q["right"].to_numpy()
+    bid, ask, iv = (q[name].to_numpy(dtype=float) for name in ("bid", "ask", "iv"))
+    k = np.log(strike / SPOT) / np.sqrt(T)
+    fit = ((right == "P") & (strike <= SPOT)) | ((right == "C") & (strike > SPOT))
+    w = 1.0 / np.maximum((ask - bid) / ((bid + ask) / 2.0), 0.02) if weighted else np.ones(len(k))
+    design = np.column_stack([k**2, k, np.ones_like(k)])
+    coef = np.linalg.lstsq(design[fit] * w[fit, None], iv[fit] * w[fit], rcond=None)[0]
+    kc = np.clip(k, k[fit].min(), k[fit].max())
+    return coef[0] * kc**2 + coef[1] * kc + coef[2]
+
+
+BASE_NO_SPOT = [85.0, 90.0, 95.0, 105.0, 110.0, 115.0, 120.0]  # no strike at spot, so probes can add one
+
+
+def _smile_base():
+    return [(K, r, 0.5, 1.5, quad_iv(K), SPOT, False, RATE) for K in BASE_NO_SPOT for r in ("C", "P")]
 
 
 def test_smile_recovers_noisy_curve_from_bid_ask_ivs():
@@ -87,16 +119,38 @@ def test_fit_smile_matches_independent_weighted_least_squares():
 
 
 def test_edge_value_holds_outside_fitted_range():
-    rows = smile_rows(np.arange(90.0, 110.1, 2.5), iv_curve)
+    rows = smile_rows(np.arange(90.0, 110.1, 2.5), quad_iv)
     rows += [(70.0, "C", 0.5, 1.5, 0.9, SPOT, False, RATE), (80.0, "C", 0.5, 1.5, 0.9, SPOT, False, RATE),
              (120.0, "P", 0.5, 1.5, 0.9, SPOT, False, RATE), (130.0, "P", 0.5, 1.5, 0.9, SPOT, False, RATE)]
     out = legs.leg_values(quotes_frame(rows), vols_frame())
-    vol_at = dict(zip(zip(out.strike, out.right), out.vol))
-    assert vol_at[(70.0, "C")] == vol_at[(80.0, "C")]  # both below k_min: the same edge value
-    assert vol_at[(120.0, "P")] == vol_at[(130.0, "P")]  # both above k_max
-    assert vol_at[(70.0, "C")] == pytest.approx(vol_at[(90.0, "P")], rel=1e-12)
-    assert vol_at[(130.0, "P")] == pytest.approx(vol_at[(110.0, "C")], rel=1e-12)
-    assert 0.2 < vol_at[(70.0, "C")] < 0.35  # the smile edge, not the stored 0.9
+    assert set(out.source) == {"smile"}
+    K, vol = out.strike.to_numpy(), out.vol.to_numpy()
+    k_lo, k_hi = np.log(0.9) / np.sqrt(T), np.log(1.1) / np.sqrt(T)  # k at strikes 90 and 110
+    edge_lo = 0.25 - 0.03 * k_lo + 0.05 * k_lo**2
+    edge_hi = 0.25 - 0.03 * k_hi + 0.05 * k_hi**2
+    inside = (K >= 90.0) & (K <= 110.0)
+    np.testing.assert_allclose(vol[inside], quad_iv(K[inside]), rtol=0, atol=1e-9)
+    np.testing.assert_allclose(vol[K < 90.0], edge_lo, rtol=0, atol=1e-9)  # 70 and 80 hold the k(90) value
+    np.testing.assert_allclose(vol[K > 110.0], edge_hi, rtol=0, atol=1e-9)  # 120 and 130 hold the k(110) value
+    assert abs(edge_lo - edge_hi) > 0.01  # a constant vol would fail
+
+
+def test_spread_weights_through_leg_values():
+    rows = []
+    for K in BASE:
+        for r in ("C", "P"):
+            bid, ask, iv = 0.95, 1.05, quad_iv(K)
+            if (K, r) == (90.0, "P"):
+                bid, ask, iv = 0.5, 1.5, quad_iv(K) + 0.05  # wide spread, off the curve
+            if (K, r) == (110.0, "C"):
+                bid, ask = 0.995, 1.005  # relative spread 0.01, below the 0.02 floor
+            rows.append((K, r, bid, ask, iv, SPOT, False, RATE))
+    q = quotes_frame(rows)
+    out = legs.leg_values(q, vols_frame())
+    assert set(out.source) == {"smile"}
+    expected = _fit_expected(q)
+    np.testing.assert_allclose(out.vol.to_numpy(), expected, rtol=0, atol=1e-8)
+    assert np.abs(expected - _fit_expected(q, weighted=False)).max() > 1e-3
 
 
 def test_fit_smile_none_cases_and_failed_fit_per_row():
@@ -114,7 +168,7 @@ def test_fit_smile_none_cases_and_failed_fit_per_row():
     rows += [(K, "C", 0.5, 1.5, 0.25, SPOT, False, RATE) for K in (85.0, 90.0, 95.0)]  # all k < 0
     out = legs.leg_values(quotes_frame(rows), vols_frame())
     assert set(out.source) == {"smile"} and set(out.status) == {"no_fair_value"}
-    assert out.vol.isna().all() and out.V.isna().all()
+    assert_unavailable(out)
 
 
 def test_smvvol_shares_vol_across_rights_and_ignores_extra_columns():
@@ -133,15 +187,66 @@ def test_row_outside_fit_without_smv_is_no_fair_value_rest_ok():
     assert set(out.source) == {"smvvol"}
     assert out.status.iloc[:-1].eq("ok").all() and out.status.iloc[-1] == "no_fair_value"
     np.testing.assert_array_equal(out.vol.to_numpy()[:-1], [smv_of(K) for K in out.strike.iloc[:-1]])
+    assert_unavailable(out.iloc[[-1]])
 
 
 @pytest.mark.parametrize("bad", [None, 0.0, np.nan, np.inf])
 def test_one_missing_fit_vol_makes_every_row_smile(bad):
     strikes = [K for K in BASE if K != 95.0] if bad is None else list(BASE)
     smv = [smv_of(K) if K != 95.0 else bad for K in strikes]
-    out = legs.leg_values(quotes_frame(smile_rows(BASE, lambda K: 0.25)), vols_frame(strikes, smv))
+    q = quotes_frame(smile_rows(BASE, iv_curve))
+    out = legs.leg_values(q, vols_frame(strikes, smv))
     assert set(out.source) == {"smile"} and set(out.status) == {"ok"}
-    np.testing.assert_allclose(out.vol.to_numpy(), 0.25, rtol=0, atol=1e-9)
+    pd.testing.assert_frame_equal(out, legs.leg_values(q, vols_frame()))
+    vol = out.vol.to_numpy()
+    assert np.ptp(vol) > 0.01
+    assert (np.abs(vol - smv_of(out.strike.to_numpy())) > 1e-6).all()
+
+
+@pytest.mark.parametrize("K, right, bid, ask, inside", [
+    (100.0, "P", 0.5, 1.5, True),   # put at spot: in the fit set
+    (100.0, "C", 0.5, 1.5, False),  # call at spot: out
+    (80.0, "P", 0.0, 1.0, True),    # zero bid, positive ask: in
+    (80.0, "P", 1.0, 1.0, True),    # locked quote, bid == ask > 0, not repaired: in
+])
+def test_fit_admission_boundaries(K, right, bid, ask, inside):
+    base = legs.leg_values(quotes_frame(_smile_base()), vols_frame()).vol.to_numpy()
+    probe = (K, right, bid, ask, quad_iv(K) + 0.1, SPOT, False, RATE)  # wild iv, off the curve
+    out = legs.leg_values(quotes_frame(_smile_base() + [probe]), vols_frame()).vol.to_numpy()
+    if inside:
+        assert np.abs(out[:-1] - base).max() > 1e-4  # the probe moves the fit
+    else:
+        np.testing.assert_array_equal(out[:-1], base)  # the probe does not move the fit
+
+
+def test_exactly_five_strikes_with_both_sides_fit():
+    picks = ((85.0, "P"), (90.0, "P"), (95.0, "P"), (105.0, "C"), (110.0, "C"))
+    out = legs.leg_values(quotes_frame([(K, r, 0.5, 1.5, quad_iv(K), SPOT, False, RATE) for K, r in picks]),
+                          vols_frame())
+    strike = out.strike.to_numpy()
+    assert legs.fit_smile(strike, np.log(strike / SPOT) / np.sqrt(T), quad_iv(strike), np.full(5, 1.0)) is not None
+    assert set(out.source) == {"smile"} and set(out.status) == {"ok"}
+    np.testing.assert_allclose(out.vol.to_numpy(), quad_iv(strike), rtol=0, atol=1e-9)
+
+
+def test_fitter_failures_return_none(monkeypatch):
+    strike = np.array([85.0, 90.0, 95.0, 105.0, 110.0, 115.0])
+    args = (strike, np.log(strike / SPOT) / np.sqrt(T), quad_iv(strike), np.full(6, 0.1))
+    assert legs.fit_smile(*args) is not None
+
+    def singular(*_, **__):
+        raise np.linalg.LinAlgError("singular matrix")
+
+    monkeypatch.setattr(legs.np, "polyfit", singular)
+    assert legs.fit_smile(*args) is None
+    monkeypatch.setattr(legs.np, "polyfit", lambda *_, **__: np.array([np.nan, 0.0, 0.2]))
+    assert legs.fit_smile(*args) is None
+
+
+def test_quadratic_non_positive_at_range_end_is_none():
+    k, strike, ones = np.linspace(-0.5, 1.0, 6), np.arange(6.0), np.full(6, 0.1)
+    assert legs.fit_smile(strike, k, 0.2 - 0.1 * k, ones) is not None  # linear, 0.1 at k_max
+    assert legs.fit_smile(strike, k, 0.2 - 0.25 * k, ones) is None  # linear, -0.05 at k_max
 
 
 EXCLUDED = [
@@ -168,6 +273,7 @@ def test_fit_set_exclusions_do_not_move_the_fit():
     assert set(out.source) == {"smvvol"}
     np.testing.assert_array_equal(out.vol.to_numpy()[:n], [smv_of(K) for K in out.strike.iloc[:n]])
     assert out.status.iloc[n:].tolist() == ["no_fair_value", "no_fair_value"]
+    assert_unavailable(out.iloc[n:])
 
 
 def test_expired_rows_are_intrinsic_without_vol_or_rate():
@@ -187,6 +293,7 @@ def test_expired_rows_are_intrinsic_without_vol_or_rate():
         assert out[c].dtype == object
     assert out.clamp_side.iloc[-1] is None
     assert out.vol.isna().all() and out.rate.isna().all()
+    assert_unavailable(out.iloc[[-1]])
 
 
 def test_nat_expiry_has_no_source_and_no_fair_value():
@@ -194,6 +301,7 @@ def test_nat_expiry_has_no_source_and_no_fair_value():
     out = legs.leg_values(quotes_frame(rows, expiry=pd.NaT), vols_frame(expiry=pd.NaT))
     assert out.source.iloc[0] is None
     assert out.status.iloc[0] == "no_fair_value"
+    assert_unavailable(out)
 
 
 UNPRICEABLE = [(np.nan, 1.5, False), (0.5, np.inf, False), (-0.1, 1.0, False),
@@ -205,6 +313,7 @@ def test_each_unpriceable_condition(bid, ask, repaired):
     rows = smile_rows(BASE, iv_curve) + [(77.5, "P", bid, ask, 0.25, SPOT, repaired, RATE)]
     out = legs.leg_values(quotes_frame(rows), vols_frame())
     assert out.status.iloc[-1] == "unpriceable" and np.isnan(out.V.iloc[-1])
+    assert_unavailable(out.iloc[[-1]])
 
 
 def test_status_precedence_and_usable_zero_bid():
@@ -215,6 +324,7 @@ def test_status_precedence_and_usable_zero_bid():
     ]
     out = legs.leg_values(quotes_frame(rows), vols_frame())
     assert out.status.iloc[-3:].tolist() == ["unpriceable", "rate_unknown", "ok"]
+    assert_unavailable(out.iloc[-3:-1])  # the unpriceable and the rate_unknown rows
 
 
 def test_values_equal_pricer_and_clamp_to_effective_quote():
@@ -251,6 +361,23 @@ def test_repaired_rows_use_effective_quote():
     assert out.clamp_side.tolist() == ["ask", "bid"]
     np.testing.assert_array_equal(out.eff_bid.to_numpy(), [3.0, 3.0])
     np.testing.assert_array_equal(out.eff_ask.to_numpy(), [5.0, 5.0])
+
+
+def test_output_columns_and_passthrough():
+    rows = [
+        (100.0, "C", 0.5, 1.5, 0.25, SPOT, False, 0.031),
+        (90.0, "P", 4.0, 4.0, np.nan, SPOT, True, 0.047),  # repaired: effective [3, 5]
+        (110.0, "C", 0.9, 1.1, 0.25, SPOT, False, 0.052),
+    ]
+    q = quotes_frame(rows)
+    out = legs.leg_values(q, vols_frame())
+    assert list(out.columns) == ["ticker", "obs_date", "expiry", "strike", "right", "status", "V", "vol",
+                                 "source", "rate", "clamp_side", "repaired", "eff_bid", "eff_ask"]
+    for name in ("ticker", "obs_date", "expiry", "strike", "right", "rate"):
+        assert out[name].tolist() == q[name].tolist(), name
+    assert out.repaired.tolist() == q.quote_repaired.tolist() == [False, True, False]
+    np.testing.assert_allclose(out.eff_bid.to_numpy(), [0.5, 3.0, 0.9], rtol=0, atol=1e-12)
+    np.testing.assert_allclose(out.eff_ask.to_numpy(), [1.5, 5.0, 1.1], rtol=0, atol=1e-12)
 
 
 def _two_expiries():

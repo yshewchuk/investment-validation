@@ -974,4 +974,9 @@ EXP-188: `size_pnl_{inputs,outer_inputs}` bind v14 and 2025 forecasts; `size_pnl
 
 ## Fill model F
 
-No production caller ([design §4](../guides/fair_value_fill_design.md)). `fair_value_pricer`: zero-dividend American put and European call, NaN when invalid. `fair_value_legs`: clamped value per quote; missing columns, duplicate quote/vol keys or invalid `right`/`quote_repaired` raise `FairValueRefusal` (`EXPERIMENT_IDENTITY_CONFLICT`), no partial output. Rows: [README](README.md).
+No production caller ([design §4](../guides/fair_value_fill_design.md)). `fair_value_pricer` prices; `fair_value_legs` clamps per quote ([README](README.md)).
+
+|Condition|Outcome|
+|-|-|
+|Invalid pricer input|NaN|
+|Missing column, duplicate quote/vol key, invalid `right`/`quote_repaired`|`FairValueRefusal` (`EXPERIMENT_IDENTITY_CONFLICT`), no partial output|

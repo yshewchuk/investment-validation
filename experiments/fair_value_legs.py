@@ -42,6 +42,10 @@ def _log(message: str) -> None:
     print(f"[fv_legs] {message}", file=sys.stderr, flush=True)
 
 
+def _peak_rss_kb() -> int:
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+
 def _num(values) -> np.ndarray:
     """Float array; NaN, None and pd.NA all become NaN."""
     return pd.Series(values).astype("Float64").to_numpy(dtype=float, na_value=np.nan)
@@ -151,7 +155,7 @@ def leg_values(quotes: pd.DataFrame, vol_table: pd.DataFrame) -> pd.DataFrame:
     gid = quotes.groupby(EXPIRY_KEY, sort=False, dropna=False).ngroup().to_numpy()
     order = np.argsort(gid, kind="stable")
     groups = np.split(order, np.flatnonzero(np.diff(gid[order])) + 1) if n else []
-    _log(f"start rows={n} expiries={len(groups)}")
+    _log(f"start rows={n} expiries={len(groups)} peak_rss_kb={_peak_rss_kb()}")
 
     vol_in, source = np.full(n, np.nan), np.full(n, None, dtype=object)
     counts, last = Counter(), started
@@ -198,5 +202,5 @@ def leg_values(quotes: pd.DataFrame, vol_table: pd.DataFrame) -> pd.DataFrame:
         index=quotes.index, columns=OUT_COLUMNS,
     )
     _log(f"end status={dict(Counter(status.tolist()))} elapsed={time.monotonic() - started:.1f}s "
-         f"peak_rss_kb={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}")
+         f"peak_rss_kb={_peak_rss_kb()}")
     return out
