@@ -15,20 +15,20 @@ Experiment-side (`experiments/size_quantile_fill*`); `engine/fills.py`, `engine/
 
 **Fair value** V per leg: Black-Scholes with American exercise at ORATS `smvVol`, then **clamped to [bid, ask]**.
 
-- **Pricer** (mine): Cox-Ross-Rubinstein tree, 200 steps, discrete dividends (escrowed), for puts and calls. Tool check: QuantLib is not installed, and adding it would change the pinned environment sealed runs record; the need is one function on scipy/numpy, tested against European Black-Scholes and published American values.
-- **Rate:** a table committed in the spec of 3-month T-bill monthly averages (FRED `DGS3MO`); a trade uses the previous month's.
-- **Dividends:** `massive_dividends.v1` rows with `declaration_date` on or before the quote date and ex-date after it, up to expiry. A row without a declaration date is ignored; both that and a ticker with no rows (zero dividend, `dividend_unknown`) are counted. Coverage is unverified.
-- ORATS's own rate and dividend inputs are not stored, so they may disagree with these. The clamp bounds the error; the report prints `|V - mid| / half-spread` by year.
+- **Pricer** (mine): an experiment-side Cox-Ross-Rubinstein tree, 200 steps, discrete dividends (escrowed), for puts and calls. The existing helpers (`engine.pnl_sim.black_scholes_put`, the one in `engine/v2/scoring/stages.py`) are European without dividends; `pnl_sim` is in the v14 closure and is only read, as a zero-dividend parity reference. Tool check: QuantLib is not installed, and adding it would change the pinned environment sealed runs record; the need is one function on numpy, also tested against published American values. No IV solver is needed.
+- **Rate:** ORATS cores `iRate5wk` and `iRateLt` from the same raw cache: `iRate5wk` up to 35 days to expiry, linear to `iRateLt` at 365, flat beyond (mine). The row is the ticker's for the quote date, else its latest earlier one within 7 calendar days; none: `rate_unknown`, undetermined. The extractor confirms the unit before use. Coverage is reported by year.
+- **Dividends:** source `massive_dividends.v1`: rows with `declaration_date` on or before the quote date and ex-date after it, up to expiry; rows without a declaration date are ignored. Its coverage is **not confirmed**. Documented approximation: with no usable row the dividend is **zero** (`dividend_unknown`, counted by year). Where one was really due, that under-values puts and over-values calls; the clamp bounds the error. Non-payers and missing data cannot be told apart.
+- ORATS's own dividend inputs are not carried, so they may disagree with these. The report prints `|V - mid| / half-spread` by year.
 
-**Where `smvVol` is.** The chain pull lists request it, but `option_chains` has no such column (`engine/data/normalize/n_chains.py` drops it). A read-only extractor takes it from cached raw ORATS strike payloads into an experiment table. Historical coverage is unverified and is reported by year **before any outcome is read**.
+**Where `smvVol` is** (supervisor-checked 2026-11-25, not re-read here). The curated `option_chains` store has no `smvVol` (`engine/data/normalize/n_chains.py` drops it). The raw cache does: `hist/strikes` responses under `data/raw/fetch/orats/` (checked, for example, at trade date 2024-04-24) carry `smvVol`, `callMidIv` and `putMidIv` per strike. So F needs a **re-ingest from the raw cache, with no paid backfill**, into an experiment-side table keyed like `option_chains` (ticker, `obs_date`, expiry, strike, right; both rights of a strike get its `smvVol`). The production normalizer and its outputs do not change. That one response does not show coverage: it is reported by year and `chain_kind` **before any outcome is read**.
 
-**Fallback smile.** Bid and ask IVs are **not stored** either (`iv` is the side's mid IV only). So the fallback inverts the stored bid and ask **prices** with the same pricer into `iv_bid` and `iv_ask`. Per ticker, date and expiry, fit `iv = a + b*k + c*k^2`, `k = ln(K/S)/sqrt(T)`, by `numpy.polyfit` on `(iv_bid + iv_ask)/2` with weight `1/max(iv_ask - iv_bid, 0.02)`, using out-of-the-money quotes (puts `K <= S`, calls `K > S`) whose two prices invert. It needs at least 5 strikes, one or more on each side; outside the fitted `k` range the edge value holds; a non-positive fitted IV voids the fit (all mine). One source serves a whole expiry on a date: `smvVol` only if every needed strike has it, else the smile; the two are never mixed. No fit: `no_fair_value`. Source share and the smile-minus-`smvVol` gap where both exist are printed by year.
+**Fallback smile**, for rows without `smvVol`, fitted from stored `iv` (that right's ORATS mid IV), bid and ask. Per ticker, date and expiry, fit `iv = a + b*k + c*k^2`, `k = ln(K/S)/sqrt(T)`, by `numpy.polyfit` with weight `1/max((ask - bid)/mid, 0.02)`, using out-of-the-money rows (puts `K <= S`, calls `K > S`) with finite positive `iv`, positive mid and uncrossed quotes. It needs at least 5 strikes, one or more on each side; outside the fitted `k` range the edge value holds; a non-positive fitted IV voids the fit (all mine). One source serves a whole expiry on a date: `smvVol` only if every needed strike has it, else the smile; the two are never mixed. No fit: `no_fair_value`. Source share and the smile-minus-`smvVol` gap where both exist are printed by year.
 
 **Concession** (constants mine, pre-registered, never tuned on results). With `s = (ask - bid)/mid` (a zero mid counts as capped):
 
 `c = min(1, 0.25 + 0.50 * min(s/0.50, 1) + 0.15 * thin_size + 0.10 * thin_oi)`
 
-Buy at `V + c*(ask - V)`; sell at `V - c*(V - bid)`. `thin_size`: size on the side hit (ask size to buy, bid size to sell) under 10 contracts. `thin_oi`: open interest under 100. A null field adds nothing and is counted `liquidity_unknown`; zero is not null. The schema says size and open interest exist **only on chains pulled from 2026-09**, so on 2023-2025 F is probably spread-only; the report states the share. For scale, with V at mid F equals ladder alpha `0.5 - c/2`: 0.375 for the tightest quotes, 0.125 at `s >= 0.50`, harsher than STR-THRU's 0.423 breakeven.
+Buy at `V + c*(ask - V)`; sell at `V - c*(V - bid)`. `thin_size`: size on the side hit (ask size to buy, bid size to sell) under 10 contracts. `thin_oi`: open interest under 100. **Missing sizes:** a null size makes `thin_size` 0 and a null open interest makes `thin_oi` 0, each on its own, counted `liquidity_unknown`; zero is a known value and is thin. This favours unknown rows, so the F taken set is also re-marked **unknown-as-thin** (each null scored 1, entry and exit), reported beside F, never a verdict. Supervisor-measured (2026-11-25): volume, open interest and both sizes are filled on every `chain_kind=fetch` row (2023-01-03 to 2025-12-31) and absent on `eod`, `t14` and `c2` rows; about 75-80% of all rows have them. So penalties vary by pull type: shares are printed by year, `chain_kind`, and entry versus exit. For scale, with V at mid F equals ladder alpha `0.5 - c/2`: 0.375 for the tightest quotes, 0.125 at `s >= 0.50`, harsher than STR-THRU's 0.423 breakeven.
 
 F applies at entry and, sides flipped, at exit. An unusable exit quote (missing or crossed) keeps EXP-188's worst-case rung. A zero-bid quote is clamped to `[0, ask]`.
 
@@ -138,18 +138,19 @@ Pricing every candidate with a tree is the new cost; the smoke measures it befor
 ## 7. Limits
 
 - F is a model of fills, not a measurement; until real fills calibrate it, its constants are assumptions.
-- Coverage of `smvVol`, dividends and liquidity is unverified; a source mix that changes by year is a confound the by-year diagnostics expose but do not remove.
+- Coverage of `smvVol`, cores rates and dividends is unverified, and liquidity is missing on part of the rows; a source mix that changes by year or pull type is a confound the diagnostics expose but do not remove.
 - N1 trains on strongly heavy-tailed returns, correlated within event and season.
 - Seven correlated structures and one year free of parameter selection are weak evidence.
 
 ## 8. Split list (code slices, only after a Stage A pass)
 
-Non-test code lines / test lines / doc words. F1-F3 may start earlier on fixtures, since F1's coverage count reads no outcome.
+Non-test code lines / test lines / doc words. F1-F3 may start earlier on fixtures, since F1's coverage counts read no outcome.
 
 | Slice | Scope | Size | After |
 | --- | --- | --- | --- |
-| F1 | `smvVol` extractor, coverage report | ~120 / ~130 / 60 | this PR |
-| F2a | American pricer, rate and dividend inputs, IV inversion | ~170 / ~190 / 60 | F1 |
+| F1a | `smvVol` re-ingest from the raw cache into the experiment table; normalizer outputs tested unchanged; coverage by year and `chain_kind` | ~130 / ~140 / 60 | this PR |
+| F1b | Cores `iRate5wk`/`iRateLt` re-ingest, unit check, dividend binding, coverage | ~110 / ~130 / 40 | F1a |
+| F2a | American pricer, rate and dividend rules | ~140 / ~170 / 50 | F1b |
 | F2b | Smile fallback and source choice | ~100 / ~130 / 40 | F2a |
 | F3 | Concession, guard, three fill views, diagnostics | ~150 / ~180 / 60 | F2b |
 | Q7 | `QuantilePool`, fast-path equivalence | ~110 / ~140 / 40 | A passes |
