@@ -217,11 +217,10 @@ def test_e_recommended_renders_the_e_sentence(tmp_path):
     assert "Recommendation: E, pick k maximising exp_pnl_sim per event." in _text(tmp_path)
 
 
-def test_w5_placeholder_names_slice_w6b3_by_default(tmp_path):
+def test_summaries_without_flex_results_get_the_placeholder(tmp_path):
     _write(tmp_path)
     report.assemble(tmp_path)
-    assert "W6b-3" in _text(tmp_path)
-    assert "not available: the driver does not yet run W5's tolerance bands and fallback arm (EXP-189 slice W6b-3)" in _text(tmp_path)
+    assert "not available: these stage summaries carry no tolerance-band or fallback results." in _text(tmp_path)
 
 
 def test_w5_tables_are_embedded_verbatim(tmp_path):

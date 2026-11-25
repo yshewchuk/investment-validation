@@ -18,7 +18,7 @@ def floor_ok(legs):
     return min(payoff(s) for s in [0.0, *(leg["strike"] for leg in legs)]) >= -1e-9
 
 
-def recover(chunk, events, sims, name, frame, k, ladder):
+def recover(chunk, events, sims, name, frame, k, ladder, *, pricing=sv):
     """(out_frame, found): each ladder_too_coarse row takes the FIRST rho of ``ladder`` that scores and passes floor_ok; ``k`` is effective."""
     pos = {str(e): i for i, e in enumerate(chunk["event_id"])}
     ids = events["event_id"].astype(str)
@@ -30,11 +30,11 @@ def recover(chunk, events, sims, name, frame, k, ladder):
         if not pending:
             break
         moved = scaled(events[ids.isin(pending)], k * rho)
-        trial = sv.score_events(chunk, moved, sims, name, alpha=ALPHA)
+        trial = pricing.score_events(chunk, moved, sims, name, alpha=ALPHA)
         pred = dict(zip(moved["event_id"].astype(str), moved["pred_move"]))
         for row in trial.to_dict("records"):
             eid = str(row["event_id"])
-            if row["status"] != "scored" or not floor_ok(sv.resolve(chunk, pos[eid], name, pred[eid])[0]):
+            if row["status"] != "scored" or not floor_ok(pricing.resolve(chunk, pos[eid], name, pred[eid])[0]):
                 continue
             recs[where[eid]] = {**row, "k": float(k * rho)}
             found[eid] = rho
@@ -53,9 +53,9 @@ def _mean(values):
 
 class FallbackSweep(Sweep):
     """Arm E is the only arm: ladder_too_coarse rows recover at the nearest feasible rho when the structure has a band; ``k`` is effective."""
-    def __init__(self, factors, out, inputs_hash, phi):
+    def __init__(self, factors, out, inputs_hash, phi, *, pricing=sv, ladder=False):
         """Bands come only from the frozen tuning_band receipt under ``out``: ``frozen_bands`` refuses a missing, changed or malformed receipt."""
-        super().__init__()
+        super().__init__(pricing=pricing, ladder=ladder)
         body = frozen_bands(out, inputs_hash)
         if phi not in PHIS:
             raise ValueError(f"phi must be one of {PHIS}")
@@ -66,12 +66,12 @@ class FallbackSweep(Sweep):
 
     def _frames(self, chunk, events, sims, name):
         k = self.factors[name]
-        frame = sv.score_events(chunk, scaled(events, k), sims, name, alpha=ALPHA)
+        frame = self.pricing.score_events(chunk, scaled(events, k), sims, name, alpha=ALPHA)
         if self.bands[name] is None:
             return [(E_ARM, frame.assign(k=k))]
         t0 = time.time()
         ladder = rho_ladder(*self.bands[name], k)
-        out, found = recover(chunk, events, sims, name, frame, k, ladder)
+        out, found = recover(chunk, events, sims, name, frame, k, ladder, pricing=self.pricing)
         print(f"[width_fallback] {name} k={k} declined={len(found)} recovered={sum(r is not None for r in found.values())} rungs={len(ladder)} elapsed={time.time() - t0:.1f}s", file=sys.stderr)
         dates = dict(zip(frame["event_id"], frame["event_date"]))
         self.trials += [{"structure": name, "event_id": eid, "event_date": dates[eid], "rho": rho} for eid, rho in found.items()]

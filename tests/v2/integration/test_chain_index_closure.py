@@ -4,8 +4,9 @@ Guards the premise of the twin approach: the twin is only safe to add beside the
 legacy pricer while nothing in the v14-bound source closure imports it, and
 ``engine/structures.py`` and ``engine/fills.py`` (which the twin wraps) remain in
 that closure, so any change to them is still visible to the fingerprint.
-The benchmark under tools/ imports the twin on purpose; it is not reachable from
-the v14/SIZE entries, which the closure tests below still assert.
+The benchmark under tools/ imports the twin on purpose, and so does
+experiments/size_width_pricing.py (the EXP-189 pricing adapter, the chain-index seam);
+neither is reachable from the v14/SIZE entries, which the closure tests below still assert.
 """
 from __future__ import annotations
 
@@ -29,7 +30,7 @@ BLOCKED_ENTRIES = (
 )
 V14_ENTRIES = ["experiments/v2_magnitude_search.py", "experiments/v2_prediction.py"]
 SCAN_DIRS = ("engine", "experiments", "ops", "tools")
-ALLOWED_IMPORTERS = {"engine/chain_index.py", "tools/bench_chain_index.py"}
+ALLOWED_IMPORTERS = {"engine/chain_index.py", "tools/bench_chain_index.py", "experiments/size_width_pricing.py"}
 MAX_SOURCE_BYTES = 8 * 1024 * 1024
 
 

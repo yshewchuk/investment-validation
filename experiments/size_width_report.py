@@ -5,8 +5,10 @@ from pathlib import Path
 
 from engine.v2.foundation import content_hash
 from experiments import size_pnl_receipts as receipts
+from experiments import size_width_band as band
 from experiments import size_width_errmodel as errmodel
 from experiments import size_width_fake as fake
+from experiments import size_width_flex as flex
 from experiments import size_width_success as success
 from experiments import size_width_tuning as tuning
 from experiments.size_pnl_report import md_table
@@ -24,8 +26,7 @@ NOT_BLIND = "2025 NOT blind for widths: every 2025 number below was seen while t
 SMOKE = "SMOKE RUN: a scope-bound subset, not a result."
 EVIDENCE = ("Evidence, not a change: the board decision is the user's, with the DYN-SV chooser review (EXP-188 Decision 3); "
             "after a change EXP-188 is rerun on the new widths.")
-PLACEHOLDER = ("### T8-T9 tolerance bands and fallback\n\nnot available: the driver does not yet run W5's tolerance bands and fallback arm "
-               "(EXP-189 slice W6b-3); its tables enter through the `w5_tables` parameter of `assemble`.")
+PLACEHOLDER = "### T8-T9 tolerance bands and fallback\n\nnot available: these stage summaries carry no tolerance-band or fallback results."
 T2_HEADERS = ["structure", "A", "B", "C", "D", "E modal share", "E same_k", "flags"]
 T3_HEADERS = ["k", "B score", "B se", "B trades", "C score", "C se", "C trades", "exp_pnl_sim", "declined share 2025"]
 T5_HEADERS = ["arm", "period", "trades", "account return %", "return per trade %", "breakeven alpha",
@@ -228,6 +229,10 @@ def assemble(out_dir, *, expected=None, w5_tables=None):
     _check_args(out_dir, expected, w5_tables)
     out = Path(out_dir)
     inner, outer, bodies = _bound(out, expected)
+    has_flex = "flex" in inner or "flex" in outer
+    if has_flex:
+        flex.admit(inner, band.frozen_bands(out, inner["inputs_hash"]), {"production": {n: 1.0 for n in NAMES},
+                   **{arm: tuning.frozen(out, arm, inner["inputs_hash"]) for arm in outer["arms"]}}, outer)
     labels = [label for label in ("production", "A", "B", "C", "D", "E") if label == "production" or label in bodies]
     merged = {label: {**inner["results"][label], **outer["results"][label]} for label in labels}
     stats = {label: {**inner["stats"][label], **outer["stats"][label]} for label in labels}
@@ -246,7 +251,7 @@ def assemble(out_dir, *, expected=None, w5_tables=None):
     head = "\n\n".join([TITLE, NOT_BLIND, *([SMOKE] if inner["smoke"] else [])])
     flat_note = [_flat_note(bodies, rec)] if rec in TUNED else []
     rule_text = "\n\n".join([success.render_rule(rule), *flat_note, EVIDENCE])
-    w5 = PLACEHOLDER if w5_tables is None else w5_tables
+    w5 = w5_tables if w5_tables is not None else flex.render(inner, outer) if has_flex else PLACEHOLDER
     sections = [head, _t1(inner), *_t2({arm: bodies[arm] for arm in TUNED if arm in bodies}, body_E), t3,
                 fake.t4_markdown({n: {float(k): cell for k, cell in row.items()} for n, row in inner["anchor"].items()}).rstrip(),
                 _t5(labels, merged, stats), _t6(labels, merged), success.render_t7(table), rule_text, w5]

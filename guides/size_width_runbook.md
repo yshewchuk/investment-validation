@@ -51,10 +51,14 @@ python3 tools/bounded_run.py --heavy --cores 8 -- python3 experiments/EXP-189_sh
   (`tuning_C.json` unless the fake is not calibrated: `fake_not_calibrated`) and `inner_summary.json`. It holds every
   inner quarter chunk in memory (the fake and anchor re-use them): watch RSS on the smoke run first. The EXP-189 code
   emits no memory refusal of its own: over its limit, `bounded_run` stops the process, and `inner_summary.json` (written
-  last) is then absent, so the outer and report stages refuse.
-- **Outer** (2025): refuses before any chunk is built unless `inner_summary.json` and every arm's receipt exist and match
-  (`tuning_receipt_missing`, `tuning_receipt_changed`). It warms the history from 2024-07, writes each 2025 month to
-  `months/<period>.parquet` before it reads that month's labels (R6), and writes `outer_summary.json`.
+  last) is then absent, so the outer and report stages refuse. After the tunings it writes `receipts/tuning_band.json`
+  and runs the fallback on each distinct fixed-factor arm (production, A-D) at three `phi` (at most 15 extra sweeps,
+  one more simulation per month).
+- **Outer** (2025): refuses before any chunk is built unless `inner_summary.json`, every arm's receipt and
+  `tuning_band.json` exist and match (`tuning_receipt_missing`, `tuning_receipt_changed`). It warms the history from
+  2024-07, writes each 2025 month to `months/<period>.parquet` before it reads that month's labels (R6), then makes a
+  second pass over the months for the fallback on k = 1 and the recommended arm (at most 6 sweeps), and writes
+  `outer_summary.json`.
 - **Progress** goes to stderr: per month `done/total`, rate per minute, ETA, RSS; stage start and end with elapsed time.
   stdout is one JSON summary. A refusal prints `{"refused", "message", "reason"}` and exits 2.
 
@@ -71,12 +75,11 @@ outer receipts and writes `<out-dir>/REPORT.md` (T1-T7, 2025 tables titled "2025
 `<out-dir>/proposed_rule.json` (the proposed board rule: divisors `divisor / k`, or `no_change`, or the E rule). In an
 A-D rule, `flatness_se` is always T3's flatness at `k = 1` on the primary per-structure curve (arm C's when C is
 calibrated, else arm B's), whichever arm is recommended: it is not the recommended arm's own tuning curve. T8 and
-T9 (tolerance bands, fallback) enter through `assemble(..., w5_tables=)`. W5's modules are merged, but the driver does
-not run them yet (slice W6b-3), so until then the report says T8 and T9 are not available. Do not start the recorded
-run before W6b-3: the `tuning_band` receipt and fallback arm belong to it. The recommendation is evidence for the user's separate board decision, not a validated result.
+T9 (realised widths, tolerance bands, the fallback at each `phi`, the adoption answer) follow, after `tuning_band.json`
+is checked against the inner summary. The recommendation and adoption answer are evidence for the user's separate board
+decision, not a validated result.
 
 ## Pricing seam
 
-`size_width_driver.PRICING` (default `experiments.size_pnl_shortvol`) is the one place a faster strike resolver
-(`engine/chain_index.py`; routed in slice W6b-3) plugs in; it must keep `simulate`, `score_events`, `decide`, `score` and `secured`
-bit-identical to `size_pnl_shortvol`.
+`size_width_driver.PRICING` is `size_width_pricing.PRICING`: `size_pnl_shortvol`'s own code on
+`engine.chain_index.price_structure_indexed`, with results identical to `price_structure`'s.
