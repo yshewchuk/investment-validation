@@ -39,9 +39,8 @@ MARKS_NOTE = ("the headline marks for every per-trade table, contrast and the T1
 MARKS_NOTE_PRIMARY = ("The decisions carry no marks_mid columns, so the headline fell back to the stored primary marks (rung-2 zero-bid legs at alpha 0) "
                       "and the report is not on the mid basis.")
 AMENDMENT_6_STRADDLE_NOTE = ("Amendment 6 (2026-11-24, post-hoc revision by the user): the straddle rule is production's STR-THRU gate "
-                             "G_PROD only (R_L and R_L2 removed); H2 is evaluated on G_PROD over E_str. H2 is production-faithful only if "
-                             "the M0 gate agreement section reaches its bar or the user accepts the gap; the 2025 gate rows alone cannot "
-                             "supply the 2024 full-year sign, so an H2 verdict that requires 2024 reads not_testable.")
+                             "G_PROD only (R_L and R_L2 removed); H2 is evaluated on G_PROD over E_str. "
+                             "The 2025 gate rows alone cannot supply the 2024 full-year sign, so an H2 verdict that requires 2024 reads not_testable.")
 # name -> (predicted sign, arm -> legs, arms). A leg is (book, arm_or_rule value, sign); d = sum(sign * (median - mean)).
 # Judgement call: H3 pairs each short-vol arm with the straddle leg G_PROD over E_str (Amendment 6); H2 is G_PROD alone.
 HYPOTHESES = {
@@ -275,7 +274,7 @@ def _inner_title(text):
     return "### Inner window (2023H2-2024), not the headline: " + text[len("### "):]
 
 
-def _verdicts(classify_in, missing_years, inner_present=False, basis="mid"):
+def _verdicts(classify_in, missing_years, inner_present=False, basis="mid", *, straddle):
     """The T10 section, with the note that a missing full year makes its verdicts not testable. With inner decisions it pools
     them with the outer ones."""
     verdicts = report.t10_verdicts(classify_in)
@@ -294,7 +293,7 @@ def _verdicts(classify_in, missing_years, inner_present=False, basis="mid"):
         verdicts += "\n\n" + "T10 reads the stored primary marks (no marks_mid columns in the decisions)."
     else:
         verdicts += "\n\n" + "T10 here reads the harsh fills (rung-2 zero-bid legs at alpha 0): reported only, not a verdict basis."
-    verdicts += "\n\n" + AMENDMENT_6_STRADDLE_NOTE
+    verdicts += "\n\n" + AMENDMENT_6_STRADDLE_NOTE + "\n\n" + straddle
     return verdicts
 
 
@@ -423,6 +422,12 @@ def _sections(out, outer, inputs, inner, tickers, stored_gate=None, accepted_gap
             f"per-quarter candidates and dropped counts are not recorded in decisions.parquet (not_testable); run totals from the receipt: "
             f"common_dropped={outer['common_dropped']}, scoreability_dropped={outer['scoreability_dropped']}.")
     has_mid = "pnl_dollars_harsh" in frame.columns  # the headline is the mid marks only when the decisions carry the mid column
+    # Amendment 3/6: the G_PROD sections and the straddle label are computed before the T10 verdicts that carry the label; the section order is unchanged.
+    gprod_secs, straddle = [], size_pnl_gate_agreement.NOT_COMPUTED
+    if not gate_raw.empty:
+        gprod_secs = gprod_report.sections(gate_raw, gate_raw, label_of=label_of, role_model=role_model, roster=roster, outer_models=outer_models,
+                                           quarter_of=ctx_o["quarter_of"], tick=tick, stored_gate=stored_gate, accepted_gap=accepted_gap, ladder=ladder)
+        straddle = gprod_report.t10_straddle_label(gate_raw, role_model, label_of, outer_models, stored_gate, accepted_gap)
     marks_note = MARKS_NOTE if has_mid else MARKS_NOTE_PRIMARY
     sections = [
         _run_section(outer, undet_e, undet_str),
@@ -433,7 +438,7 @@ def _sections(out, outer, inputs, inner, tickers, stored_gate=None, accepted_gap
         *o_tables,
         report.t8_rungs(_shares(frame), models=[label_of[m] for m in outer["models"]]),
         _not_testable("T9 Pool sensitivity", "native_pool_arm_not_produced"),
-        _verdicts(classify_c, missing_years, inner_present, basis="mid" if has_mid else "primary"),
+        _verdicts(classify_c, missing_years, inner_present, basis="mid" if has_mid else "primary", straddle=straddle),
     ]
     if inner_present:  # the inner window, after the outer tables: never the headline
         ctx_i = _context(inner_frame)
@@ -453,15 +458,13 @@ def _sections(out, outer, inputs, inner, tickers, stored_gate=None, accepted_gap
             combined_harsh = pd.concat([w.assign(pnl_dollars=w["pnl_dollars_harsh"]) for w in (inner_frame, frame)])
             _shown_h, classify_ho = _contrasts(combined_harsh, ctx_c["events"], roster, role_model, label_of, outer_models, ctx_c["quarter_of"], tick)
         # no inner window: the pooled harsh frame is the outer one, so its contrasts are reused
-        sections += [_harsh(text) for text in (*harsh, _verdicts(classify_ho, missing_years, inner_present, basis="harsh"))]
+        sections += [_harsh(text) for text in (*harsh, _verdicts(classify_ho, missing_years, inner_present, basis="harsh", straddle=straddle))]
     # Amendment 7: breakeven alpha per model, book and year, on the pooled evaluated frame. The G_PROD taken rows are already in it:
     # the straddle population is E_str (same restriction as gprod_report.sections), and raw's G_PROD rows are its straddle rows.
     # Re-adding them from gate_raw counted every taken G_PROD trade twice.
     breakeven_frame = combined
     sections += [breakeven.section(breakeven_frame)]
-    if not gate_raw.empty:  # Amendment 3: the G_PROD sections, after the Amendment 1 ones and before the accounts
-        sections += gprod_report.sections(gate_raw, gate_raw, label_of=label_of, role_model=role_model, roster=roster, outer_models=outer_models,
-                                          quarter_of=ctx_o["quarter_of"], tick=tick, stored_gate=stored_gate, accepted_gap=accepted_gap, ladder=ladder)
+    sections += gprod_secs  # Amendment 3: the G_PROD sections, after the Amendment 1 ones and before the accounts
     m0 = raw[(raw["model_id"] == role_model.get("M0")) & (raw["book"] == "short_vol") & (raw["arm_or_rule"] == "as_is")][["event_id", "structure", "event_date"]]
     sections.append(board_match.section(board_ledger, m0, None))  # Amendment 6: the board-match check, research-only
     sections.append(size_pnl_audit.section())  # Amendment 6: the production-audit table, static text

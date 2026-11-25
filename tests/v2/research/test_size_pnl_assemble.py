@@ -26,6 +26,7 @@ IDENTITY = {"plan_id": "plan-1", "registration_id": "reg-1", "seal_id": "seal-1"
 SPEC_HASH, SNAPSHOT = "a" * 64, "snap-1"  # every full-run call must match the fixture's inputs_outer receipt
 ROLES = {"m-hsq": "H-sq", "m-habs": "H-abs", "m-eraw": "E-raw", "m-elog": "E-log", "m-nraw": "N-raw", "m-nlog": "N-log"}
 MEDIAN_ROLES = ("H-abs", "E-log", "N-log")  # each pays one dollar more per event than its mean-type partner
+M0_ROLES = {**ROLES, "m-m0": "M0"}  # with the M0 role the G_PROD agreement section runs (it needs a stored gate)
 PAIRS_OK = {"H": "testable", "E": "testable", "N": "testable"}
 REAL_CHECK_PLAN = ladder.check_plan  # captured before any fixture patches it
 
@@ -49,9 +50,9 @@ def admitted_for(dates=EVENT_DATES):
                              "excluded": {}})
 
 
-def _roster(pairs):
+def _roster(pairs, roles=ROLES):
     models = [{"model_id": mid, "roles": [role], "source": "v14", "candidate_id": f"c-{role}", "target_transform": "none", "kind": "v14"}
-              for mid, role in ROLES.items()]
+              for mid, role in roles.items()]
     return {"models": models, "not_testable": [], "pairs": pairs}
 
 
@@ -60,9 +61,9 @@ def _row(mid, book, arm, structure, eid, day, rung, pnl):
             "event_date": pd.Timestamp(day), "status": "taken", "reason": "taken", "rung": rung, "pnl_dollars": pnl}
 
 
-def _rows(dates):
+def _rows(dates, roles=ROLES):
     rows = []
-    for mid, role in ROLES.items():
+    for mid, role in roles.items():
         bump = 1.0 if role in MEDIAN_ROLES else 0.0
         for i, (eid, day) in enumerate(dates.items()):
             pnl = 10.0 * (i + 1) + bump  # the mean-type partner pays 10 * (i + 1)
@@ -71,21 +72,21 @@ def _rows(dates):
     return rows
 
 
-def build(tmp_path, *, rows_fn=None, pairs=None, dates=None, scope=None, plan_tickers=TICKERS):
+def build(tmp_path, *, rows_fn=None, pairs=None, dates=None, scope=None, plan_tickers=TICKERS, roles=ROLES):
     """A complete outer run directory: inner receipt, inputs_outer, outer.json and decisions.parquet.
     inputs_outer records the real plan binding of ``plan_frame(plan_tickers)``."""
     out = tmp_path / "out"
     rdir = out / "receipts"
-    tuning.write_receipt(rdir / "inner.json", {"stage": "inner", "models": list(ROLES), "excluded": {}})
+    tuning.write_receipt(rdir / "inner.json", {"stage": "inner", "models": list(roles), "excluded": {}})
     inputs = tuning.write_receipt(rdir / "inputs_outer.json", {
-        "stage": "inputs", "roster": _roster(pairs or PAIRS_OK), "models": {mid: {"status": "ready"} for mid in ROLES},
+        "stage": "inputs", "roster": _roster(pairs or PAIRS_OK, roles), "models": {mid: {"status": "ready"} for mid in roles},
         "identity": IDENTITY, "spec_hash": SPEC_HASH, "snapshot": SNAPSHOT,
         "plan": size_pnl_driver.plan_binding(plan_frame(plan_tickers))})
-    rows = _rows(dates or EVENT_DATES)
+    rows = _rows(dates or EVENT_DATES, roles)
     rows = rows_fn(rows) if rows_fn else rows
     frame = rows if isinstance(rows, pd.DataFrame) else pd.DataFrame(rows)
     decisions.publish(out, [frame], {
-        "stage": "outer", "models": list(ROLES), "scope": scope, "inputs": inputs["content_hash"],
+        "stage": "outer", "models": list(roles), "scope": scope, "inputs": inputs["content_hash"],
         "labels": "x", "common_dropped": 0, "scoreability_dropped": 0,
         "ladder_skipped": {}, "ladder": "x"})
     return out
@@ -290,6 +291,71 @@ def test_t10_section_discloses_amendment_5(tmp_path):
     text = (out / "REPORT.md").read_text(encoding="utf-8")
     assert "Amendment 5 (2026-11-23): the straddle universe" in "\n".join(_section_lines(text, "### T10"))
     assert "Amendment 6 (2026-11-24, post-hoc revision by the user): the straddle rule is production's STR-THRU gate G_PROD only" in "\n".join(_section_lines(text, "### T10"))
+
+
+M0_STORED = {"selected": {"E01": 0.1}}  # E01 is 2024, outside M0's covered set: the as-run shared set is empty
+
+
+def _m0_gate(rows):
+    """Every row carries a gate_score and the gate inputs the M0 agreement reads (entry_cost, exit_value_mid; finite on every row, as the
+    decisions checks require of taken rows). M0 (role M0) takes E03 and does not take E04 on the G_PROD rows: its 2025 covered set is E03 and E04."""
+    out = []
+    for row in rows:
+        row = {**row, "gate_score": 0.06, "entry_cost": 1.0, "exit_value_mid": 1.1}
+        if row["model_id"] == "m-m0" and row["arm_or_rule"] == GATE_RULE and row["event_id"] == "E04":
+            row = {**row, "status": "not_taken", "reason": "below_gate_threshold", "pnl_dollars": 0.0}
+        out.append(row)
+    return out
+
+
+def _m0_run(tmp_path, name, **kwargs):
+    """The report text of an M0 run (the mid marks present, so both T10 sections render) with the given stored gate and accepted gap."""
+    (tmp_path / name).mkdir()
+    out = build(tmp_path / name, rows_fn=lambda rows: _with_mid(_m0_gate(rows)), roles=M0_ROLES)
+    assemble_mod.assemble(out, plan_frame(), admitted=None, **kwargs)
+    return (out / "REPORT.md").read_text(encoding="utf-8")
+
+
+def _t10_straddle_lines(text):
+    """The straddle label lines of the headline and the harsh T10 sections."""
+    return [line for title in ("### T10 Verdicts", SENS_T10) for line in _section_lines(text, title) if line.startswith("Straddle verdicts")]
+
+
+def test_t10_straddle_label_carries_the_run_number_and_the_passed_accept_text(tmp_path):
+    # As run: the union is {E03} and the shared set is empty (E01 is outside M0's covered set), so 0 / 1 = 0.00, below the 0.5 bar.
+    # No universe_filter row, so the live domain gives 0.00 as well.
+    first = _t10_straddle_lines(_m0_run(tmp_path, "first", stored_gate=M0_STORED, accepted_gap="gap accepted by the user 2026-11-25"))
+    second = _t10_straddle_lines(_m0_run(tmp_path, "second", stored_gate=M0_STORED, accepted_gap="a second accepted note"))
+    assert first == ["Straddle verdicts (H2, and H3 through its straddle leg): agreement 0.00 inside the live domain, "
+                     "gap accepted by the user 2026-11-25; not fully production-faithful"] * 2
+    assert second == ["Straddle verdicts (H2, and H3 through its straddle leg): agreement 0.00 inside the live domain, "
+                      "a second accepted note; not fully production-faithful"] * 2
+
+
+def test_t10_straddle_label_at_the_bar_has_no_acceptance_wording(tmp_path):
+    # Production stored E03, which M0 takes: both {E03} and union {E03}, so 1 / 1 = 1.00, at the bar: the accepted gap is not used.
+    text = _m0_run(tmp_path, "at", stored_gate={"selected": {"E03": 0.1}}, accepted_gap="gap accepted by the user 2026-11-25")
+    assert _t10_straddle_lines(text) == [
+        "Straddle verdicts (H2, and H3 through its straddle leg): as-run agreement 1.00 meets the 0.5 bar; 1.00 inside the live domain."] * 2
+    assert "accepted" not in "\n".join(_section_lines(text, "### T10 Verdicts"))
+
+
+def test_t10_straddle_label_refuses_the_report_below_the_bar_without_an_accepted_gap(tmp_path):
+    with pytest.raises(OpsError) as caught:
+        _m0_run(tmp_path, "refused", stored_gate=M0_STORED)
+    assert caught.value.problem.details["reason"] == "gate_agreement_below_bar"
+    assert not (tmp_path / "refused" / "out" / "REPORT.md").exists()
+
+
+def test_t10_straddle_label_is_not_computed_when_m0_is_not_in_the_run(tmp_path):
+    out = build(tmp_path, rows_fn=_with_mid)  # no M0 role: no stored gate is needed and the label says so
+    assemble_mod.assemble(out, plan_frame(), admitted=None)
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    assert _t10_straddle_lines(text) == [
+        "Straddle verdicts (H2, and H3 through its straddle leg): production agreement not computed in this run."] * 2
+    t10 = "\n".join(_section_lines(text, "### T10 Verdicts") + _section_lines(text, SENS_T10))
+    assert "accepted" not in t10 and "0.40" not in t10
+    assert "H2 is production-faithful only if" not in text
 
 
 def test_same_plan_frame_as_the_receipt_succeeds(tmp_path):

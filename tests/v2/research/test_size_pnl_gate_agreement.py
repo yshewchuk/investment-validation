@@ -16,6 +16,7 @@ M0 = pd.DataFrame({
     "gate_score": [0.06, 0.07, 0.05, 0.08, 0.01, 0.02],
     "entry_cost": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
     "exit_value_mid": [1.1, 1.3, 0.9, 1.2, 1.0, 1.0],
+    "reason": ["taken", "taken", "taken", "taken", "below_gate_threshold", "below_gate_threshold"],
 })
 # Production's stored selected set: E1, E2 and E5 of the covered events, and E9, which is outside M0's covered set.
 SELECTED = {"E1": 0.1, "E2": 0.2, "E5": 0.5, "E9": 0.9}
@@ -240,6 +241,33 @@ def test_section_refuses_a_ladder_keyed_by_the_as_run_label_as_ladder_invalid():
     assert _reason(caught) == "ladder_invalid"
 
 
+# ---- shared admission: section and straddle_label refuse the same inputs ---------
+
+ADMIT_CALLS = {
+    "section": lambda selected, gap: agreement.section(M0, selected, accepted_gap=gap),
+    "straddle_label": lambda selected, gap: agreement.straddle_label(M0, selected, gap),
+}
+
+
+@pytest.mark.parametrize("call", list(ADMIT_CALLS.values()), ids=list(ADMIT_CALLS))
+@pytest.mark.parametrize("selected", [None, True, {"E1": float("nan")}, {"  ": 0.1}],
+                         ids=["none", "bool_return", "nan_return", "blank_id"])
+def test_both_entry_points_refuse_an_invalid_selected_as_stored_gate_invalid(call, selected):
+    with pytest.raises(OpsError) as caught:
+        call(selected, "test gap")
+    assert caught.value.problem.code == "INVALID_EXPERIMENT_SPEC"
+    assert _reason(caught) == "stored_gate_invalid"
+
+
+@pytest.mark.parametrize("call", list(ADMIT_CALLS.values()), ids=list(ADMIT_CALLS))
+@pytest.mark.parametrize("gap", ["", "   ", 5], ids=["empty", "blank", "non_str"])
+def test_both_entry_points_refuse_a_bad_accepted_gap_as_accepted_gap_invalid(call, gap):
+    with pytest.raises(OpsError) as caught:
+        call(SELECTED, gap)
+    assert caught.value.problem.code == "INVALID_EXPERIMENT_SPEC"
+    assert _reason(caught) == "accepted_gap_invalid"
+
+
 # ---- ladder_valid ------------------------------------------------------------
 
 @pytest.mark.parametrize("value", [{}, {"band": {"E1": 0.1}}, {"band": {}}])
@@ -274,3 +302,67 @@ def test_valid_rejects_a_whitespace_only_id():
         "empty_id", "int_id"])
 def test_ladder_valid_rejects_bad_shapes(value):
     assert agreement.ladder_valid(value) is False
+
+
+# ---- live domain and the straddle label -------------------------------------
+# Universe-filter fixture: G_PROD takes A and B; U1 and U2 are universe_filter events, on production's side only.
+UF = pd.DataFrame({
+    "event_id": ["A", "B", "U1", "U2"],
+    "status": ["taken", "taken", "not_taken", "not_taken"],
+    "reason": ["taken", "taken", "universe_filter", "universe_filter"],
+    "gate_score": [0.06, 0.07, 0.9, 0.9],
+    "entry_cost": [1.0, 1.0, 1.0, 1.0],
+    "exit_value_mid": [1.1, 1.3, 1.0, 1.0],
+})
+UF_SELECTED = {"A": 0.1, "U1": 0.2, "U2": 0.3}
+AT_SELECTED = {"A": 0.1, "B": 0.2, "U1": 0.3}
+ONLY_U1 = UF.iloc[2:3]
+GAP = "gap accepted by the user 2026-11-25"
+
+
+def test_live_domain_jaccard_differs_from_the_as_run_figure():
+    # As run: G_PROD {A, B}, production {A, U1, U2}; both {A}, union {A, B, U1, U2}: 1/4 = 0.25.
+    # Live: U1 and U2 removed from both sides: production {A}; both {A}, union {A, B}: 1/2 = 0.50.
+    assert agreement.stats(UF, UF_SELECTED)["jaccard"] == pytest.approx(0.25)
+    live = agreement.live_domain(UF, UF_SELECTED)
+    assert live["excluded"] == 2 and live["prod_removed"] == 2
+    assert live["jaccard"] == pytest.approx(0.5)
+
+
+def test_straddle_label_below_the_bar_names_the_live_jaccard_and_the_gap():
+    assert agreement.straddle_label(UF, UF_SELECTED, GAP) == (
+        "Straddle verdicts (H2, and H3 through its straddle leg): agreement 0.50 inside the live domain, "
+        "gap accepted by the user 2026-11-25; not fully production-faithful")
+
+
+def test_straddle_label_at_the_bar_has_no_acceptance_wording():
+    # Production {A, B, U1}: both {A, B}, union {A, B, U1}: 2/3 = 0.67 as run, at or above the bar. Live: U1 removed: 2/2 = 1.00.
+    label = agreement.straddle_label(UF, AT_SELECTED, GAP)
+    assert label == ("Straddle verdicts (H2, and H3 through its straddle leg): as-run agreement 0.67 meets the 0.5 bar; "
+                     "1.00 inside the live domain.")
+    assert "accepted" not in label and GAP not in label
+
+
+def test_straddle_label_with_an_empty_live_domain_is_not_computable():
+    # Only U1 is covered and it is universe_filter: the live union is empty, so the live jaccard is None.
+    assert agreement.straddle_label(ONLY_U1, {"U1": 0.2}, GAP) == (
+        "Straddle verdicts (H2, and H3 through its straddle leg): agreement not computable inside the live domain, "
+        "gap accepted by the user 2026-11-25; not fully production-faithful")
+
+
+def test_below_the_bar_with_no_accepted_gap_still_refuses_when_the_live_domain_passes():
+    # As run 0.25 is below the bar; the live 0.50 does not change the refusal rule.
+    with pytest.raises(OpsError) as caught:
+        agreement.section(UF, UF_SELECTED)
+    assert _reason(caught) == "gate_agreement_below_bar"
+    with pytest.raises(OpsError) as caught:
+        agreement.straddle_label(UF, UF_SELECTED, None)
+    assert _reason(caught) == "gate_agreement_below_bar"
+
+
+def test_section_prints_the_live_domain_beside_the_as_run_figure():
+    text = agreement.section(UF, UF_SELECTED, accepted_gap=GAP)
+    (counts,) = _rows(text.split("#### Counts", 1)[1].split("\n#### ", 1)[0])
+    assert counts["jaccard"] == "0.25"
+    (live,) = _rows(text.split("#### Live domain", 1)[1].split("\n#### ", 1)[0])
+    assert live == {"events_excluded": "2", "production_removed": "2", "live_jaccard": "0.5", "bar": "0.5"}
