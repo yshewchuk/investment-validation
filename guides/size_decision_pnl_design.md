@@ -361,7 +361,7 @@ python3 -m experiments.size_pnl_gate_fold inputs --year 2025 --admitted-events /
 | 11 | `CAPITAL_PER_TRADE`, lots | `engine/portfolio.py` `build_book`: `floor(capital / (cost * 100))`, floor of one, cost 0 gives 1 | imports `CAPITAL_PER_TRADE`, `CONTRACT_MULTIPLIER`; `straddle.lots` re-implements the line | The line is inline in `build_book`, not callable. Keep `lots`; a test runs `build_book` on synthetic ledger rows and requires equal contracts. |
 | 12 | Entry/exit timing | factory `entry_offset=0`, `exit_offset=1`; `TradingCalendar.last_pre_print` (`engine/calendar.py:287`) | `pinned()` checks the factory defaults (imports); sessions from `plan_frame` through the existing calendar helper | Imports. Add a test: AMC and BMO synthetic events give the sessions `last_pre_print` gives. |
 | 13 | Expiry selection | each factory leg's `ExpirySelector` (`first_post_event`; v2 port `engine/v2/research/_pricing.py`) | `size_pnl_ladder._SELECTOR = ExpirySelector(kind="first_post_event")`, hard-coded | **Copies (fix).** `pinned()` requires every leg's expiry selector equal to the ladder's (kind and `max_dte`), else `factory_default_mismatch`. |
-| 14 | Straddle universe | `engine/score.py` `GATE_MCAP_FLOOR`, `BAD_QUOTE_COST_PCT` (`engine/fills.py`) | imports both (Amendment 5) | Imports. The BAD_QUOTE cost is at the mid mark; it equals production's at alpha 0.5. |
+| 14 | Straddle universe | `engine/score.py` `Scorer._gate_in_domain` (floor `GATE_MCAP_FLOOR`; a missing cap passes), `BAD_QUOTE_COST_PCT` (`engine/fills.py`) | imports both (Amendment 5) | Imports; calls the domain check (2026-11-25, below). The BAD_QUOTE cost is at the mid mark; it equals production's at alpha 0.5. |
 | 15 | Straddle gate | registered threshold and recipe (`engine/models/registry.json`, `gate.fit`), refit through 2024 (Amendment 3) | `size_pnl_gate_fold` calls production's `fit`, `train_all._engine_trades`, `gate_forecast_analog.build_dataset` | Imports (user-approved refit). Unchanged. |
 | 16 | Straddle legs and entry quotes | `STRUCTURES["STR-THRU"]` ATM via `StrikeSelector`; `price_structure` prices a zero-bid quote normally | `straddle.atm_legs` re-implements ATM (ties to the lower strike); `entry_state` refuses zero-bid and locked entries | **Re-implements and diverges (fix).** Resolve through `price_structure` as row 3; a zero-bid or locked entry quote is priced; a crossed or negative quote makes `FillModel` raise, and a non-finite quote is caught by the ladder's own entry check (NaN bid/ask); both stay undetermined. |
 | 17 | Marks and exits | `engine/replay.py` `price_structure(..., closing=True)`, `structure_return`: every leg at the fill alpha | primary: rung-2 legs at alpha 0; `marks_mid`: every usable leg at alpha | Kept by user decision. Plainly: `marks_mid` is the production rule; the primary is the pre-registered conservative one. A test checks `marks_mid` against `structure_return`. |
@@ -385,6 +385,40 @@ Of 5,479 covered 2025 events, M0's G_PROD took 279 (about 5%); production's walk
 - *E_str* is computed from the G_PROD rows: an event on which any model's G_PROD row is undetermined leaves E_str. The G_PROD coverage and M0 agreement sections cover every event with a G_PROD row, so another model's gap does not shrink M0's covered set.
 - *Inner and synthetic stages bind no gate* (the fold is trained through 2024), so they emit no straddle rows; X4 is empty and H2/H3 and T10 rest on the 2025 rows. A verdict that requires the 2024 sign reads `not_testable` (FULL_YEARS is unchanged). The user decides whether H2's full-year rule should change.
 - `spec.yaml` changes (the hash moves), so the PLANNED row must be registered by the supervisor after the series lands.
+
+### Straddle fidelity check of the full7 run (2026-11-25)
+
+**Correction to Amendment 5's missing-cap rule.** Production's domain check (`Scorer._gate_in_domain`) declines only a finite market cap below the floor; a missing one passes, and the gate then withholds on its non-finite `mcap_log` input. A zero or negative cap passes too (production builds no `mcap_log` from it); `facts` already refuses any present cap below 1e6. `in_universe` now calls that method, so the straddle book no longer emits `missing_mcap` (still listed as an E_str reason in section 17). No run result is expected to move: `facts_missing` drops an event with a missing cap before either book. Straddle rows now record `mcap_usd`: the straddle decision frame lacked the column, so the combined decisions file showed NaN on every straddle row. The spec text and hash are unchanged.
+
+**Measured** (M0, 2025, read-only): the full7 `decisions.parquet` straddle book against EXP-187 arm B's `transactions_f30eefe5ee51.csv`, 1,025 selected events.
+
+| Production picks in EXP-188 | Events |
+| --- | --- |
+| also taken | 356 |
+| below the threshold | 301 |
+| `universe_filter` | 249 |
+| `bad_quote` | 1 |
+| no row in either book | 118 |
+
+**The 249.** Their market cap, read from the same events' short-vol rows, is finite and below $1B in all of them ($22M to $996M); the NaN seen on their straddle rows was the recording gap. They match the live floor. EXP-187 arm B applies no domain floor: its `select` needs only complete features and the threshold. The code has no spread term; the wide spreads on some of these rows play no part. M0's G_PROD score reaches the threshold on 235 of the 249.
+
+Jaccard over M0's covered events, diagnostics only: 0.312 as run; 0.400 if the sub-$1B events leave both sides; 0.507 if G_PROD (hypothetically) had no floor. Dropping the floor would leave live production's rule, so it is a user decision and no rule changes here. On rows that reach the gate G_PROD takes 589 of 3,338 (17.6%).
+
+**The 118.** 47 are random-holdout members (`ExperimentHoldouts.random_membership` on the event id; none of the other 907 picks is one): admission drops them by design, and EXP-187 kept them. Of the other 71, 70 belong to 53 tickers with no 2025 event anywhere in the run, large names included. The two files do not carry exclusion reasons, so these 71 are **not attributed** and no defect is shown. Candidates in code: ambiguous-metadata admission, plan-frame drops, `production_forecast_missing`, `facts_missing`, model-table common support, ladder skips, and the shared no-simulation drop (design section 4; it also removes straddles, although G_PROD needs no simulation). The ticker pattern suggests input coverage, unverified. Attributing them needs the run's per-reason event ids or reads of the snapshot tables.
+
+**The 301 and the stored gate.** The champion STR-THRU gate is `gate_midfill_str_thru_forecast_analog`, and its registered threshold 0.0508851760203979 is the one G_PROD already uses. In the registry 0.056790907681124256 belongs to `gate_midfill_str_thru` (not champion) and 0.0725137593996064 to the STR-RUNUP gate. Only the fitted model differs, and there are two other candidates:
+
+1. **Stored champion artifact (the live model).** `fit_final` trained on every row of 2020-2026, so 2025 scores would be in-sample. It is not EXP-187's model either (a per-fold refit). Needs: pinning the artifact by sha256 inside a fold payload, relaxing the `train_through <= 2024` refusal, an amendment, a `spec.yaml` change, a new PLANNED row, an in-sample label and a rerun. Not recommended.
+2. **EXP-187's per-fold refit** (`experiments/common.py` `make_registered_gate`, v2-snapshot trades, registered threshold). Out of sample for 2025. Needs: a through-2024 fit on EXP-147's gate dataset (a new `size_pnl_gate_fold` path, or an export of that fold model, with the recipe checked for parity), a new fold and receipt (heavy), an amendment, a new PLANNED row and a rerun. How much of the 301 it recovers is unmeasured: the transactions file holds `gate_proba` (a calibrated win probability), not the predicted `ret`. Per-model band inputs and the restricted analog pool would still differ.
+
+**Settled (user, 2026-11-25; a post-hoc acceptance of the agreement gap, made after these figures were seen).**
+
+1. Keep the live $1B market-cap floor. Agreement is measured inside the live domain, with sub-$1B events leaving both sides: 0.400 as run.
+2. Keep the current G_PROD refit. Neither the stored artifact nor EXP-187's per-fold refit is taken.
+3. The user accepts the remaining gap (0.400 against the 0.5 bar), so G_PROD is the primary straddle rule (slice A6-3a). Straddle verdicts must still be labelled "agreement 0.40 inside the live domain, gap accepted by the user 2026-11-25; not fully production-faithful".
+4. The real straddle test moves to EXP-190 (a distribution-based "move beats the implied move" arm).
+
+No rule, threshold, bar or spec change follows. The report computes it: the agreement section prints the live-domain Jaccard beside the as-run one, and every T10 section labels H2 and H3 from the same computation. The refusal rule is unchanged (as-run Jaccard, bar 0.5), so the full7 report needs `--accept-gate-gap "gap accepted by the user 2026-11-25"`; the label then reads as above, with the run's own figure and that text. At or above the bar the label carries no acceptance wording.
 
 **Slice impact.** Rows 3-4, 10 and 16 route resolution through `price_structure`, which runs about 600,000 times (7 structures x 12 models x ~7,000 events; the straddle adds one per model-event). If the 50-ticker smoke shows it too slow, the fallback is to keep the local resolver and add a runtime parity preflight over a fixed sample against `price_structure` (like the fast-path preflight), refusing on any difference; the audit row then reads "re-implements, held by preflight".
 
