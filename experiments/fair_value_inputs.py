@@ -29,12 +29,14 @@ VOL_KEYS = ["ticker", "obs_date", "expiry", "strike"]
 RATE_KEYS = ["ticker", "obs_date"]
 RATE_COLUMNS = ["iRate5wk", "iRateLt"]
 RATE_BOUNDS = (-0.05, 0.20)
+RATE_RULE_VALUES = {"rate_out_of_range": ("missing", "row_unknown"), "rate_empty_row": ("rate_unknown", "earlier_row")}
 VOL_MEDIAN_BOUNDS = (0.05, 5.0)
 RATE_LOOKBACK_DAYS = 7
 SHORT_DAYS = 35
 LONG_DAYS = 365
 MAX_MANIFEST_BYTES = 1 << 20
 MAX_TABLE_BYTES = 1 << 30
+MAX_TOTAL_TABLE_BYTES = 2 << 30
 _TABLE_RE = re.compile(r"(quotes|rates)/year=[0-9]{4}/month=(0[1-9]|1[0-2])\.parquet")
 _COUNTED = ["usable_quote", "smvvol_positive", "rate_found", "open_interest_known", "bid_size_known", "ask_size_known"]
 _LOG = logging.getLogger("fair_value_inputs")
@@ -53,6 +55,7 @@ class InputTables:
     vols: pd.DataFrame
     rates: pd.DataFrame
     hashes: dict
+    rate_rules: dict
 
 
 def _floats(values):
@@ -136,10 +139,19 @@ def bind_quotes(frame, *, snapshot_id, expected_snapshot_id):
     return frame[QUOTE_COLUMNS].copy()
 
 
-def load_tables(root, *, manifest_sha256, file_sha256, vol_scale, rate_scale):
+def load_tables(root, *, manifest_sha256, file_sha256, vol_scale, rate_scale,
+                # pending the user's review of measured missing-rate frequency (design section 13 item 3)
+                rate_out_of_range="missing", rate_empty_row="rate_unknown", max_total_bytes=None):
     """Load, pin-check and convert the vol and rate tables; every refusal raises FairValueRefusal."""
     started = time.monotonic()
     vol_k, rate_k = _unit_scale(vol_scale, "vol_scale"), _unit_scale(rate_scale, "rate_scale")
+    rules = {"rate_out_of_range": rate_out_of_range, "rate_empty_row": rate_empty_row}
+    for name, value in rules.items():
+        if not (isinstance(value, str) and value in RATE_RULE_VALUES[name]):
+            raise FairValueRefusal("rate_rule", f"{name} is not an allowed value", name=name)
+    budget = MAX_TOTAL_TABLE_BYTES if max_total_bytes is None else max_total_bytes
+    if isinstance(budget, bool) or not isinstance(budget, int) or budget <= 0:
+        raise FairValueRefusal("load_budget", "max_total_bytes must be an int > 0", name="max_total_bytes")
     root, rels = Path(root), sorted(file_sha256)
     for rel in rels:
         if not (isinstance(rel, str) and _TABLE_RE.fullmatch(rel)):
@@ -155,7 +167,7 @@ def load_tables(root, *, manifest_sha256, file_sha256, vol_scale, rate_scale):
         raise FairValueRefusal("manifest_hash", "manifest.json hash differs from the pin")
     _check_manifest(blob)
 
-    frames, last_log = {"quotes": [], "rates": []}, started
+    frames, last_log, total = {"quotes": [], "rates": []}, started, 0
     for done, rel in enumerate(rels, 1):
         if not (root / rel).is_file():
             raise FairValueRefusal("table_absent", "a listed table file is missing", path=rel)
@@ -164,7 +176,12 @@ def load_tables(root, *, manifest_sha256, file_sha256, vol_scale, rate_scale):
         if hashes[rel] != file_sha256[rel]:
             raise FairValueRefusal("table_hash", "table file hash differs from the pin", path=rel)
         kind = rel.split("/")[0]
-        frames[kind].append(_parse(blob, kind, rel))
+        frame = _parse(blob, kind, rel)
+        total += int(frame.memory_usage(index=True, deep=True).sum())  # concat peaks at about twice the retained size
+        if total > budget:
+            raise FairValueRefusal("input_too_large", "decoded tables exceed the total memory budget",
+                                   code="RESOURCE_LIMIT_EXCEEDED", path=rel, total_bytes=total, max_total_bytes=budget)
+        frames[kind].append(frame)
         now = time.monotonic()
         if now - last_log >= 30.0:
             last_log, rate = now, done / (now - started)
@@ -181,12 +198,18 @@ def load_tables(root, *, manifest_sha256, file_sha256, vol_scale, rate_scale):
     median = quotes["smvVol"].median()
     if not VOL_MEDIAN_BOUNDS[0] < median < VOL_MEDIAN_BOUNDS[1]:
         raise FairValueRefusal("vol_unit", "median smvVol is outside the bounds or no vol is positive", median=float(median))
+    conv = {col: rates[col] * rate_k for col in RATE_COLUMNS}
+    inside = {col: conv[col].between(*RATE_BOUNDS) for col in RATE_COLUMNS}  # NaN and +/-inf are not inside
+    outside = {col: conv[col].notna() & ~inside[col] for col in RATE_COLUMNS}  # mask taken before any nulling
+    row_outside = outside[RATE_COLUMNS[0]] | outside[RATE_COLUMNS[1]]
     for col in RATE_COLUMNS:
-        value = rates[col] * rate_k
-        rates[col] = value.where(np.isfinite(value) & (value >= RATE_BOUNDS[0]) & (value <= RATE_BOUNDS[1]))
+        keep = inside[col] & ~row_outside if rules["rate_out_of_range"] == "row_unknown" else inside[col]
+        rates[col] = conv[col].where(keep)
+    if rules["rate_empty_row"] == "earlier_row":
+        rates = rates[rates[RATE_COLUMNS].notna().any(axis=1)]
     rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
-    _LOG.info("load end: %.1f s, rss %.0f MB", time.monotonic() - started, rss_mb)
-    return InputTables(quotes[VOL_KEYS + ["smvVol"]], rates[RATE_KEYS + RATE_COLUMNS], hashes)
+    _LOG.info("load end: %.1f s, rss %.0f MB, decoded tables %.1f MB", time.monotonic() - started, rss_mb, total / 2**20)
+    return InputTables(quotes[VOL_KEYS + ["smvVol"]], rates[RATE_KEYS + RATE_COLUMNS], hashes, rules)
 
 
 def attach_vol(quotes, vols):

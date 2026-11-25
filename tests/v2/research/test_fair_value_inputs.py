@@ -92,6 +92,12 @@ def _refused(exc, reason, code="EXPERIMENT_IDENTITY_CONFLICT"):
     assert exc.value.details["reason"] == reason
 
 
+def _sizes(root, rels):
+    """Decoded in-memory size of each table, as load_tables counts it."""
+    return {rel: int(fvi._parse((root / rel).read_bytes(), rel.split("/")[0], rel).memory_usage(index=True, deep=True).sum())
+            for rel in rels}
+
+
 def test_happy_load_selects_columns_scales_and_hashes(tmp_path):
     root, file_sha, manifest_sha = _setup(tmp_path)
     tables = _load(root, file_sha, manifest_sha)
@@ -106,6 +112,18 @@ def test_happy_load_selects_columns_scales_and_hashes(tmp_path):
     assert np.isnan(rates.loc["BBB", "iRate5wk"])
     assert set(tables.hashes) == set(file_sha) | {"manifest.json"}
     assert tables.hashes[QUOTE_REL] == file_sha[QUOTE_REL]
+
+
+def test_happy_load_detects_swapped_scales(tmp_path):
+    # vols are percent (vol_scale 0.01); rates are basis points (rate_scale 0.0001). Swapping the scales breaks the vol median.
+    rates_bps = RATES.assign(iRate5wk=[530.0, 3000.0], iRateLt=[410.0, 410.0])
+    root, file_sha, manifest_sha = _setup(tmp_path, files={RATE_REL: rates_bps})
+    tables = _load(root, file_sha, manifest_sha, vol_scale=0.01, rate_scale=0.0001)
+    assert tables.vols.set_index("strike")["smvVol"][100.0] == pytest.approx(0.25)
+    rates = tables.rates.set_index("ticker")
+    assert rates.loc["AAA", "iRate5wk"] == pytest.approx(0.053)
+    assert rates.loc["AAA", "iRateLt"] == pytest.approx(0.041)
+    assert np.isnan(rates.loc["BBB", "iRate5wk"])
 
 
 def test_missing_scale_argument_is_a_type_error(tmp_path):
@@ -151,6 +169,15 @@ def test_manifest_hash_mismatch_refused(tmp_path):
     with pytest.raises(FairValueRefusal) as exc:
         _load(root, file_sha, "0" * 64)
     _refused(exc, "manifest_hash")
+
+
+def test_manifest_read_cap_refused(tmp_path, monkeypatch):
+    root, file_sha, manifest_sha = _setup(tmp_path)
+    monkeypatch.setattr(fvi, "MAX_MANIFEST_BYTES", 10)
+    with pytest.raises(FairValueRefusal) as exc:
+        _load(root, file_sha, manifest_sha)
+    _refused(exc, "input_too_large", code="RESOURCE_LIMIT_EXCEEDED")
+    assert exc.value.details["path"] == "manifest.json"
 
 
 @pytest.mark.parametrize("bad", ["../x", "quotes/year=2024/month=1.parquet", "other/year=2024/month=01.parquet"])
@@ -231,6 +258,52 @@ def test_oversize_table_refused(tmp_path, monkeypatch):
     with pytest.raises(FairValueRefusal) as exc:
         _load(root, file_sha, manifest_sha)
     _refused(exc, "input_too_large", code="RESOURCE_LIMIT_EXCEEDED")
+
+
+def test_aggregate_budget_refuses_when_quote_files_sum_over(tmp_path):
+    # Each quote file is under the budget on its own; the running total crosses at the second file.
+    q2 = QUOTES.assign(obs_date=pd.to_datetime(["2024-01-03"] * 4))
+    root, file_sha, manifest_sha = _setup(tmp_path, files={"quotes/year=2024/month=02.parquet": q2})
+    sizes = _sizes(root, [QUOTE_REL, "quotes/year=2024/month=02.parquet", RATE_REL])
+    q_total = sizes[QUOTE_REL] + sizes["quotes/year=2024/month=02.parquet"]
+    assert max(sizes[QUOTE_REL], sizes["quotes/year=2024/month=02.parquet"]) < q_total - 1
+    with pytest.raises(FairValueRefusal) as exc:
+        _load(root, file_sha, manifest_sha, max_total_bytes=q_total - 1)
+    _refused(exc, "input_too_large", code="RESOURCE_LIMIT_EXCEEDED")
+    assert exc.value.details["path"] == "quotes/year=2024/month=02.parquet"
+    assert exc.value.details["total_bytes"] == q_total
+    assert exc.value.details["max_total_bytes"] == q_total - 1
+
+
+def test_aggregate_budget_exact_total_accepted_and_rates_count(tmp_path):
+    q2 = QUOTES.assign(obs_date=pd.to_datetime(["2024-01-03"] * 4))
+    root, file_sha, manifest_sha = _setup(tmp_path, files={"quotes/year=2024/month=02.parquet": q2})
+    sizes = _sizes(root, [QUOTE_REL, "quotes/year=2024/month=02.parquet", RATE_REL])
+    total = sum(sizes.values())
+    tables = _load(root, file_sha, manifest_sha, max_total_bytes=total)
+    assert len(tables.vols) == 8
+    with pytest.raises(FairValueRefusal) as exc:
+        _load(root, file_sha, manifest_sha, max_total_bytes=total - 1)
+    _refused(exc, "input_too_large", code="RESOURCE_LIMIT_EXCEEDED")
+    assert exc.value.details["path"] == RATE_REL  # the rates file is the one that crosses
+    assert exc.value.details["total_bytes"] == total
+
+
+def test_aggregate_budget_constant_read_at_call_time(tmp_path, monkeypatch):
+    root, file_sha, manifest_sha = _setup(tmp_path)
+    monkeypatch.setattr(fvi, "MAX_TOTAL_TABLE_BYTES", 64)
+    with pytest.raises(FairValueRefusal) as exc:
+        _load(root, file_sha, manifest_sha)
+    _refused(exc, "input_too_large", code="RESOURCE_LIMIT_EXCEEDED")
+    assert exc.value.details["max_total_bytes"] == 64
+
+
+@pytest.mark.parametrize("bad", [0, -1, True, 1.5])
+def test_bad_load_budget_refused_before_reading(tmp_path, bad):
+    _, file_sha, manifest_sha = _setup(tmp_path)
+    with pytest.raises(FairValueRefusal) as exc:
+        _load(tmp_path / "absent", file_sha, manifest_sha, max_total_bytes=bad)  # root does not exist: nothing is read
+    _refused(exc, "load_budget")
 
 
 def _chain(*overrides):
@@ -322,6 +395,10 @@ def test_attach_vol_shares_strike_across_rights_and_keeps_order():
     pd.testing.assert_frame_equal(quotes, before)
 
 
+def test_usable_quote_rejects_zero_bid_and_ask():
+    assert fvi.usable_quote([0.0], [0.0]).tolist() == [False]
+
+
 def _entry_rows():
     return fvi.bind_quotes(_chain(
         {},                                                                                  # usable, vol, rate
@@ -338,7 +415,7 @@ def _coverage_tables():
                          "expiry": pd.to_datetime(["2024-02-16"]), "strike": [100.0], "smvVol": [0.25]})
     rates = pd.DataFrame({"ticker": ["AAA"], "obs_date": pd.to_datetime(["2024-01-02"]),
                           "iRate5wk": [0.05], "iRateLt": [0.04]})
-    return fvi.InputTables(vols=vols, rates=rates, hashes={})
+    return fvi.InputTables(vols=vols, rates=rates, hashes={}, rate_rules={})
 
 
 def test_entry_coverage_counts_by_year_and_chain_kind():
@@ -363,3 +440,59 @@ def test_entry_coverage_empty_input_still_emits():
                              _coverage_tables(), emit=emitted.append)
     assert out.empty and len(emitted) == 1
     assert list(out.columns)[:3] == ["year", "chain_kind", "rows"] and "rate_found_share" in out.columns
+
+
+def test_rate_rules_recorded(tmp_path):
+    root, file_sha, manifest_sha = _setup(tmp_path)
+    assert _load(root, file_sha, manifest_sha).rate_rules == {"rate_out_of_range": "missing", "rate_empty_row": "rate_unknown"}
+    tables = _load(root, file_sha, manifest_sha, rate_out_of_range="row_unknown", rate_empty_row="earlier_row")
+    assert tables.rate_rules == {"rate_out_of_range": "row_unknown", "rate_empty_row": "earlier_row"}
+
+
+@pytest.mark.parametrize("name,bad", [("rate_out_of_range", None), ("rate_out_of_range", "Missing"),
+                                      ("rate_out_of_range", "earlier_row"), ("rate_empty_row", None),
+                                      ("rate_empty_row", "missing"), ("rate_empty_row", True)])
+def test_bad_rate_rule_refused_before_reading(tmp_path, name, bad):
+    _, file_sha, manifest_sha = _setup(tmp_path)
+    with pytest.raises(FairValueRefusal) as exc:
+        _load(tmp_path / "absent", file_sha, manifest_sha, **{name: bad})  # root does not exist: nothing is read
+    _refused(exc, "rate_rule")
+    assert exc.value.details["name"] == name
+
+
+# Rate edge rows, queried at 2024-01-10 (expiry +10 days, so a row with both values uses iRate5wk).
+# A: same-day row has iRate5wk out of range; B: same-day row both NaN; C: good row only 8 days back;
+# D: same-day iRate5wk NaN; E: same-day iRate5wk +inf. Earlier good rows at 4% sit 5 days back (A, B, E).
+EDGE_RATES = pd.DataFrame({
+    "ticker": ["A", "A", "B", "B", "C", "C", "D", "E", "E"],
+    "obs_date": pd.to_datetime(["2024-01-05", "2024-01-10", "2024-01-05", "2024-01-10", "2024-01-02",
+                                "2024-01-10", "2024-01-10", "2024-01-05", "2024-01-10"]),
+    "iRate5wk": [4.0, 30.0, 4.0, NAN, 4.0, NAN, NAN, 4.0, float("inf")],
+    "iRateLt": [4.0, 3.0, 4.0, NAN, 4.0, NAN, 3.0, 4.0, 3.0],
+    "borrow30": 0.1, "annIdiv": 0.0, "divDate": "x", "assetType": "stock",
+})
+EDGE_EXPECT = {
+    ("missing", "rate_unknown"): {"A": 0.03, "B": NAN, "C": NAN, "D": 0.03, "E": 0.03},
+    ("missing", "earlier_row"): {"A": 0.03, "B": 0.04, "C": NAN, "D": 0.03, "E": 0.03},
+    ("row_unknown", "rate_unknown"): {"A": NAN, "B": NAN, "C": NAN, "D": 0.03, "E": NAN},
+    ("row_unknown", "earlier_row"): {"A": 0.04, "B": 0.04, "C": NAN, "D": 0.03, "E": 0.04},
+}
+
+
+@pytest.mark.parametrize("combo", list(EDGE_EXPECT))
+def test_rate_rule_combinations_on_edge_rows(tmp_path, combo):
+    root, file_sha, manifest_sha = _setup(tmp_path, files={RATE_REL: EDGE_RATES})
+    tables = _load(root, file_sha, manifest_sha, rate_out_of_range=combo[0], rate_empty_row=combo[1])
+    rows = pd.concat([_query(t, "2024-01-10", 10) for t in "ABCDE"], ignore_index=True)
+    got = fvi.lookup_rate(rows, tables.rates).to_numpy()
+    np.testing.assert_allclose(got, [EDGE_EXPECT[combo][t] for t in "ABCDE"], rtol=1e-9)
+
+
+def test_duplicate_rate_key_with_both_rows_empty_refused_under_earlier_row(tmp_path):
+    dup = pd.DataFrame({"ticker": ["A", "A"], "obs_date": pd.to_datetime(["2024-01-10"] * 2),
+                        "iRate5wk": [NAN, NAN], "iRateLt": [NAN, NAN]})
+    root, file_sha, manifest_sha = _setup(tmp_path, files={RATE_REL: dup})
+    with pytest.raises(FairValueRefusal) as exc:
+        _load(root, file_sha, manifest_sha, rate_empty_row="earlier_row")
+    _refused(exc, "duplicate_key")
+    assert exc.value.details["table"] == "rates"
