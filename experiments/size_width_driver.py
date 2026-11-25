@@ -17,6 +17,7 @@ from experiments import size_pnl_driver as base
 from experiments import size_pnl_readers as readers
 from experiments import size_pnl_receipts as receipts
 from experiments import size_width_band as band
+from experiments import size_width_choices as choices
 from experiments import size_width_deviation as deviation
 from experiments import size_width_errmodel as errmodel
 from experiments import size_width_fake as fake
@@ -151,11 +152,15 @@ def _inner(src, out, loaded):
     sessions, inputs_hash = loaded["sessions"], loaded["inputs_hash"]
     months = list(_months(src, plan, base._restrict(table, ids), loaded["facts_all"], loaded["exits"], base.INNER_EMIT_FROM))
     _log(f"materialised months={len(months)}")
-    sweep, started, total = deviation.DeviationSweep(ladder=True, pricing=PRICING), time.monotonic(), _total(plan)
+    sweep, started, total = deviation.DeviationSweep(ladder=True, pricing=PRICING, choices=True), time.monotonic(), _total(plan)
+    persisted = []
     for done, (chunk, events, output) in enumerate(months, start=1):
         sweep.add_month(chunk, events, _pool(table, labels, _period(events).start_time), output=output, sessions=sessions)
+        if output:
+            persisted.append(choices.write_month(out, _period(events), sweep.fresh_choices))
         _progress("inner", done, total, started)
     _require_priced(sweep, ids, "inner")
+    choices.write_receipt(out, "inner", inputs_hash, base._scope(ids), persisted)
     fit_rows = table[pd.to_datetime(table["event_date"]) < pd.Timestamp(base.OUTER[0])]
     printed = base._printed(labels, base.OUTER[0])
     try:
@@ -204,8 +209,8 @@ def _outer(src, out, loaded):
     """The outer stage: preflight first, then each 2025 month is frozen before its labels are read (R6)."""
     ids, inputs_hash, plan = loaded["ids"], loaded["inputs_hash"], loaded["plan"]
     arms, by, inner = _preflight(out, loaded)
-    sweep, labels, table, sessions = deviation.DeviationSweep(ladder=True, pricing=PRICING), loaded["labels"], loaded["table"], loaded["sessions"]
-    total, started, count, fresh_labels = _total(plan), time.monotonic(), 0, []
+    sweep, labels, table, sessions = deviation.DeviationSweep(ladder=True, pricing=PRICING, choices=True), loaded["labels"], loaded["table"], loaded["sessions"]
+    total, started, count, fresh_labels, persisted = _total(plan), time.monotonic(), 0, [], []
     read_to = pd.Timestamp(base.OUTER[0])  # every 2025 label of an event dated before read_to has been read
     for count, (chunk, events, output) in enumerate(_months(src, plan, base._restrict(table, ids), loaded["facts_all"], loaded["exits"], pd.Timestamp(base.OUTER[0])), start=1):
         period = _period(events)
@@ -221,11 +226,13 @@ def _outer(src, out, loaded):
             taken = fresh.assign(model_id="M0", book="short_vol", arm_or_rule=fresh["arm"], status="taken", reason=None)
             dec = sweep.declined_rows().assign(model_id="M0", book="short_vol", arm_or_rule=lambda f: f["arm"])
             decisions.freeze_month(out, period, [taken, dec])
+            persisted.append(choices.write_month(out, period, sweep.fresh_choices))
             got = readers.read_labels(src.fetch, src.admitted, start=period.start_time, end=(period + 1).start_time, event_ids=None)
             fresh_labels.append(got)
             labels = pd.concat([labels, got])
             read_to = (period + 1).start_time
     _require_priced(sweep, ids, "outer")
+    choices.write_receipt(out, "outer", inputs_hash, base._scope(ids), persisted)
     results = tuning.run_outer(sweep, out, arms, inputs_hash)
     by = {"production": {n: 1.0 for n in NAMES}, **by}
     stats = {label: {"2025": _stats(sweep, by[label], WINDOWS["2025"])} for label in results}

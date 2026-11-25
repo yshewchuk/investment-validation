@@ -8,6 +8,7 @@ import pandas as pd
 
 from engine.pnl_sim import DRAWS
 from experiments import size_pnl_shortvol as sv
+from experiments import size_width_choices
 from experiments.size_width_sizing import GRID
 from experiments.size_width_success import LADDER
 
@@ -58,10 +59,12 @@ def pick_e(by_k, ks):
 
 class Sweep:
     """Scored history (it feeds each trailing cutoff), taken rows and decline reasons per (structure, arm); arm is a grid k or E_ARM."""
-    def __init__(self, ks=GRID, names=sv.NAMES, *, pricing=sv, ladder=False):
-        """``pricing`` is the one seam for strike resolution: it must expose simulate, score_events, decide, score, secured and resolve with the signatures of experiments.size_pnl_shortvol."""
+    def __init__(self, ks=GRID, names=sv.NAMES, *, pricing=sv, ladder=False, choices=False):
+        """``pricing`` is the one seam for strike resolution: it must expose simulate, score_events, decide, score, secured and resolve with the signatures of experiments.size_pnl_shortvol.
+        ``choices`` records arm E's per-event choices of each output month in ``fresh_choices`` (size_width_choices)."""
         self.ks, self.names = tuple(admit_k(k) for k in ks), tuple(names)
         self.pricing, self.ladder, self.fresh, self.fresh_declined = pricing, bool(ladder), [], []
+        self.record_choices, self.fresh_choices = bool(choices), []
         if not self.ks or len(set(self.ks)) != len(self.ks): raise ValueError(f"ks must be non-empty and unique: {self.ks}")
         if not self.names or len(set(self.names)) != len(self.names) or any(n not in sv.NAMES for n in self.names): raise ValueError(f"names must be non-empty, unique and in sv.NAMES: {self.names}")
         self.scored, self.taken, self.declined = {}, {}, {}
@@ -73,7 +76,7 @@ class Sweep:
         Returns the month's fresh taken rows only (a frame with the ``_TAKEN`` columns plus ``arm``, and the ``RET_COLS`` columns when ``ladder`` is true; empty when ``output`` is False).
         The month's declined decisions are not returned: they are in ``declined_rows()``, which this call resets along with ``fresh``."""
         started = time.time()
-        self.fresh, self.fresh_declined = [], []
+        self.fresh, self.fresh_declined, self.fresh_choices = [], [], []
         sims = self.pricing.simulate(chunk, events, pool, draws=draws) if sims is None else sims
         keep = np.array([sims.get(str(e)) is not None for e in events["event_id"]], dtype=bool)  # unsimulable events are dropped, as EXP-188 does
         events = events[keep]
@@ -125,9 +128,11 @@ class Sweep:
                                                                                      "pnl_dollars": "pnl_dollars_mid"}), on="event_id")
                 .merge(sec, on="event_id")
                 .merge(mine[["event_id", "event_date"]], on="event_id"))
+        lads = {}
         if self.ladder:
             for a, col in zip(LADDER, RET_COLS):
                 lad = self.pricing.score(chunk, ev, mine, name, a, mid_marks=True, repriced=True)
+                lads[a] = lad
                 cost = pd.to_numeric(lad["entry_cost"], errors="coerce")
                 ret = (pd.to_numeric(lad["pnl_per_share"], errors="coerce") / cost).where(cost > 0)
                 rows[col] = rows["event_id"].map(dict(zip(lad["event_id"], ret)))
@@ -137,6 +142,10 @@ class Sweep:
         taken = rows[_TAKEN + (RET_COLS if self.ladder else [])]
         self.taken.setdefault(key, []).append(taken)
         self.fresh.append(taken.assign(arm=str(arm)))
+        if self.record_choices and arm == E_ARM:
+            k1 = self.scored[(name, 1.0)][-1] if 1.0 in self.ks else None  # arms run in ks order, then E: this month's k = 1.0 frame
+            rows_of_decided = decided[decided["event_id"].isin(ids) & (decided["structure"] == name)]
+            self.fresh_choices.append(size_width_choices.choice_rows(rows_of_decided, k1, primary, mid, sec, lads))
 
     def rows(self, pairs, window):
         """Taken rows of every (structure, arm) in ``pairs`` inside ``window``: trades are selected by event date and must also EXIT inside the window; a trade exiting later belongs to no account of this window, so no later P&L enters a window's objective or evaluation. Empty frame with the columns when none."""

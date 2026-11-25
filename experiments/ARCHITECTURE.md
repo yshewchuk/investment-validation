@@ -930,12 +930,12 @@ The evidence helper separately consumes native history admission and research st
 
 ## Magnitude search orchestration
 
-`v2_magnitude_search_run` composes public plan, journal, trial and outer APIs. Separate `seal`, `run` and read-only `collect` commands keep explicit ownership; run never migrates or seals implicitly. A distinct driver seal binds plan/ref and full driver source closure; atomic absence guards prevent blessing started library journals. Run and CLI collection
-require that exact binding, without changing the scientific report hash. The same pre-work roster check (unfinished claims, premature selections) gates serial and bounded-worker execution; each fit child stays single-threaded (including MLP), preserving request identity and the parent/child memory contract.
+`v2_magnitude_search_run` composes public plan, journal, trial and outer APIs. Separate `seal`, `run` and read-only `collect` commands keep explicit ownership. A distinct driver seal binds plan/ref and full driver source closure. Run and CLI collection
+require that exact binding. The same pre-work roster check (unfinished claims, premature selections) gates serial and bounded-worker execution; each fit child stays single-threaded (including MLP), preserving request identity and the parent/child memory contract.
 Freeze precedes all selected outer evaluation, with zero fit retries and unchanged winner policy.
 
-The CLI reuses the bounded staged-input reader, strict duplicate-key decoder, typed spec/reference admission and shared canonical JSON stream. Output has a configured UTF-8 byte budget (table below). Collection preserves the existing outer report identity and uses a read-only
-SQLite connection. No persisted report framework, scheduler, ledger, final-read or release authority is introduced.
+The CLI reuses the bounded staged-input reader, strict duplicate-key decoder, typed spec/reference admission and shared canonical JSON stream. Collection preserves the existing outer report identity and uses a read-only
+SQLite connection. No persisted report framework, scheduler, ledger, final-read or release authority.
 
 Each invocation revalidates bindings/evidence, with no cross-call admission cache. The CLI calls `seal_search_run`/`run_search`. Direct engine dependencies are contracts, data, foundation and ops.
 
@@ -956,6 +956,10 @@ Each invocation revalidates bindings/evidence, with no cross-call admission cach
 | Output exceeds the byte budget or output staging fails with an artifact, filesystem or SQLite error | Report bytes are discarded; only the refusal document reaches stdout, emitting `RESOURCE_LIMIT_EXCEEDED` or sanitized `RESOURCE_UNAVAILABLE`. Other staging errors are unexpected builtin failures and propagate. Prior journal commits remain. |
 | Stdout write or flush failure | The original stream error propagates with no retry and no second document; downstream may have received a prefix, and stdout remains caller-owned. |
 
+### `size_quantile_metrics`
+
+Pure; no I/O or caller. `crps_quantile`, `level_width`, `cell_scores` refuse bad input (`ValueError`; non-finite history drops); others assume finite aligned rows. No width: `level_width_burn_in`/`level_width_empty_bin`. Cell skips: `cell_small`, `constant_e`, `zero_e_residual`.
+
 ### Qualified SIZE panel (opt-in)
 
 `size_panel.materialize(repository, source, **request)` composes public eligible-history admission with research qualification, publishing immutable rows and returning context plus a feature SnapshotRef. `size_panel.read(repository, source, feature_snapshot, *, columns=None, **request)` re-admits that exact artifact, returning context, serialized feature snapshot and projected rows; no rebuild. Both require explicit month, frozen 30-day policy, event IDs, all 1/3/5 horizons, history start/limits, history and price snapshots, source start and metadata limits, with no producer override. Malformed requests/projections refuse before dependent reads; changed installed source gives `INPUT_CHANGED`; contract, protected-membership and limit failures keep typed data refusals. Anchors are invocation-local, source-version-qualified detached cache values. Exact committed context reuses its snapshot; incompatible receipts refuse `IDENTITY_CONFLICT`. Native immutable objects publish before catalog commit; interruption can leave unreferenced objects, never a committed receipt. This opt-in library API has no production caller, fitting or final-holdout authority. It depends on eligible-history admission plus research, data, foundation and ops fingerprints; installed-root discovery selects code only, never data roots. [Research architecture](../engine/v2/research/ARCHITECTURE.md) owns the v3 dictionary, reconstructed quote decoding/contribution boundary and stored-row contract.
@@ -972,6 +976,11 @@ Library-only, no data-run authority. Inputs: a Tier-1 source root (read-only: ca
 EXP-188: `size_pnl_{inputs,outer_inputs}` bind v14 and 2025 forecasts; `size_pnl_readers` admits keys (`HOLDOUT_ACCESS_DENIED`, `label_availability_missing`); `size_pnl_receipts`: `SYNTHETIC_IN_TUNING`; `size_pnl_synthetic`: `SYNTHETIC_OUT_OF_SCOPE`. `size_pnl_sources.build_sources`: `sources_config_invalid`, `expected_invalid`, `input_unreadable`, `store_missing`, `catalog_unavailable`, `snapshot_{missing,mismatch,metadata_too_large}`, `crush_snapshot_invalid`, `plan_{hash_mismatch,schema_unknown,anchor_mismatch,registration_mismatch,id_mismatch,malformed,too_large,unreadable}`, `selection_missing`; `size_pnl_tables`: `source_{table_missing,value_invalid}`, `plan_frame_empty`, `production_hash_mismatch`. `size_pnl_driver.run`: bad plan, `facts_incomplete`: no receipt; replay: `*_receipt_changed`; outer: `inner_*_mismatch`, `scope_mismatch`, `outer_*`; smoke: `scope`.
 `run_synthetic` publishes decisions, then `t11_synthetic.md` atomically. `size_pnl_assemble.assemble` (`--stage report`) writes `REPORT.md` likewise; the report states independent books (not board P&L) and T5 retired, labels verdicts, and adds the `size_pnl_audit` table; refusals `report_{scope_unsupported,out_dir_invalid,receipt_stage,receipt_chain_mismatch,receipt_malformed,inputs_mismatch,tickers_invalid,ticker_missing,nonfinite_pnl}`, `report_decisions_{missing,mismatch,columns,empty,invalid}`, `tuning_receipt_{missing,unreadable}` (legacy names, any receipt). Amendment 2: `size_pnl_account` loads EXP-134 `margin.py`. `size_pnl_gprod` (G_PROD; `--sources-config` `gate_fold`/`gate_inputs`): `gate_{config_incomplete,binding_invalid}` and `gate_{fold,inputs}_{missing,invalid,sha_mismatch}` refuse `INVALID_EXPERIMENT_SPEC` before the catalog opens; `gate_input_missing`, `gate_input_nan`, `thin_pool` are undetermined, never no; G_PROD rows are the straddle book (E_str; T6, T7, T10).
 
-## Fair-value pricer (fill model F)
+## Fill model F
 
-`fair_value_pricer` (NumPy only): unclamped, zero-dividend American put and European call; no production caller ([design §4](../guides/fair_value_fill_design.md)). NaN (no value): invalid spot, strike or years; unexpired with invalid volatility or rate; put-tree probability outside (0,1). Expired: intrinsic. Only puts floor positive volatility (0.01).
+No production caller ([design §4](../guides/fair_value_fill_design.md)). `fair_value_pricer` prices; `fair_value_legs` clamps per quote ([README](README.md)).
+
+|Condition|Outcome|
+|-|-|
+|Invalid pricer input|NaN|
+|Missing column, duplicate quote/vol key, invalid `right`/`quote_repaired`|`FairValueRefusal` (`EXPERIMENT_IDENTITY_CONFLICT`), no partial output|
