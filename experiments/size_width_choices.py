@@ -83,6 +83,7 @@ def write_month(out, period, frames):
     Immutable like ``size_pnl_decisions.freeze_month``: a file with other bytes refuses and is left as it was."""
     directory = Path(out) / "e_choices"
     directory.mkdir(exist_ok=True)
+    receipts._fsync_dir(Path(out))   # the new e_choices entry in out is not durable until out itself is synced; always, so a replay after a crash syncs it too
     final, tmp = directory / f"{period}.parquet", decisions._unique_tmp(directory)
     try:
         frame = _frame(frames).sort_values(["structure", "event_id"], kind="mergesort")

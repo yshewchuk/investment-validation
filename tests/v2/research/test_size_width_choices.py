@@ -130,10 +130,10 @@ def test_write_month_keeps_the_file_for_the_same_rows_and_refuses_other_bytes(tm
     path = out / "e_choices" / f"{PERIOD}.parquet"
     before = path.read_bytes()
     assert first == {"period": PERIOD, "sha256": first["sha256"], "rows": 2, "taken": 1}
-    assert fsyncs == [out / "e_choices"]
+    assert fsyncs == [out, out / "e_choices"]
     fsyncs.clear()
     assert choices.write_month(out, PERIOD, [_frame()]) == first
-    assert fsyncs == [out / "e_choices"]  # the replay path syncs the directory too
+    assert fsyncs == [out, out / "e_choices"]  # the replay path syncs both directories too
     assert path.read_bytes() == before
     with pytest.raises(Refusal) as caught:
         choices.write_month(out, PERIOD, [_frame(value=0.9)])
