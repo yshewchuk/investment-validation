@@ -328,11 +328,11 @@ def entry_coverage(entry_rows, tables, *, snapshot_id, expected_snapshot_id, emi
     entry_rows = bind_quotes(entry_rows, snapshot_id=snapshot_id, expected_snapshot_id=expected_snapshot_id)
     n = len(entry_rows)
     flags = pd.DataFrame({
-        "year": pd.to_datetime(entry_rows["obs_date"]).dt.year.to_numpy() if n else np.zeros(0, dtype=int),
+        "year": pd.to_datetime(entry_rows["obs_date"]).dt.year.to_numpy(),
         "chain_kind": entry_rows["chain_kind"].map(lambda v: "null" if pd.isna(v) else str(v)).to_numpy(dtype=object),
         "usable_quote": usable_quote(entry_rows["bid"], entry_rows["ask"]),
-        "smvvol_positive": attach_vol(entry_rows, tables.vols).notna().to_numpy() if n else np.zeros(0, dtype=bool),
-        "rate_found": lookup_rate(entry_rows, tables.rates).notna().to_numpy() if n else np.zeros(0, dtype=bool),
+        "smvvol_positive": attach_vol(entry_rows, tables.vols).notna().to_numpy(),
+        "rate_found": lookup_rate(entry_rows, tables.rates).notna().to_numpy(),
         "open_interest_known": np.isfinite(_floats(entry_rows["open_interest"])),
         "bid_size_known": np.isfinite(_floats(entry_rows["bid_size"])),
         "ask_size_known": np.isfinite(_floats(entry_rows["ask_size"])),

@@ -757,6 +757,41 @@ def test_entry_coverage_invalid_table_value_refused_before_emit():
     assert emitted == []
 
 
+def _bad_coverage_tables(case):
+    base = _coverage_tables()
+    vols, rates = base.vols, base.rates
+    if case == "vol-zero":
+        vols = vols.assign(smvVol=[0.0])
+    elif case == "rate-out-of-range":
+        rates = rates.assign(iRate5wk=[0.21])
+    elif case == "missing-smvvol":
+        vols = vols.drop(columns=["smvVol"])
+    elif case == "missing-rate-column":
+        rates = rates.drop(columns=["iRate5wk"])
+    elif case == "null-vol-key":
+        vols = vols.assign(strike=[None])
+    elif case == "duplicate-rate-key":
+        rates = pd.concat([rates, rates], ignore_index=True)
+    return fvi.InputTables(vols=vols, rates=rates, hashes={}, rate_rules={})
+
+
+@pytest.mark.parametrize("case,reason", [
+    ("vol-zero", "table_value"),
+    ("rate-out-of-range", "table_value"),
+    ("missing-smvvol", "required_column"),
+    ("missing-rate-column", "required_column"),
+    ("null-vol-key", "key_value"),
+    ("duplicate-rate-key", "duplicate_key"),
+])
+def test_entry_coverage_bad_table_refused_on_empty_entry_rows(case, reason):
+    emitted = []
+    with pytest.raises(FairValueRefusal) as exc:
+        fvi.entry_coverage(_chain().iloc[:0], _bad_coverage_tables(case), snapshot_id="s", expected_snapshot_id="s",
+                           emit=emitted.append)
+    _refused(exc, reason)
+    assert emitted == []
+
+
 @pytest.mark.parametrize("frame,snap,expected,reason", [
     (_chain(), "a", "b", "snapshot_binding"),
     (_chain().drop(columns=["bid"]), "s", "s", "required_column"),
