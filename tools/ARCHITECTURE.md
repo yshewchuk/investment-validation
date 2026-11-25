@@ -24,7 +24,7 @@ Match coverage against `option_chains` is not reported yet. Dividends: none are 
 | A payload has no non-null `smvVol` (quotes) or no non-null rate (rates) | Skipped and counted, so it cannot override a pull that had them. |
 | A row has an unusable key | Dropped and counted. |
 | A body is unreadable (over 256 MiB, either form) or its shape unrecognized | Counted and logged. Outputs and the manifest are still written; exit 1. Nothing is quarantined. |
-| A run stops after preflight | No manifest exists. The next run reuses unchanged entries in `--work-dir` (default under `/tmp`) with unaltered shards; others are reparsed. A shard that changes before its merge fails the run. |
+| A run stops after preflight | No manifest exists. The next run reuses `--work-dir` (default under `/tmp`) entries only if body, parsing code, marker and shards are unchanged; others are reparsed. A shard that changes before its merge fails the run. |
 | A run completes | Its shards and markers are removed; other files in `--work-dir` remain. A rerun rebuilds; the same cache and library versions give identical outputs. |
 | A metadata sidecar exceeds 1 MiB | The run fails on the shared listing's `ValueError`, naming the file, before writing anything. |
 | An output or work directory equals, contains or sits inside a protected one or each other; no `hist/strikes` entry | Refused with a message before writing anything. |

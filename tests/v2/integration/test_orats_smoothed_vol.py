@@ -190,6 +190,63 @@ def test_resume_reparses_damaged_stage(tmp_path, monkeypatch):
     assert _tree(out) == _tree(tmp_path / "fresh")
 
 
+def test_resume_reparses_after_code_change(tmp_path, monkeypatch):
+    raw = _world(tmp_path)
+    out, work = tmp_path / "out", tmp_path / "work"
+    args = _args(raw, out, work)
+
+    def crash(*_a, **_k):
+        raise RuntimeError("simulated merge crash")
+
+    monkeypatch.setattr(tool, "merge_stage", crash)
+    with pytest.raises(RuntimeError):
+        tool.main(args)
+    monkeypatch.undo()
+    monkeypatch.setattr(tool, "CODE_DIGEST", "changed")
+
+    parsed = []
+    real = tool.parse_entry
+
+    def counting(*args):
+        parsed.append(args[1].key)
+        return real(*args)
+
+    monkeypatch.setattr(tool, "parse_entry", counting)
+    assert tool.main(args) == 0
+    assert sorted(parsed) == sorted([K_EARLY_BIG, K_LATE_SMALL, K_NO_SMV, K_RATES])
+
+
+def test_resume_reparses_edited_marker(tmp_path, monkeypatch):
+    raw = _world(tmp_path)
+    out, work = tmp_path / "out", tmp_path / "work"
+    args = _args(raw, out, work)
+
+    def crash(*_a, **_k):
+        raise RuntimeError("simulated merge crash")
+
+    monkeypatch.setattr(tool, "merge_stage", crash)
+    with pytest.raises(RuntimeError):
+        tool.main(args)
+    marker_path = work / "markers" / "quotes" / f"{K_LATE_SMALL}.json"
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    marker["months"] = {}
+    marker_path.write_text(json.dumps(marker), encoding="utf-8")
+    monkeypatch.undo()
+
+    parsed = []
+    real = tool.parse_entry
+
+    def counting(*args):
+        parsed.append(args[1].key)
+        return real(*args)
+
+    monkeypatch.setattr(tool, "parse_entry", counting)
+    assert tool.main(args) == 0
+    assert parsed == [K_LATE_SMALL]
+    assert tool.main(_args(raw, tmp_path / "fresh", tmp_path / "fresh_work")) == 0
+    assert _tree(out) == _tree(tmp_path / "fresh")
+
+
 def test_digest_matches_parsed_bytes(tmp_path, monkeypatch):
     raw = _world(tmp_path)
     out = tmp_path / "out"

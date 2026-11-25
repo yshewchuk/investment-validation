@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import gzip
 import hashlib
+import inspect
 import io
 import json
 import logging
@@ -37,6 +38,8 @@ TABLES = {"quotes": ("hist/strikes", QKEYS, QVALS, ["smvVol"]),
           "rates": ("hist/cores", RKEYS, RATES, RATES)}
 DATE = "datetime64[ns]"
 BAD, PROGRESS_S = ("unreadable", "unrecognized"), 30.0
+CODE_DIGEST = hashlib.sha256(b"".join(Path(f).read_bytes() for f in (
+    __file__, inspect.getfile(payload_shape), inspect.getfile(mask_sentinels)))).hexdigest()
 
 
 def check_out_dir(path: Path, raw_root: Path, label: str) -> Path:
@@ -115,12 +118,17 @@ def _shard_digest(path: Path) -> str:
         return hashlib.file_digest(fh, "sha256").hexdigest()
 
 
+def _seal(marker: dict) -> str:
+    return hashlib.sha256(json.dumps({k: v for k, v in marker.items() if k != "seal"},
+                                     sort_keys=True).encode()).hexdigest()
+
+
 def _reusable_marker(marker_path: Path, stamp: list, shard_dir: Path, key: str):
     try:
         with open(marker_path, "rb") as fh:
             raw = fh.read(MAX_META_BYTES + 1)
         marker = json.loads(raw) if len(raw) <= MAX_META_BYTES else None
-        if marker is None or marker["stamp"] != stamp:
+        if marker is None or marker["stamp"] != stamp or marker["seal"] != _seal(marker):
             return None
         for month, digest in marker["months"].items():
             if _shard_digest(shard_dir / month / f"{key}.parquet") != digest:
@@ -137,7 +145,7 @@ def _shard_item(table: str, entry, work: Path) -> tuple:
             blob = fh.read(MAX_BODY_BYTES + 1)
         if len(blob) > MAX_BODY_BYTES:
             raise ValueError(f"compressed body exceeds {MAX_BODY_BYTES} bytes")
-        stamp = [TOOL_VERSION, (entry.meta or {}).get("fetched_at"), hashlib.sha256(blob).hexdigest()]
+        stamp = [CODE_DIGEST, (entry.meta or {}).get("fetched_at"), hashlib.sha256(blob).hexdigest()]
         marker = _reusable_marker(marker_path, stamp, work / "shards" / table, entry.key)
         if marker is not None:
             return "resumed", marker, ""
@@ -153,6 +161,7 @@ def _shard_item(table: str, entry, work: Path) -> tuple:
             _atomic(path, lambda t, p=part: p.to_parquet(t, index=False, engine="pyarrow"))
             months[month] = _shard_digest(path)
     marker = {"stamp": stamp, "months": months, "counters": counters, "dividend_fields": divs}
+    marker["seal"] = _seal(marker)
     _atomic_json(marker_path, marker)
     return status, marker, ""
 
