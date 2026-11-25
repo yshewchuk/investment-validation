@@ -47,7 +47,7 @@ def choice_rows(decided, k1, primary, mid, secured, ladder):
 
     ``k1`` is this month's score_events frame at k = 1.0 (None when 1.0 is not in the grid); ``primary`` and ``mid`` are the score
     frames of the taken rows (primary marks, and mid_marks), ``secured`` the secured frame and ``ladder`` {alpha: repriced score frame}
-    ({} when the sweep has no ladder). Every mark is NaN for a row that is not taken."""
+    ({} when the sweep has no ladder). Every mark is NaN for a row that is not taken, except entry_cost (the candidate's debit per share, the entry mark), which is kept for every candidate that priced."""
     ids, status = _text(decided["event_id"]), _text(decided["status"])
     taken = np.array([s == "taken" for s in status], dtype=bool)
 

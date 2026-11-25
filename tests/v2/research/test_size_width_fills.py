@@ -94,6 +94,9 @@ def test_a_custom_fill_model_moves_the_seamed_marks_and_leaves_the_real_module_a
     assert ok.any()
     np.testing.assert_allclose((m_scores["entry_cost"] - b_scores["entry_cost"])[ok].to_numpy(), 0.10)
     assert (m_scores["exp_pnl_sim"][ok].to_numpy() != b_scores["exp_pnl_sim"][ok].to_numpy()).all()
+    base_exp, base_cost = b_scores["exp_pnl_sim"][ok].to_numpy(), b_scores["entry_cost"][ok].to_numpy()
+    value = base_exp * base_cost + base_cost  # the sims' expected payoff, independent of the fill model
+    np.testing.assert_allclose(m_scores["exp_pnl_sim"][ok].to_numpy(), (value - (base_cost + 0.10)) / (base_cost + 0.10))
 
     taken = b_scores[ok].assign(status="taken")
     b_rows = base.score(chunk, events, taken, NAME, 0.5, repriced=True)
@@ -103,6 +106,10 @@ def test_a_custom_fill_model_moves_the_seamed_marks_and_leaves_the_real_module_a
     assert rung3.any() and (~rung3).any()
     assert (m_rows.loc[rung3, "exit_value"] == 0.0).all() and (b_rows.loc[rung3, "exit_value"] == 0.0).all()
     np.testing.assert_allclose((m_rows["exit_value"] - b_rows["exit_value"])[~rung3].to_numpy(), 0.05)
+    pnl_per_share = lambda rows: (rows["exit_value"] - rows["entry_cost"]).to_numpy()
+    change = pnl_per_share(m_rows) - pnl_per_share(b_rows)
+    np.testing.assert_allclose(change[~rung3], -0.05)  # +0.05 exit - 0.10 entry
+    np.testing.assert_allclose(change[rung3], -0.10)   # rung 3 exits at zero: only the entry moves
 
     assert sv.entry is real_entry and sv._exit_value is real_exit
     assert type(seam.PRICING.fills) is fills.CurrentFills and type(moved.fills) is Custom

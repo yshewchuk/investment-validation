@@ -212,11 +212,24 @@ def test_the_outer_stage_writes_each_frozen_month_beside_its_freeze_and_binds_it
     use_chunks(monkeypatch, [("2023Q3", event_chunk("E1")), ("2024Q3", event_chunk("E2"))])
     driver.run(sources(), "inner", out, event_ids=ids, prereg=OK)
     use_chunks(monkeypatch, [("2024Q3", event_chunk("E2")), ("2025Q1", event_chunk("E3", "E4"))])
+    reads, real_read_labels = [], driver.readers.read_labels  # (start, end, e_choices stems on disk) per label read of the outer run
+
+    def recording_read_labels(*args, **kwargs):
+        reads.append((kwargs.get("start"), kwargs.get("end"), {p.stem for p in (out / "e_choices").glob("*.parquet")}))
+        return real_read_labels(*args, **kwargs)
+
+    monkeypatch.setattr(driver.readers, "read_labels", recording_read_labels)
     driver.run(sources(), "outer", out, event_ids=ids, prereg=OK)
     receipt = receipts.load_receipt(out / "receipts" / "e_choices_outer.json")
     frozen = sorted(p.stem for p in (out / "months").glob("*.parquet"))
     assert sorted(receipt["months"]) == frozen == ["2025-01", "2025-02"]
     _assert_bound(out, receipt)
+    for period in (pd.Period(p, "M") for p in receipt["months"]):
+        if period.year != 2025:
+            continue
+        own = [stems for start, end, stems in reads if start == period.start_time and end == (period + 1).start_time]
+        assert own, f"no label read for output month {period}"  # R6: the month's labels are read after its choice file is frozen
+        assert str(period) in own[0], f"{period}'s choice file existed only after its label read"
 
 
 # ---- the report line -------------------------------------------------------------------
