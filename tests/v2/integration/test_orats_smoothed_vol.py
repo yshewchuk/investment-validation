@@ -495,7 +495,11 @@ def test_carry_sentinel_bad_date_and_zero(tmp_path):
            "2025-01-01T00:00:00+00:00")
     _entry(raw, "hist/cores", K_RATES, _payload([
         {"ticker": "SPY", "tradeDate": "2025-01-02", "iRate5wk": 0.04, "iRateLt": 0.045,
-         "borrow30": 3.4e38, "divAmt": 0.0, "divDate": "not-a-date"}]),
+         "borrow30": 3.4e38, "divAmt": 0.0, "divDate": "not-a-date"},
+        {"ticker": "SPY", "tradeDate": "2025-01-03", "iRate5wk": 0.04, "iRateLt": 0.045,
+         "divDate": "9999-12-31"},
+        {"ticker": "SPY", "tradeDate": "2025-01-06", "iRate5wk": 0.04, "iRateLt": 0.045,
+         "divDate": "0001-01-01"}]),
         "2025-01-02T00:00:00+00:00")
     out = tmp_path / "out"
     assert tool.main(_args(raw, out, tmp_path / "work")) == 0
@@ -503,3 +507,5 @@ def test_carry_sentinel_bad_date_and_zero(tmp_path):
     assert r["borrow30"].isna().all()
     assert r["divDate"].isna().all()
     assert r.loc[0, "divAmt"] == 0.0
+    assert len(r) == 3
+    assert r["iRate5wk"].tolist() == [0.04, 0.04, 0.04]

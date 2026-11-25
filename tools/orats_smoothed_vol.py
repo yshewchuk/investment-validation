@@ -89,6 +89,12 @@ def _eta(done: int, total: int, start: float) -> float:
     return (total - done) * (time.monotonic() - start) / done
 
 
+def _parse_date(series: pd.Series) -> pd.Series:
+    parsed = pd.to_datetime(series, errors="coerce", format="ISO8601")
+    in_range = parsed.between(pd.Timestamp.min, pd.Timestamp.max)
+    return parsed.where(in_range).astype(DATE)
+
+
 def parse_entry(table: str, entry, blob: bytes) -> tuple:
     _, keys, values, required = TABLES[table]
     with gzip.GzipFile(fileobj=io.BytesIO(blob)) as fh:
@@ -112,7 +118,7 @@ def parse_entry(table: str, entry, blob: bytes) -> tuple:
         "obs_date": pd.to_datetime(raw["tradeDate"], errors="coerce").astype(DATE),
         "expiry": pd.to_datetime(raw["expirDate"], errors="coerce").astype(DATE),
         "strike": mask_sentinels(pd.to_numeric(raw["strike"], errors="coerce")),
-        **{v: (pd.to_datetime(raw[v], errors="coerce", format="ISO8601").astype(DATE)
+        **{v: (_parse_date(raw[v])
                if v == "divDate" else mask_sentinels(pd.to_numeric(raw[v], errors="coerce")))
            for v in values},
     })
@@ -231,7 +237,8 @@ def merge_stage(work: Path, out: Path, markers: dict) -> dict:
             df = pd.concat(shards, ignore_index=True)
             nc_cols = [*keys, *(v for v in values if v not in CARRY)]
             conflicts = (df[nc_cols].drop_duplicates().groupby(keys, sort=False).size() > 1).sum()
-            conflicts_all = (df[cols].drop_duplicates().groupby(keys, sort=False).size() > 1).sum()
+            conflicts_all = conflicts if len(nc_cols) == len(cols) else (
+                df[cols].drop_duplicates().groupby(keys, sort=False).size() > 1).sum()
             final = df.sort_values([*keys, "fetched_at", "cache_key", "row_no"], kind="mergesort")
             final = final.drop_duplicates(subset=keys, keep="last")[cols].reset_index(drop=True)
             path = out / table / f"year={month[:4]}" / f"month={month[5:]}.parquet"

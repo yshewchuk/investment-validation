@@ -56,7 +56,7 @@ Per quote row, with `S` the row's curated `spot` (the one strike resolution uses
 
 - **Not priced (mine):** `annIdiv` and borrow are both implied from put-call parity, and ORATS does not say what each solve holds fixed, so using both could count one parity gap twice. `annActDiv` gives no dates. Whether borrow was itself solved with `divAmt` and `divDate` is also unconfirmed. At `T = 0` neither `b` nor a dividend is used or flagged.
 
-Tests (F7): with `b = r >= 0` and no dividend, values equal F2's; a call that takes the tree is never below its European value on the same inputs. F2's tests: published American put values; at zero rate the put tree matches the European put `engine.pnl_sim.black_scholes_put` within the tree's discretisation error, and the call matches that put by parity, `C = P + S - K`.
+Tests (F7): with `b = r >= 0` and no dividend, values equal F2's; a call that takes the tree is never below the European value computed on the same lattice (same inputs and steps, no early exercise; Black-Scholes is not the comparator, since the tree's discretisation error can fall below it). F2's tests: published American put values; at zero rate the put tree matches the European put `engine.pnl_sim.black_scholes_put` within the tree's discretisation error, and the call matches that put by parity, `C = P + S - K`.
 
 **Vol source, one per (ticker, `obs_date`, expiry)**, only when `T > 0` (at `T = 0` no vol is used, no smile is fitted and the source is `intrinsic`). It is decided from the whole listed expiry, so a row's `V` never depends on which structure asked. The **fit set** is the out-of-the-money rows (puts `K <= S`, calls `K > S`) with finite positive `iv`, `0 <= bid <= ask`, positive mid and `quote_repaired` false.
 
