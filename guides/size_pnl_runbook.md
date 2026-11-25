@@ -93,8 +93,8 @@ The report is a post-hoc revision by the user (2026-11-24); read it in this orde
 1. The header: the Amendment 6 line, the chooser statement (seven independent books, totals are not board P&L) and the
    table-id note (T5 is retired; T6-T11 keep their ids because `spec.yaml` names them).
 2. T10 verdicts, each labelled "post-hoc revision by the user"; the pre-registered text stays in `spec.yaml`
-   `preregistered_original`. The T10 section labels the straddle verdicts with the user's
-   2026-11-25 accepted-gap text: not fully production-faithful.
+   `preregistered_original`. The T10 section labels the straddle verdicts from the run's own
+   agreement; below the bar, pass `--accept-gate-gap "gap accepted by the user 2026-11-25"` (design section 18).
 3. The board-match section (`not_available` with a reason when the ledger holds no common events) and the
    **Production audit** table (18 rows: imports, fixed, kept, out of scope; kept rows are the user's open questions).
 

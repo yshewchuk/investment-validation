@@ -50,11 +50,35 @@ def _total(series_by_label, label):
     return float(series_by_label[label].sum()) if label in series_by_label else 0.0
 
 
+def _m0_in_run(role_model, label_of, outer_models):
+    m0_raw = role_model.get("M0")
+    return label_of.get(m0_raw) is not None and m0_raw in outer_models
+
+
+def _m0_frame(det, role_model, label_of, in_e):
+    """M0's determined 2025 G_PROD rows in E, one per event: the one frame behind the M0 section and the straddle label."""
+    m0 = label_of[role_model["M0"]]
+    rows = det[(det["model_id"] == m0) & (det["event_date"].dt.year == 2025) & det["event_id"].isin(in_e) & det["status"].isin(("taken", "not_taken"))]
+    m0_frame = rows.drop_duplicates("event_id")
+    # month_decider fills gate_score for every event with finite inputs; blank the rows the gate never decided
+    # (universe_filter, bad_quote) so the ladder step and score distribution cover only scored events. Covered still includes them.
+    return m0_frame.assign(gate_score=m0_frame["gate_score"].where((m0_frame["status"] == "taken") | (m0_frame["reason"] == "below_gate_threshold")))
+
+
+def t10_straddle_label(gate_raw, role_model, label_of, outer_models, stored_gate, accepted_gap):
+    """The straddle verdicts' label for this run, from the same M0 frame and agreement functions as the M0 section. Call it after
+    sections, which refuses a missing stored gate. NOT_COMPUTED when the run has no G_PROD rows or M0 is not in the run."""
+    if gate_raw.empty or not _m0_in_run(role_model, label_of, outer_models):
+        return size_pnl_gate_agreement.NOT_COMPUTED
+    det = gate_raw[gate_raw["status"] != "undetermined"]
+    det = det.assign(model_id=det["model_id"].map(label_of))
+    m0_frame = _m0_frame(det, role_model, label_of, set(gate_raw["event_id"]))
+    return size_pnl_gate_agreement.straddle_label(m0_frame, stored_gate["selected"], accepted_gap)
+
+
 def _agreement(det, role_model, label_of, outer_models, in_e, stored_gate, accepted_gap=None, ladder=None):
     """M0's agreement with production's stored 2025 gate decisions, as a Markdown section (titled by the caller)."""
-    m0_raw = role_model.get("M0")
-    m0 = label_of.get(m0_raw)
-    if m0 is None or m0_raw not in outer_models:
+    if not _m0_in_run(role_model, label_of, outer_models):
         return f"{size_pnl_gate_agreement.HEADING}\n\nnot_available: M0_not_in_run"
     if stored_gate is None:
         raise fail(_INVALID, "the run has G_PROD rows: pass --stored-gate (EXP-187's transactions CSV) to run.py --stage report", details={"reason": "stored_gate_required"})
@@ -62,12 +86,7 @@ def _agreement(det, role_model, label_of, outer_models, in_e, stored_gate, accep
         raise fail(_INVALID, "the decisions predate the gate_score column: rerun the outer stage", details={"reason": "gate_score_missing"})
     if "reason" not in det.columns:
         raise fail(_INVALID, "the decisions lack the reason column", details={"reason": "gate_score_missing"})
-    rows = det[(det["model_id"] == m0) & (det["event_date"].dt.year == 2025) & det["event_id"].isin(in_e) & det["status"].isin(("taken", "not_taken"))]
-    m0_frame = rows.drop_duplicates("event_id")
-    # month_decider fills gate_score for every event with finite inputs; blank the rows the gate never decided
-    # (universe_filter, bad_quote) so the ladder step and score distribution cover only scored events. Covered still includes them.
-    m0_frame = m0_frame.assign(gate_score=m0_frame["gate_score"].where((m0_frame["status"] == "taken") | (m0_frame["reason"] == "below_gate_threshold")))
-    return size_pnl_gate_agreement.section(m0_frame, stored_gate["selected"], accepted_gap=accepted_gap, ladder=ladder)
+    return size_pnl_gate_agreement.section(_m0_frame(det, role_model, label_of, in_e), stored_gate["selected"], accepted_gap=accepted_gap, ladder=ladder)
 
 
 def sections(gate_raw, frame, *, label_of, role_model, roster, outer_models, quarter_of, tick, stored_gate=None, accepted_gap=None, ladder=None):

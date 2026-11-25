@@ -25,6 +25,9 @@ NO_LADDER = ("Decomposition steps (a) band from production's full-history pool a
              "--gate-ladder.")
 COUNT_HEADERS = ["covered", "gprod_selected", "production_selected", "both", "only_production", "only_gprod", "stored_outside_covered",
                  "rate_gprod", "rate_production", "jaccard", "agreement_rate", "bar"]
+LIVE_HEADERS = ["events_excluded", "production_removed", "live_jaccard", "bar"]
+STRADDLE_PREFIX = "Straddle verdicts (H2, and H3 through its straddle leg): "
+NOT_COMPUTED = STRADDLE_PREFIX + "production agreement not computed in this run."
 
 
 def _refuse(reason, message):
@@ -149,6 +152,36 @@ def check(st, accepted_gap):
     return ""
 
 
+def live_domain(m0, selected):
+    """The live domain: M0's covered events less those with reason universe_filter, removed from both sides (the m0 rows and
+    production's selected ids). ``jaccard`` is None when the live union is empty."""
+    excluded = set(m0.loc[m0["reason"] == "universe_filter", "event_id"])
+    kept = m0[~m0["event_id"].isin(excluded)]
+    live_selected = {e: v for e, v in selected.items() if e not in excluded}
+    return {"excluded": len(excluded), "prod_removed": len(set(selected) & excluded), "jaccard": stats(kept, live_selected)["jaccard"]}
+
+
+def agreement_parts(m0, selected, accepted_gap):
+    """The one computation behind the M0 section and the straddle label: the as-run stats, the live domain, and check's label
+    (raises as check does)."""
+    st = stats(m0, selected)
+    return st, live_domain(m0, selected), check(st, accepted_gap)
+
+
+def _live_text(live):
+    return "not computable inside the live domain" if live is None else f"{live:.2f} inside the live domain"
+
+
+def straddle_label(m0, selected, accepted_gap):
+    """The straddle verdicts' label, from agreement_parts. Below the bar it names the live jaccard and the accepted gap (stripped);
+    at or above the bar it carries no acceptance wording."""
+    st, live, gap = agreement_parts(m0, selected, accepted_gap)
+    live_jaccard = live["jaccard"]  # the live domain is a dict; its jaccard is None when the live union is empty
+    if gap:
+        return f"{STRADDLE_PREFIX}agreement {_live_text(live_jaccard)}, {accepted_gap.strip()}; not fully production-faithful"
+    return f"{STRADDLE_PREFIX}as-run agreement {st['jaccard']:.2f} meets the {MIN_JACCARD} bar; {_live_text(live_jaccard)}."
+
+
 def section(m0, selected, *, accepted_gap=None, ladder=None):
     """The M0 agreement section (markdown). ``m0``: M0's determined 2025 G_PROD rows in E, one per event; ``selected``: {id: ret_mid}.
     check runs first, so a failing bar raises before anything is rendered."""
@@ -156,8 +189,7 @@ def section(m0, selected, *, accepted_gap=None, ladder=None):
         raise _refuse("stored_gate_invalid", "selected must map non-empty event ids to finite returns")
     if ladder is not None and not ladder_valid(ladder):
         raise _refuse("ladder_invalid", "ladder must map labels (not the as-run label) to {event_id: finite score}")
-    st = stats(m0, selected)
-    label = check(st, accepted_gap)
+    st, live, label = agreement_parts(m0, selected, accepted_gap)
     covered, gprod, prod = _sets(m0, selected)
     counts = [[st["covered"], st["n_gprod"], st["n_prod"], st["both"], st["only_prod"], st["only_gprod"], st["outside"],
                st["rate_gprod"], st["rate_prod"], st["jaccard"], st["agreement_rate"], MIN_JACCARD]]
@@ -170,6 +202,8 @@ def section(m0, selected, *, accepted_gap=None, ladder=None):
     ladder_text = ladder_table(steps, covered, prod, REGISTERED_THRESHOLD) + ("" if ladder else "\n\n" + NO_LADDER)
     parts = [HEADING] + ([label] if label else []) + [NOTE,
              "#### Counts\n\n" + report.md_table(COUNT_HEADERS, counts),
+             "#### Live domain (universe_filter removed from both sides)\n\n"
+             + report.md_table(LIVE_HEADERS, [[live["excluded"], live["prod_removed"], live["jaccard"], MIN_JACCARD]]),
              "#### Mean return at mid\n\n" + report.md_table(["group", "events", "mean_ret_mid"], rets),
              "#### Score distribution\n\n" + quantile_table(m0, REGISTERED_THRESHOLD),
              "#### Decomposition ladder (diagnostic, never a rule)\n\n" + ladder_text]

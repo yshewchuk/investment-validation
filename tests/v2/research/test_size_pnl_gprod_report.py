@@ -294,3 +294,18 @@ def test_stored_gate_valid_accepts_a_well_formed_gate(value):
 ], ids=["none", "empty", "extra_key", "non_dict_selected", "bool_ret", "nan_ret", "inf_ret", "empty_id"])
 def test_stored_gate_valid_rejects_malformed_values(value):
     assert gprod_report.stored_gate_valid(value) is False
+
+
+NOT_COMPUTED = "Straddle verdicts (H2, and H3 through its straddle leg): production agreement not computed in this run."
+
+
+def test_t10_straddle_label_is_not_computed_without_gate_rows_or_m0():
+    assert gprod_report.t10_straddle_label(_gate(_cells()).iloc[0:0], ROLE_MODEL, LABEL_OF, set(LABEL_OF), STORED, None) == NOT_COMPUTED
+    assert gprod_report.t10_straddle_label(_agreement_gate(), ROLE_MODEL, LABEL_OF, set(LABEL_OF) - {"m0"}, STORED, None) == NOT_COMPUTED
+
+
+def test_t10_straddle_label_on_the_agreement_fixture_is_hand_counted():
+    # M0 covers E1..E6 (E7 and E8 undetermined). G_PROD takes E1, E2, E3; production (STORED_HAND) selects E1, E2, E4 of them.
+    # Both {E1, E2}, union {E1, E2, E3, E4}: 2/4 = 0.50, at the bar. No universe_filter row, so the live domain gives 0.50 too.
+    assert gprod_report.t10_straddle_label(_agreement_gate(), ROLE_MODEL, LABEL_OF, set(LABEL_OF), STORED_HAND, None) == (
+        "Straddle verdicts (H2, and H3 through its straddle leg): as-run agreement 0.50 meets the 0.5 bar; 0.50 inside the live domain.")
