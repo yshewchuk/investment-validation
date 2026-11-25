@@ -978,6 +978,11 @@ EXP-188: `size_pnl_{inputs,outer_inputs}` bind v14 and 2025 forecasts; `size_pnl
 
 EXP-190 (design `guides/size_quantile_move_design.md`; no production caller): `size_quantile_prereg` never writes the ledger; it refuses `stage_b_pending` until Stage B is settled (also `planned_row_*`, `spec_*`, `preregistered*`, `experiment_id_conflict`, `ledger_malformed`, `run_log_malformed`). `size_quantile_binding.{bind_grid,bind_b3}` check caller-loaded v14 documents without verifying their hashes: `v14_{grid,selection,report}_mismatch`, `m3_unbound`, `b3_unbound`.
 
-## Fair-value pricer (fill model F)
+## Fill model F
 
-`fair_value_pricer` (NumPy only): unclamped, zero-dividend American put and European call; no production caller ([design §4](../guides/fair_value_fill_design.md)). NaN (no value): invalid spot, strike or years; unexpired with invalid volatility or rate; put-tree probability outside (0,1). Expired: intrinsic. Only puts floor positive volatility (0.01).
+No production caller ([design §4](../guides/fair_value_fill_design.md)). `fair_value_pricer` prices; `fair_value_legs` clamps per quote ([README](README.md)).
+
+|Condition|Outcome|
+|-|-|
+|Invalid pricer input|NaN|
+|Missing column, duplicate quote/vol key, invalid `right`/`quote_repaired`|`FairValueRefusal` (`EXPERIMENT_IDENTITY_CONFLICT`), no partial output|
