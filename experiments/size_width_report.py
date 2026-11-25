@@ -124,7 +124,8 @@ def _t2(tuned, body_E):
 
 
 def _t3(body_B, body_C, body_E, outer):
-    """T3 curves per structure; returns (markdown, flatness at k = 1.0 per structure from the primary curve)."""
+    """T3 curves per structure; returns (markdown, flat1), where flat1 is the flatness at k = 1.0 per structure from the
+    primary curve (C when calibrated, else B). It is what the proposed rule prints as flatness_se for any recommended arm."""
     primary = body_C if body_C is not None else body_B
     parts = ["### T3 curves per structure (2023-24, account return % at marks_mid; 2025 NOT blind for widths)"]
     flat1 = {}
@@ -141,6 +142,16 @@ def _t3(body_B, body_C, body_E, outer):
                   f"argmax k: B={_k(kB)} C={'omitted' if body_C is None else _k(kC)} exp_pnl_sim={_k(kE)}; "
                   f"agree: {_agree([kB, kC, kE])}"]
     return "\n\n".join(parts), flat1
+
+
+def _flat_note(bodies, rec):
+    """The proposed rule's flatness_se paragraph for recommended arm ``rec``: T3's k = 1.0 flatness of the primary curve,
+    which is arm C's per-structure curve when C is calibrated and present, else arm B's. It is not arm ``rec``'s own
+    tuning curve unless ``rec`` is the primary arm, and it is measured at k = 1.0, not at the proposed k."""
+    source = "C" if "C" in bodies else "B"
+    text = (f"flatness_se: T3's flatness at k = 1.0 on arm {source}'s per-structure curve "
+            f"(the primary curve: C when calibrated, else B), whichever arm is recommended")
+    return text + "." if source == rec else text + f"; it is not arm {rec}'s own tuning curve."
 
 
 def _t5(labels, merged, stats):
@@ -183,7 +194,8 @@ def assemble(out_dir, *, w5_tables=None):
     else:
         rule = success.board_rule(rec, None, {}, {})
     head = "\n\n".join([TITLE, NOT_BLIND, *([SMOKE] if inner["smoke"] else [])])
-    rule_text = success.render_rule(rule) + "\n\n" + EVIDENCE
+    flat_note = [_flat_note(bodies, rec)] if rec in TUNED else []
+    rule_text = "\n\n".join([success.render_rule(rule), *flat_note, EVIDENCE])
     w5 = PLACEHOLDER if w5_tables is None else w5_tables
     sections = [head, _t1(inner), *_t2({arm: bodies[arm] for arm in TUNED if arm in bodies}, body_E), t3,
                 fake.t4_markdown({n: {float(k): cell for k, cell in row.items()} for n, row in inner["anchor"].items()}).rstrip(),

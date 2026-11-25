@@ -49,8 +49,9 @@ python3 tools/bounded_run.py --heavy --cores 8 -- python3 experiments/EXP-189_sh
 - **Inner** (2023H2-2024, burn-in from 2023-01): one sweep over the grid and arm E, the error model fit, tuning C
   (`N = 20` draws), the anchor, tunings A, B, D. It writes `receipts/inputs_inner.json`, `tuning_A..E.json`
   (`tuning_C.json` unless the fake is not calibrated: `fake_not_calibrated`) and `inner_summary.json`. It holds every
-  inner quarter chunk in memory (the fake and anchor re-use them): watch RSS on the smoke run first. Over the limit it
-  refuses `RESOURCE_LIMIT_EXCEEDED` with no partial report.
+  inner quarter chunk in memory (the fake and anchor re-use them): watch RSS on the smoke run first. The EXP-189 code
+  emits no memory refusal of its own: over its limit, `bounded_run` stops the process, and `inner_summary.json` (written
+  last) is then absent, so the outer and report stages refuse.
 - **Outer** (2025): refuses before any chunk is built unless `inner_summary.json` and every arm's receipt exist and match
   (`tuning_receipt_missing`, `tuning_receipt_changed`). It warms the history from 2024-07, writes each 2025 month to
   `months/<period>.parquet` before it reads that month's labels (R6), and writes `outer_summary.json`.
@@ -59,9 +60,12 @@ python3 tools/bounded_run.py --heavy --cores 8 -- python3 experiments/EXP-189_sh
 
 ## Report
 
-`--stage report` is read-only (no sources are read; `--sources` and `--expected` are only parsed). It needs the inner and
+`--stage report` reads no sources (`--sources` is required but never imported; the `--expected` file is still read and
+its four keys checked) and changes no receipt. It needs the inner and
 outer receipts and writes `<out-dir>/REPORT.md` (T1-T7, 2025 tables titled "2025 NOT blind for widths") and
-`<out-dir>/proposed_rule.json` (the proposed board rule: divisors `divisor / k`, or `no_change`, or the E rule). T8 and
+`<out-dir>/proposed_rule.json` (the proposed board rule: divisors `divisor / k`, or `no_change`, or the E rule). In an
+A-D rule, `flatness_se` is always T3's flatness at `k = 1` on the primary per-structure curve (arm C's when C is
+calibrated, else arm B's), whichever arm is recommended: it is not the recommended arm's own tuning curve. T8 and
 T9 (tolerance bands, fallback) enter through `assemble(..., w5_tables=)`. W5's modules are merged, but the driver does
 not run them yet (slice W6b-3), so until then the report says T8 and T9 are not available. Do not start the recorded
 run before W6b-3: the `tuning_band` receipt and fallback arm belong to it. The recommendation is evidence for the user's separate board decision, not a validated result.

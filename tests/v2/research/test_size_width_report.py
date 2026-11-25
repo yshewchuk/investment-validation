@@ -46,10 +46,12 @@ def _unit(members, k, rets):
     return {"k": k, "flags": [], "members": list(members), "scores": _scores(rets)}
 
 
-def _write(out, *, passing=(), c_status="ok", smoke=False, model=True, b_rets=None, e_peak=None):
-    """A full synthetic receipt set under ``out/receipts``; arms in ``passing`` beat production on every test."""
+def _write(out, *, passing=(), c_status="ok", smoke=False, model=True, b_rets=None, c_rets=None, e_peak=None):
+    """A full synthetic receipt set under ``out/receipts``; arms in ``passing`` beat production on every test.
+    ``c_rets`` gives C's score curves their own returns (default: B's)."""
     rec = out / "receipts"
     b_rets = b_rets or [BASE] * len(GRID)
+    c_rets = c_rets or b_rets
     labels = ["production", "A", "B", *(["C"] if c_status == "ok" else []), "D", "E"]
     inner_r, inner_s, outer_r, outer_s = {}, {}, {}, {}
     for label in labels:
@@ -84,7 +86,7 @@ def _write(out, *, passing=(), c_status="ok", smoke=False, model=True, b_rets=No
     tuning("E", {n: {"k_share": {"0.75": 0.5, "1.25": 0.5}, "modal_share": 0.5, "same_k": False,
                      "candidates": 400, "no_feasible_k": 3, "curve": curve} for n in NAMES})
     if c_status == "ok":
-        tuning("C", {n: _unit((n,), 1.5, b_rets) for n in NAMES})
+        tuning("C", {n: _unit((n,), 1.5, c_rets) for n in NAMES})
 
 
 def _text(out):
@@ -152,6 +154,31 @@ def test_b_flatness_at_k_one_is_the_rule_flatness(tmp_path):
     assert report.assemble(tmp_path)["recommendation"] == "B"
     rule = json.loads((tmp_path / "proposed_rule.json").read_text(encoding="utf-8"))
     assert all(r["flatness_se"] == pytest.approx((0.05 - 0.04) / 0.01) for r in rule["rows"])
+
+
+def test_flat_note_takes_flatness_from_primary_curve_c_not_recommended_b(tmp_path):
+    # C's k = 1.0 flatness is 0.0 (constant curve); B's is 1.0 (FLAT_RETS). B is recommended, so the rule must print C's 0.0.
+    _write(tmp_path, passing=("B",), b_rets=FLAT_RETS, c_rets=[BASE] * len(GRID))
+    assert report.assemble(tmp_path)["recommendation"] == "B"
+    rule = json.loads((tmp_path / "proposed_rule.json").read_text(encoding="utf-8"))
+    assert all(r["flatness_se"] == pytest.approx(0.0) for r in rule["rows"])
+    text = _text(tmp_path)
+    assert "on arm C's per-structure curve" in text
+    assert "it is not arm B's own tuning curve" in text
+
+
+def test_flat_note_names_b_as_primary_curve_when_c_omitted(tmp_path):
+    _write(tmp_path, passing=("A",), c_status="fake_not_calibrated")
+    assert report.assemble(tmp_path)["recommendation"] == "A"
+    text = _text(tmp_path)
+    assert "on arm B's per-structure curve" in text
+    assert "it is not arm A's own tuning curve" in text
+
+
+def test_no_flat_note_for_no_change(tmp_path):
+    _write(tmp_path)
+    assert report.assemble(tmp_path)["recommendation"] == "no_change"
+    assert "flatness_se: T3's flatness" not in _text(tmp_path)
 
 
 def test_e_recommended_renders_the_e_sentence(tmp_path):
