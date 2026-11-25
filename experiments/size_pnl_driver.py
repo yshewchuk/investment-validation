@@ -15,8 +15,9 @@ import pandas as pd
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import fail
 from experiments import label_availability, size_pnl_decisions as decisions, size_pnl_inputs as inputs, size_pnl_ladder as ladder, size_pnl_prereg
-from experiments import size_pnl_readers as readers, size_pnl_shortvol as shortvol, size_pnl_straddle as straddle, size_pnl_receipts as receipts, size_pnl_equivalence as equivalence, size_pnl_outer_inputs as outer_inputs, size_pnl_gprod as gprod
+from experiments import size_pnl_readers as readers, size_pnl_receipts as receipts, size_pnl_equivalence as equivalence, size_pnl_outer_inputs as outer_inputs, size_pnl_gprod as gprod
 from experiments.size_pnl_pool import TOLERANCE, build_pool
+from experiments.size_pnl_pricing import SHORTVOL as shortvol, STRADDLE as straddle
 from experiments.size_pnl_shortvol import Refusal
 from experiments import size_pnl_report as report, size_pnl_synthetic as synthetic, size_pnl_synthetic_eval as synthetic_eval
 from experiments import size_pnl_breakeven as breakeven

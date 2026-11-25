@@ -75,6 +75,17 @@ Not yet verified on the real store. Before the full outer run, run the 50-ticker
 `outer_forecasts_hash_mismatch` or `outer_identity_mismatch` may appear. Record the result in #2658, then
 schedule the full run.
 
+## Pricing
+
+The short-vol and straddle books, the fast-path equivalence sample and G_PROD price through `size_pnl_pricing`:
+private copies of `size_pnl_shortvol` and `size_pnl_straddle` on `engine.chain_index.price_structure_indexed`.
+Synthetic tests show identical output to `engine.structures.price_structure`; the spec hash is unchanged, and no
+flag selects the pricer. Each copy keeps one chain snapshot per priced event of the current ladder chunk and drops
+them at the next chunk. On a synthetic chunk of 1,000 events with 82 rows each, that was about 34 MB RSS (short
+vol) plus 27 MB (straddle); real chunks differ, so take RSS from the smoke. `tools/bench_chain_index.py` measured a median 10.3x on pricing calls alone; it is not a
+measurement of this run's wall time. `ChainSnapshotMutated` means a snapshot changed after indexing: a bug to
+report, not to bypass.
+
 ## Exit codes and artifacts
 
 Exit 0 prints a JSON summary on stdout. Exit 2 prints `{"refused": code, "message": ..., "reason": ...}`;
