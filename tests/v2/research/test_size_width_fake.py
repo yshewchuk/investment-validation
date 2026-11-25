@@ -653,3 +653,72 @@ def test_labels_without_an_available_column_refuse_in_run_draw_and_run_anchor(mo
         fake.run_anchor(months, table, bare, sessions, draws=DRAW)
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.details["reason"] == "labels_availability_missing"
+
+
+# ---- empty pool slices and all-NaN forecasts (pandas 3 str-dtype map) -------
+
+def test_at_keeps_float64_for_empty_and_all_nan_forecasts_and_empty_pool_history_survives():
+    table, labels, _ = _world()
+    table, labels = table.iloc[:12], labels.iloc[:12]
+    pred = pd.Series(np.full(len(table), np.nan), index=[str(e) for e in table.index])
+    empty = fake._at(pred, table.index[:0])
+    assert empty.dtype == np.float64 and empty.shape == (0,)
+    allnan = fake._at(pred, table.index)
+    assert allnan.dtype == np.float64 and allnan.shape == (len(table),) and np.isnan(allnan).all()
+    out = pool_history(table.iloc[:0].assign(pred_move=fake._at(pred, table.index[:0])), labels)
+    assert out.empty
+
+
+def _smoke_world(nan_labels=False):
+    """Twelve rows E0..E11 with every event dated inside or after the first month (no row before 2024-05-01)."""
+    table, labels, _ = _world()
+    table, labels = table.iloc[:12], labels.iloc[:12]
+    dates = ["2024-05-10"] * 6 + ["2024-06-10"] * 6
+    table = table.assign(event_date=pd.to_datetime(dates))
+    if nan_labels:
+        labels = labels.assign(abs_move=np.nan)
+    return table, labels
+
+
+@pytest.mark.parametrize("kind", ["anchor", "draw"])
+@pytest.mark.parametrize("nan_labels", [False, True], ids=["finite", "all_nan"])
+def test_smoke_world_with_empty_first_pool_slice_survives_with_no_trades(kind, nan_labels, monkeypatch):
+    _small_window(monkeypatch)
+    table, labels = _smoke_world(nan_labels)
+    months, sessions = _months()
+    if kind == "anchor":
+        res = fake.run_anchor(months, table, labels, sessions, draws=DRAW)
+    else:
+        res = fake.run_draw(months, table, labels, MODEL, 0, sessions, draws=DRAW)
+    assert set(res) == set(NAMES)
+    assert all(set(res[name]) == set(GRID) for name in NAMES)
+    assert all(res[name][k]["trades"] == 0 for name in NAMES for k in GRID)
+
+
+def test_at_returns_finite_forecasts_at_their_own_ids():
+    pred = pd.Series([1.5, np.nan, 3.5], index=["1", "2", "3"])
+    out = fake._at(pred, pd.Index([3, 1, 2, 9]))  # integer ids, other order, one absent
+    assert out.dtype == np.float64
+    np.testing.assert_array_equal(out, [3.5, 1.5, np.nan, np.nan])
+
+
+def test_anchor_sweep_continues_past_an_empty_pool_slice_with_forecasts_at_their_ids(monkeypatch):
+    _small_window(monkeypatch)
+    table, labels = _smoke_world()
+    months, sessions = _months()
+    seen = []
+    orig = fake.Sweep.add_month
+
+    def spy(self, chunk, events, *args, **kwargs):
+        seen.append(events)
+        return orig(self, chunk, events, *args, **kwargs)
+
+    monkeypatch.setattr(fake.Sweep, "add_month", spy)
+    fake.run_anchor(months, table, labels, sessions, draws=DRAW)
+    assert len(seen) == len(months) == 2
+    for events in seen:
+        assert len(events) > 0
+        got = events["pred_move"].to_numpy(dtype=float)
+        want = labels["abs_move"].reindex(events["event_id"].astype(str)).to_numpy(dtype=float)
+        np.testing.assert_array_equal(got, want)
+        assert np.isfinite(got).all()
