@@ -416,3 +416,29 @@ def test_reader_returns_an_empty_frame_with_the_quote_columns_when_nothing_match
     monkeypatch.setattr(_snapshot, "read_table", lambda repo, snap, table, columns, **kw: pd.DataFrame(columns=list(columns)))
     out = wf.option_chain_reader(_Repo(fvi.QUOTE_COLUMNS, ["2024"]), "snap")(EXPIRIES)
     assert out.empty and list(out.columns) == fvi.QUOTE_COLUMNS
+
+
+def test_table_prices_with_unit_scaled_vol_and_rate(tmp_path):
+    frames = _frames()
+    fq, chunk = _setup(tmp_path, frames, DEFAULT_PLAN)  # pinned vols 25.0 and rates 5.0 / 4.0 percent, scaled by 0.01
+    got = fq.table(chunk)
+    got = got[got["ticker"] == "AAA"]
+    rows = frames[("AAA", _ts(ENTRY))][fvi.QUOTE_COLUMNS].reset_index(drop=True)
+    days = 39  # (EXPIRY - ENTRY).days, by hand
+    assert (_ts(EXPIRY) - _ts(ENTRY)).days == days
+    rate = 0.05 + (days - 35) / (365 - 35) * (0.04 - 0.05)  # by hand: 5wk and long rates blended on days
+    rows["rate"] = rate
+    vols = rows[fvi.VOL_KEYS].drop_duplicates().assign(smvVol=0.25)
+    want = fvf.leg_fills(rows, vols)
+    got = got.set_index(["right", "strike"])
+    want = want.set_index(["right", "strike"])
+    assert len(got) == len(want) == 82
+    got = got.loc[want.index]
+    for col in ("V", "vol", "rate", "fill_buy", "fill_sell"):
+        np.testing.assert_allclose(got[col].to_numpy(dtype=float), want[col].to_numpy(dtype=float), err_msg=col)
+    assert (got["status"] == "ok").all()
+    assert (got["source"] == "smvvol").all()
+    np.testing.assert_allclose(got["vol"].to_numpy(dtype=float), 0.25)
+    put = got.loc[("P", 100.0)]
+    assert put["bid"] <= put["V"] <= put["ask"]
+    assert put["rate"] == pytest.approx(rate)
