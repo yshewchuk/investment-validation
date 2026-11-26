@@ -406,6 +406,20 @@ def test_month_decider_enforces_label_availability():
     assert dict(zip(FEATURES, recorder.seen[0]))["pred_abs_move_sd"] > 5  # the filter, not the data, decides
 
 
+def test_nan_mcap_fact_passes_the_universe_and_the_gate_withholds(tmp_path):
+    """The event's mcap_usd fact is NaN, so the universe check passes it (production passes a missing market cap), and its
+    gate_inputs row carries a NaN. The fixture gate has no mcap_log feature (its features are x0..x44 plus the five model
+    columns), so the NaN is put in x3, a plain non-model input. The real month_decider must answer undetermined/gate_input_nan,
+    not universe_filter."""
+    inputs = inputs_frame(["m"])
+    inputs.loc[inputs["event_id"] == "m", "x3"] = float("nan")
+    gate = gp.load_gate(write_gate_files(tmp_path, inputs=inputs))
+    table, labels = history()
+    out = gp.month_decider(gate, table, labels, START)(pd.DataFrame([ev("m", 3.0, mcap=float("nan"))]), good("m")).set_index("event_id")
+    assert out.loc["m", "status"] == "undetermined" and out.loc["m", "reason"] == "gate_input_nan"
+    assert pd.isna(out.loc["m", "mcap_usd"])
+
+
 def test_label_availability_boundary_is_the_month_start():
     table, labels = history()
     edge = [f"B{i}" for i in range(5)]
