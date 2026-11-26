@@ -1,8 +1,7 @@
 """EXP-190 Q5: per-event and per-cell metrics (design section 5).
 
 This slice holds the per-event and per-cell metrics only: pinball, coverage, CRPS,
-crossing rate, level-only width L and within-cell scores. A later slice adds tables,
-bootstraps and the pass rule. The settlements applied here are "supervisor-recommended
+crossing rate, level-only width L and within-cell scores. The settlements applied here are "supervisor-recommended
 2026-11-25" (design section 5).
 
 Pure functions over numpy arrays and pandas DataFrames: no I/O, no logging, no

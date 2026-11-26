@@ -158,6 +158,60 @@ def assert_terciles(got, exp):
             assert got.loc[key, col] == pytest.approx(v)
 
 
+def oracle_resid(score, q50):
+    """Residual of rank(score) on rank(q50) with an intercept (polyfit); centred if q50 is constant."""
+    rs, rq = rankdata(score), rankdata(q50)
+    if np.ptp(rq) == 0:
+        return rs - rs.mean()
+    return rs - np.polyval(np.polyfit(rq, rs, 1), rq)
+
+
+def oracle_terc(score, q50, ids):
+    """Tercile labels of the within-cell residual rank, ties broken by id (cell_scores orders by residual)."""
+    return tercile_labels(oracle_resid(score, q50), ids)
+
+
+PERIOD_MEMBERS = (("2023H2", ["2023Q3", "2023Q4"]), ("2024", [f"2024Q{k}" for k in range(1, 5)]),
+                  ("2025", [f"2025Q{k}" for k in range(1, 5)]))
+ROW_COLS = ["quarter", "period", "ticker", "bucket", "y", *QCOLS, *[f"b0_{c}" for c in QCOLS], "W", "L", "e",
+            "level_reason", "zero_median", "used", "W_contribution", "W_tercile", "L_contribution", "L_tercile"]
+
+
+def weighted_panel():
+    """Like panel(), but 2024Q1 holds two B0 cells of 50 and 30 events. W and e are distinct within each quarter."""
+    rows = []
+    for qi, qu in enumerate(QUARTERS):
+        start = pd.Period(qu, freq="Q").start_time
+        layout = [(2.0, 50), (3.0, 30)] if qu == "2024Q1" else [(2.0, N)]
+        j = 0
+        for bucket, count in layout:
+            for _ in range(count):
+                q50 = 1.0 + 0.05 * qi
+                rows.append({"id": f"{qu}-{j:02d}", "event_date": start + pd.Timedelta(days=j % 28),
+                             "ticker": TICKERS[(j + qi) % len(TICKERS)], "y": q50 + 0.01 * ((11 * j) % 80 + 1),
+                             "m0": 1.5, "m3": 2.0, "q50": q50, "W": 0.5 + 0.01 * ((7 * j) % 80),
+                             "bucket": bucket})
+                j += 1
+    df = pd.DataFrame(rows).set_index("id")
+    events = df[["event_date", "ticker", "y", "m0", "m3"]]
+    arm = arm_frame(df.index, df["q50"].to_numpy(float), df["W"].to_numpy(float))
+    b0 = b0_frame(df.index, df["y"].to_numpy(float), df["bucket"].to_numpy(float))
+    return events, arm, b0
+
+
+def zero_median_fixture():
+    """q50 varies inside each cell; two 2024Q1 events have q50 0 (zero median). Level width varies with q50."""
+    def q50_of(qu, i):
+        return 0.0 if (qu == "2024Q1" and i < 2) else 1.0 + P[i] / 128
+
+    def y_of(qu, i, q50):
+        return E[i] if q50 == 0.0 else q50 + E[i]
+
+    events, arm, b0 = panel(q50_of=q50_of, y_of=y_of)
+    res = judge_arm("Q", arm, b0, events, hist(HQ, HY, ["2022-12-01"] * 600), resamples=R)
+    return events, arm, b0, res
+
+
 # ---------- 1. walking skeleton ----------
 
 def test_walking_skeleton_passes_all_rules_with_oracle_values():
@@ -203,6 +257,28 @@ def test_partial_spearman_residualises_q50_ranks_with_polyfit():
     for p, members in (("2023H2", ["2023Q3", "2023Q4"]), ("2024", [f"2024Q{k}" for k in range(1, 5)]),
                        ("2025", [f"2025Q{k}" for k in range(1, 5)])):
         assert periods.loc[p, "W_spearman"] == pytest.approx(np.mean([rho[x] for x in members]))
+
+
+def test_period_values_weight_cells_by_n_not_per_cell_means():
+    events, arm, b0 = weighted_panel()
+    res = judge_arm("Q", arm, b0, events, const_hist(), resamples=R)
+    qu, ids, y, q, W, e = arrays(events, arm)
+    bucket = b0["bucket"].to_numpy(float)
+    cells = [("2024Q1", 2.0), ("2024Q1", 3.0), ("2024Q2", 2.0), ("2024Q3", 2.0), ("2024Q4", 2.0)]
+    n, rho, dif = [], [], []
+    for x, b in cells:
+        m = (qu == x) & (bucket == b)
+        lab = tercile_labels(W[m], ids[m])
+        n.append(int(m.sum()))
+        rho.append(oracle_partial(W[m], e[m], q[m, 3]))
+        dif.append(e[m][lab == 2].mean() - e[m][lab == 0].mean())
+    assert n[0] == 50 and n[1] == 30
+    w_rho, w_dif = np.average(rho, weights=n), np.average(dif, weights=n)
+    u_rho, u_dif = np.mean(rho), np.mean(dif)
+    periods = res["conditional"]["periods"].set_index("period")
+    assert periods.loc["2024", "W_spearman"] == pytest.approx(w_rho)
+    assert periods.loc["2024", "W_tercile_diff"] == pytest.approx(w_dif)
+    assert u_rho != pytest.approx(w_rho) and u_dif != pytest.approx(w_dif)
 
 
 # ---------- 3. rule 2 negative controls ----------
@@ -290,6 +366,26 @@ def test_every_period_passing_with_a_pooled_low_end_at_or_below_zero_fails(monke
     assert res["conditional"]["passed"] is False and res["verdict"] == "fail"
 
 
+def test_seed_reaches_the_pooled_bootstrap():
+    events, arm, b0 = panel()
+    qu, _, _, q, W, e = arrays(events, arm)
+    d = np.concatenate([oracle_contrib(W[qu == x], e[qu == x], q[qu == x, 3]) for x in QUARTERS])
+    # Tickers by within-quarter index i: sort the 40 positions by mean contribution, cut into 8 unequal blocks.
+    d_by_i = d.reshape(len(QUARTERS), N).mean(axis=0)
+    tick_of_i = np.empty(N, dtype=object)
+    block = np.repeat(np.arange(8), [2, 3, 4, 5, 6, 6, 7, 7])
+    tick_of_i[np.argsort(d_by_i, kind="stable")] = [f"T{k}" for k in block]
+    events = events.copy()
+    events["ticker"] = np.tile(tick_of_i, len(QUARTERS))
+    groups = events["ticker"].to_numpy()
+    res7 = judge_arm("Q", arm, b0, events, const_hist(), resamples=R, seed=7)
+    res188 = judge_arm("Q", arm, b0, events, const_hist(), resamples=R)
+    w7, w188 = res7["conditional"]["W_interval"], res188["conditional"]["W_interval"]
+    assert w7 == pytest.approx(oracle_boot(d, groups, seed=7))
+    assert w188 == pytest.approx(oracle_boot(d, groups))
+    assert not np.allclose(np.array(w7), np.array(w188))
+
+
 # ---------- 5. level-width burn-in ----------
 
 def test_burn_in_removes_events_from_conditional_tests_only():
@@ -368,6 +464,70 @@ def test_zero_median_is_excluded_from_ratio_only_and_warns_nothing():
     assert cond["periods"].set_index("period").loc["2024", "W_spearman"] == pytest.approx(np.mean(rho_w))
 
 
+def test_ratio_periods_interval_and_terciles_match_oracles():
+    events, arm, b0, res = zero_median_fixture()
+    qu, ids, y, q, W, e = arrays(events, arm)
+    cur = q[:, 3]
+    zero = cur <= 1e-9
+    keep = ~zero
+    ratio = W / np.where(zero, 1.0, cur)
+    ratio_n, ratio_rho, ratio_dif = {}, {}, {}
+    lab, d = np.full(len(W), -1), np.full(len(W), np.nan)
+    for x in QUARTERS:
+        m = (qu == x) & keep
+        ratio_n[x] = int(m.sum())
+        ratio_rho[x] = oracle_partial(ratio[m], e[m], cur[m])
+        lab[m] = oracle_terc(ratio[m], cur[m], ids[m])
+        d[m] = oracle_contrib(ratio[m], e[m], cur[m])
+        ratio_dif[x] = e[m][lab[m] == 2].mean() - e[m][lab[m] == 0].mean()
+    cond = res["conditional"]
+    rp = cond["ratio"]["periods"].set_index("period")
+    for p, members in PERIOD_MEMBERS:
+        ns = [ratio_n[x] for x in members]
+        assert rp.loc[p, "spearman"] == pytest.approx(np.average([ratio_rho[x] for x in members], weights=ns))
+        assert rp.loc[p, "tercile_diff"] == pytest.approx(np.average([ratio_dif[x] for x in members], weights=ns))
+    assert cond["ratio"]["interval"] == pytest.approx(oracle_boot(d[keep], events["ticker"].to_numpy()[keep]))
+    per = np.array([period_of(x) for x in qu])
+    assert_terciles(cond["ratio"]["terciles"], expected_terciles(
+        per[keep], lab[keep], y[keep], e[keep], q[keep, 0], q[keep, 1], q[keep, 5], q[keep, 6]))
+    assert rp.loc["2024", "spearman"] != pytest.approx(cond["periods"].set_index("period").loc["2024", "W_spearman"])
+
+
+def test_raw_rows_match_oracles():
+    events, arm, b0, res = zero_median_fixture()
+    qu, ids, y, q, W, e = arrays(events, arm)
+    cur = q[:, 3]
+    zero = cur <= 1e-9
+    L = oracle_L(HQ, HY, cur)
+    n = len(W)
+    wc, wt, lc, lt = (np.full(n, np.nan) for _ in range(4))
+    for x in QUARTERS:
+        m = qu == x
+        wc[m] = oracle_contrib(W[m], e[m], cur[m])
+        wt[m] = oracle_terc(W[m], cur[m], ids[m])
+        lc[m] = oracle_contrib(L[m], e[m], cur[m])
+        lt[m] = oracle_terc(L[m], cur[m], ids[m])
+    rows = res["conditional"]["rows"]
+    assert list(rows.columns) == ROW_COLS
+    assert rows.index.tolist() == list(res["paired_ids"])
+    assert rows["quarter"].tolist() == qu.tolist()
+    assert rows["period"].tolist() == [period_of(x) for x in qu]
+    assert rows["ticker"].tolist() == events["ticker"].tolist()
+    np.testing.assert_allclose(rows["bucket"].to_numpy(float), b0["bucket"].to_numpy(float))
+    np.testing.assert_allclose(rows["y"].to_numpy(float), y)
+    np.testing.assert_allclose(rows[QCOLS].to_numpy(float), q)
+    np.testing.assert_allclose(rows[[f"b0_{c}" for c in QCOLS]].to_numpy(float), b0[QCOLS].to_numpy(float))
+    np.testing.assert_allclose(rows["W"].to_numpy(float), W)
+    np.testing.assert_allclose(rows["L"].to_numpy(float), L)
+    np.testing.assert_allclose(rows["e"].to_numpy(float), e)
+    assert rows["zero_median"].tolist() == zero.tolist()
+    assert rows["used"].all() and (rows["level_reason"] == "").all()
+    np.testing.assert_allclose(rows["W_contribution"].to_numpy(float), wc)
+    np.testing.assert_allclose(rows["W_tercile"].to_numpy(float), wt)
+    np.testing.assert_allclose(rows["L_contribution"].to_numpy(float), lc)
+    np.testing.assert_allclose(rows["L_tercile"].to_numpy(float), lt)
+
+
 # ---------- 9. refusals ----------
 
 @pytest.mark.parametrize("case, message", [
@@ -426,6 +586,12 @@ def test_other_arm_names_get_no_verdict(name):
     assert res["conditional"]["passed"] is True
 
 
+def test_q_raw_run_gets_a_pass_verdict():
+    events, arm, b0 = panel()
+    res = judge_arm("Q_raw", arm, b0, events, const_hist(), resamples=R)
+    assert res["verdict"] == "pass"
+
+
 # ---------- 11. Stage A truth table ----------
 
 def jr(arm, verdict, reasons=()):
@@ -442,6 +608,10 @@ def jr(arm, verdict, reasons=()):
     (None, jr("Q_raw", "pass"), "passed", {"Q": "not_testable", "Q_raw": "pass"}, ["Q:calibration_failed"], ["Q_raw"]),
     (None, jr("Q_raw", "fail"), "not_passed", {"Q": "not_testable", "Q_raw": "fail"}, ["Q:calibration_failed"], []),
     (jr("Q", "pass"), None, "not_testable", {"Q": "pass", "Q_raw": "not_testable"}, ["Q_raw:fit_failed"], []),
+    (jr("Q", "pass"), jr("Q_raw", "not_testable", ["2024:period_no_paired_events"]), "passed",
+     {"Q": "pass", "Q_raw": "not_testable"}, ["Q_raw:2024:period_no_paired_events"], ["Q"]),
+    (jr("Q", "not_testable", ["2023H2:no_usable_cell"]), jr("Q_raw", "pass"), "passed",
+     {"Q": "not_testable", "Q_raw": "pass"}, ["Q:2023H2:no_usable_cell"], ["Q_raw"]),
 ])
 def test_stage_a_truth_table(q, q_raw, status, arms, reasons, stage_b):
     out = stage_a_verdict(q, q_raw)
@@ -454,5 +624,5 @@ def test_stage_a_truth_table(q, q_raw, status, arms, reasons, stage_b):
     (jr("Q", None), jr("Q_raw", "pass")),
 ])
 def test_stage_a_refuses_wrong_arm_names_and_missing_verdicts(q, q_raw):
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="must be a judge_arm result"):
         stage_a_verdict(q, q_raw)
