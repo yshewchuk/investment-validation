@@ -103,7 +103,7 @@ stage_a:
   bootstrap: {resamples: 10000, interval_percentile: 90, seed: "fixed"}
   flags: "pooled pinball loss to B1, B2 or B3 is flagged in headline, not gated"
   verdict: "Stage A passes if Q or Q_raw passes. Each passing arm enters Stage B with own verdict. Two eligible arms give two tries, uncorrected. Otherwise Stage B not run."
-  selection_period_disclosure: "report states: grid for year Y uses earlier years; B3 identity, feature set, grid values used 2023-2024; Stage A gate uses 2023H2-2025. No feature set, grid value, configuration or baseline identity was selected by scoring 2025. 2025 is not a clean test or holdout: the Stage A gate reads it (Stage B scores it after a pass that read 2025 outcomes), and 2025 results shaped the design, EXP-188's among them (D15 as revised by the user, 2026-11-26). Only the forward period after data end is independent."
+  selection_period_disclosure: "report states: grid for year Y uses earlier years; B3 identity, feature set, grid values used 2023-2024; Stage A gate uses 2023H2-2025. No feature set, grid value, configuration or baseline identity was selected by scoring 2025 (baselines here are B0-B3; Stage B's control arm E was recommended after its 2025 results were seen). 2025 is not a clean test or holdout: the Stage A gate reads it (Stage B scores it after a pass that read 2025 outcomes), and 2025 results shaped the design, EXP-188's and EXP-189's among them (D15 as revised by the user, 2026-11-26). Only the forward period after data end is independent."
 
 failure_semantics:
   R1: "panel, folds, dictionary, M0 or M3 series do not bind: refuse EXPERIMENT_IDENTITY_CONFLICT; nothing rebuilt or imputed. A merely absent M3 year is B3 not_testable."
