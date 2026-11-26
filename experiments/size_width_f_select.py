@@ -41,13 +41,13 @@ def fill_model(spec):
 
 
 def open_run(fill, inputs=None, plan=None, expected_snapshot_id=None, *, root=None):
-    """The run boundary: None (current marks) with no selection; else the F run's pricing and binding, or a refusal before any read."""
+    """The run boundary: None (current marks) with no selection; else the F run's pricing and binding, or a refusal before any quote is read."""
     if fill is None:
         if inputs is not None: raise fvi.FairValueRefusal("f_inputs_unexpected", "F inputs were given, but the spec selects no F")
         return None
     _validate(fill)
     if inputs is None: raise fvi.FairValueRefusal("f_inputs_missing", "the spec selects F: pass its pinned inputs (--f-pins and --f-quotes)")
-    if not callable(inputs.read_quotes): raise fvi.FairValueRefusal("f_quotes_invalid", "read_quotes is not callable")
+    size_width_f_quotes.admit_inputs(inputs.pins, inputs.read_quotes)
     r = fill["reingest"] if isinstance(fill.get("reingest"), dict) else {}
     rules, pins = fill.get("rate_rules"), inputs.pins
     if not (all(k in fill for k in ("carry_dividend_mode", "rate_rules", "vol_scale", "rate_scale", "reingest")) and isinstance(rules, dict) and set(rules) == set(fvi.RATE_RULE_VALUES)
@@ -57,9 +57,6 @@ def open_run(fill, inputs=None, plan=None, expected_snapshot_id=None, *, root=No
             and all(isinstance(k, str) and isinstance(v, str) for k, v in r["manifest_units"].items())):
         raise fvi.FairValueRefusal("fill_model_invalid", "fill_model lacks a field, or its rate rules, reingest path, hash or units are malformed")
     if fill["carry_dividend_mode"] != MODE: raise fvi.FairValueRefusal("carry_dividend_mode", "the carry and dividend mode is not the registered one")
-    if not (isinstance(pins, dict) and isinstance(pins.get("manifest_sha256"), str) and isinstance(pins.get("files"), dict) and pins["files"]
-            and all(isinstance(k, str) and isinstance(v, str) for k, v in pins["files"].items())):
-        raise fvi.FairValueRefusal("pins_invalid", "pins need a manifest_sha256 string and a non-empty str-to-str files dict")
     tables = Path(paths.ROOT if root is None else root) / r["path"]
     vol, rate = fvi._unit_scale(fill["vol_scale"], "vol_scale"), fvi._unit_scale(fill["rate_scale"], "rate_scale")
     blob = fvi._read_capped(tables / "manifest.json", fvi.MAX_MANIFEST_BYTES, "manifest.json") if (tables / "manifest.json").is_file() else b""

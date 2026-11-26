@@ -36,10 +36,17 @@ def ladder_rows(rows, *, entry):
     return rows.iloc[np.sort(order[~drop])].reset_index(drop=True), int(drop.sum())
 
 
-def _admit(plan, pins):
-    """Refuse malformed pins (pins_invalid) or plans (plan_invalid) before anything is stored or read."""
-    if not (isinstance(pins, dict) and isinstance(pins.get("manifest_sha256"), str) and isinstance(pins.get("files"), dict)):
-        raise fvi.FairValueRefusal("pins_invalid", "pins need a manifest_sha256 string and a files dict")
+def admit_inputs(pins, read_quotes):
+    """Refuse a non-callable reader (f_quotes_invalid) or malformed pins (pins_invalid) before any quote is read or stored."""
+    if not callable(read_quotes):
+        raise fvi.FairValueRefusal("f_quotes_invalid", "read_quotes is not callable")
+    if not (isinstance(pins, dict) and isinstance(pins.get("manifest_sha256"), str) and isinstance(pins.get("files"), dict) and pins["files"]
+            and all(isinstance(k, str) and isinstance(v, str) for k, v in pins["files"].items())):
+        raise fvi.FairValueRefusal("pins_invalid", "pins need a manifest_sha256 string and a non-empty str-to-str files dict")
+
+
+def _admit(plan):
+    """Refuse a malformed plan (plan_invalid) before anything is stored or read."""
     cols = ["event_id", "ticker", "entry_date", "exit_date"]
     if not isinstance(plan, pd.DataFrame) or any(c not in plan.columns for c in cols):
         raise fvi.FairValueRefusal("plan_invalid", "plan must be a DataFrame with event_id, ticker, entry_date, exit_date")
@@ -72,7 +79,8 @@ class FQuotes:
                  rate_rules=None):
         if not (isinstance(snapshot_id, str) and snapshot_id and snapshot_id == expected_snapshot_id):
             raise fvi.FairValueRefusal("snapshot_binding", "snapshot ids are missing or differ")
-        _admit(plan, pins)
+        admit_inputs(pins, read_quotes)
+        _admit(plan)
         self._plan = plan.set_axis(plan["event_id"].astype(str).to_numpy(), axis=0)
         self._read, self._root, self._pins, self._rules = read_quotes, tables_root, pins, dict(rate_rules or {})
         self._ids, self._scales = (snapshot_id, expected_snapshot_id), (vol_scale, rate_scale)

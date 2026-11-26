@@ -391,6 +391,24 @@ def test_malformed_pins_are_refused_before_any_read(tmp_path, pins):
     assert calls == []
 
 
+@pytest.mark.parametrize("edit", [
+    pytest.param(lambda pins: pins.update(files={}), id="empty-files"),
+    pytest.param(lambda pins: pins["files"].update({"quotes/year=2024/month=02.parquet": None}), id="file-hash-not-str"),
+])
+def test_direct_construction_refuses_pins_invalid_before_any_read(tmp_path, edit):
+    calls = []
+    with pytest.raises(FairValueRefusal) as exc:
+        _setup(tmp_path, _frames(), DEFAULT_PLAN, read=_reader(_base(_frames()), calls), pins_edit=edit)
+    _refused(exc, "pins_invalid")
+    assert calls == []
+
+
+def test_direct_construction_refuses_a_non_callable_reader_before_any_read(tmp_path):
+    with pytest.raises(FairValueRefusal) as exc:
+        _setup(tmp_path, _frames(), DEFAULT_PLAN, read="nope")  # truthy, so _setup keeps it; a string cannot be called
+    _refused(exc, "f_quotes_invalid")
+
+
 BAD_PLANS = [
     pytest.param(DEFAULT_PLAN.drop(columns="event_id"), id="missing-event_id"),
     pytest.param(_plan(("E0", "AAA", ENTRY, EXIT), ("E0", "BBB", ENTRY, EXIT)), id="duplicate-event_id"),
@@ -411,7 +429,7 @@ def test_malformed_plan_is_refused_before_any_read(tmp_path, plan):
     calls = []
     with pytest.raises(FairValueRefusal) as exc:
         wf.FQuotes(plan, _reader(_base(_frames()), calls), tables_root=tmp_path,
-                   pins={"manifest_sha256": "0" * 64, "files": {}}, snapshot_id="snap-1",
+                   pins={"manifest_sha256": "0" * 64, "files": {"quotes/year=2024/month=01.parquet": "0" * 64}}, snapshot_id="snap-1",
                    expected_snapshot_id="snap-1", vol_scale=0.01, rate_scale=0.01)
     _refused(exc, "plan_invalid")
     assert calls == []
