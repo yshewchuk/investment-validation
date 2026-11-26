@@ -90,6 +90,8 @@ def bind_series(plan, read, binding, admit):
 
 def b3_quantiles(table, labels, events, bound):
     """B0's construction with donors whose pred_move is the bound B3 series; crush forecast and date stay B0's."""
+    if table.index.has_duplicates:
+        raise ValueError("table has a duplicate index")
     series = bound["series"]
     bound_years = [year for year, status in bound["years"].items() if status == "bound"]
     unbound = ~pd.to_datetime(events["event_date"]).dt.year.astype(str).isin(bound_years).to_numpy()

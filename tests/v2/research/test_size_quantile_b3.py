@@ -332,11 +332,13 @@ def test_no_bound_year_makes_every_event_not_testable():
     assert out[QCOLS].isna().all().all()
 
 
-def test_duplicate_table_index_still_raises():
+@pytest.mark.parametrize("dup", ["d000", "o010"])
+def test_duplicate_table_index_still_raises(dup):
+    """o010 is a 2022 donor outside the series, so only the source-table check can catch its duplicate."""
     table, labels = _world()
-    dup = pd.concat([table, table.iloc[[0]]])
+    doubled = pd.concat([table, table.loc[[dup]]])
     with pytest.raises(ValueError, match="table has a duplicate index"):
-        b3_quantiles(dup, labels, _events(table), _bound())
+        b3_quantiles(doubled, labels, _events(table), _bound())
 
 
 def test_binding_changes_when_one_inner_prediction_changes():
