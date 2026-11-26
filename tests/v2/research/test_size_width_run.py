@@ -15,6 +15,7 @@ from tests.v2.research import test_size_pnl_driver as pnl
 
 RUN = Path(__file__).resolve().parents[3] / "experiments" / "EXP-189_short_vol_width_tuning" / "run.py"
 CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
+INVALID = "INVALID_EXPERIMENT_SPEC"
 OK = lambda: {"spec_hash": "SPEC", "spec_hash_checked": True}  # noqa: E731
 NO_SOURCES = "no_such_module_exp189:make"
 FAKE = "exp189_fake_sources:make"
@@ -210,7 +211,8 @@ def test_one_f_flag_alone_refuses_before_the_sources_are_imported(tmp_path, monk
 
     _install(monkeypatch, make)
     assert run_py.main(_argv(tmp_path, "--f-pins", _pins_file(tmp_path), sources=FAKE)) == 2
-    assert json.loads(capsys.readouterr().out)["reason"] == "f_inputs_incomplete"
+    refused = json.loads(capsys.readouterr().out)
+    assert refused["refused"] == INVALID and refused["reason"] == "f_inputs_incomplete"
     assert calls == []
 
 
@@ -225,7 +227,8 @@ def test_f_quotes_alone_refuses_f_inputs_incomplete_before_the_sources_are_built
 
     _install(monkeypatch, make)
     assert run_py.main(_argv(tmp_path, "--f-quotes", QUOTES, sources=FAKE)) == 2
-    assert json.loads(capsys.readouterr().out)["reason"] == "f_inputs_incomplete"
+    refused = json.loads(capsys.readouterr().out)
+    assert refused["refused"] == INVALID and refused["reason"] == "f_inputs_incomplete"
     assert calls == []
 
 
@@ -258,7 +261,8 @@ def test_a_bad_f_quotes_return_refuses_f_quotes_invalid(tmp_path, monkeypatch, c
     _install_quotes(monkeypatch, lambda args: bad)
     _no_driver(monkeypatch)
     assert run_py.main(_argv(tmp_path, "--f-pins", _pins_file(tmp_path), "--f-quotes", QUOTES, sources=FAKE)) == 2
-    assert json.loads(capsys.readouterr().out)["reason"] == "f_quotes_invalid"
+    refused = json.loads(capsys.readouterr().out)
+    assert refused["refused"] == INVALID and refused["reason"] == "f_quotes_invalid"
 
 
 def test_a_fair_value_refusal_from_the_driver_prints_its_reason_and_returns_2(tmp_path, monkeypatch, capsys):
