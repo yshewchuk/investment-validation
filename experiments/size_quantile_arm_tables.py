@@ -112,8 +112,8 @@ def evaluate_arm(name, arm, b0, events, *, raw=None, resamples=RESAMPLES, seed=S
                 adm, pai = int(pm.sum()), int((paired & pm).sum())
                 s = pai / adm if adm else NAN
                 share.append([p, adm, pai, s, bool(s < MIN_SCORED_SHARE)])
-            reasons = [f"{p}:period_no_paired_events" if pai == 0 else f"{p}:scored_share_below_floor"
-                       for p, _, pai, _, low in share[:-1] if pai == 0 or low]
+            reasons = [f"{p}:{r}" for p, _, pai, _, low in share[:-1]
+                       for r, hit in (("period_no_paired_events", pai == 0), ("scored_share_below_floor", low)) if hit]
             if len(set(a["quarter"])) < 2 or len(set(a["ticker"])) < 2:
                 reasons.append("bootstrap_too_few_groups")
             rows = [_row("pooled", "pooled", np.ones(len(y), bool), a)]
@@ -140,7 +140,7 @@ def evaluate_arm(name, arm, b0, events, *, raw=None, resamples=RESAMPLES, seed=S
                      f"accuracy passed={acc} quarters_below={quarters_below} calibration passed={cal}")
             return {"arm": name, "status": status, "not_testable_reasons": reasons,
                     "share": pd.DataFrame(share, columns=["period", "admitted", "paired", "share", "below_floor"]),
-                    "drops": drops, "tables": pd.DataFrame(rows),
+                    "drops": drops, "paired_ids": pid, "tables": pd.DataFrame(rows),
                     "accuracy": {"periods_below": periods_below, "quarters_below": quarters_below,
                                  "quarter_interval": iv["quarter"], "ticker_interval": iv["ticker"],
                                  "passed": acc},

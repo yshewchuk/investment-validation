@@ -982,9 +982,9 @@ EXP-190 (`guides/size_quantile_move_design.md`; uncalled): `size_quantile_prereg
 `size_quantile_b3`: unbound year→`not_testable`; `b3_{plan_mismatch,series_unbound}`, `duplicate_event_id`; binder refusals propagate.
 `size_quantile_fits`: `panel_*`, `feature_*`, `selection_*`, `fixed_parameters_mismatch`, `training_label_invalid`, `fold_inputs_invalid`, `grid_invalid`, `RESOURCE_LIMIT_EXCEEDED`.
 `size_quantile_walk.fit_walk_forward` write-once `fit_<year>.json`: gap→`years_not_contiguous`; changed/invalid receipt→`fit_receipt_{changed,unreadable}`; memory/oversize-publish→`RESOURCE_LIMIT_EXCEEDED`; fit `ValueError`→`fit_failed`, stops.
-`size_quantile_calibration` (uncalled) calibrates/tails Q, Q_raw: unscored `non_finite_output`/`calibration_burn_in`/`tail_pool_thin`; bad input `ValueError`; memory `RESOURCE_LIMIT_EXCEEDED`.
+`size_quantile_calibration` calibrates/tails Q, Q_raw: unscored `non_finite_output`/`calibration_burn_in`/`tail_pool_thin`; bad input `ValueError`; memory `RESOURCE_LIMIT_EXCEEDED`.
 `size_quantile_arm_s.fit_arm_s` write-once `arm_s_fit_<year>.json`: `raw_receipt_mismatch`, walk receipt refusals, `RESOURCE_LIMIT_EXCEEDED`; `fit_failed` year continues; `scale_burn_in`.
-`size_quantile_arm_tables.evaluate_arm`: `scored_share_below_floor`/`period_no_paired_events`/`bootstrap_too_few_groups`→`not_testable`; bad input `ValueError`; memory `RESOURCE_LIMIT_EXCEEDED`.
+`size_quantile_arm_{tables.evaluate_arm,verdict.{judge_arm,stage_a_verdict}}`: `scored_share_below_floor`/`period_no_paired_events`/`bootstrap_too_few_groups`/`no_usable_cell`/`conditional_bootstrap_too_few_groups`/`calibration_failed`(Q-arm-only)/`fit_failed`(also-Stage-A)→`not_testable`; bad input `ValueError`; memory `RESOURCE_LIMIT_EXCEEDED`.
 
 ## Fill model F
 
