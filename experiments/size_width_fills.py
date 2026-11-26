@@ -1,24 +1,46 @@
 """EXP-189 fill-model seam: the marks through which the width sweep's entries and exits are priced.
 
 The default is today's marks (EXP-188's own functions, called, never copied). A later PR plugs another model in via
-``size_width_pricing.load(fills=...)`` without touching the sweep. Rung-3 rows (value 0.0, defined-risk floor) and strike
-resolution are rules of ``score``, not marks, and do not pass through the seam.
+``size_width_pricing.load(fills=...)`` without touching the sweep. Rung-3 rows (value 0.0, defined-risk floor) still
+bypass the seam: their exit flags are all False. Strike resolution is a rule of ``score``, not a mark, and stays there.
 """
 import typing
 
 from experiments import size_pnl_shortvol as sv
 
 
-class Fills(typing.Protocol):
-    def entry(self, priced): ...   # (entry cost per share, mean relative spread) or None; ``priced`` is an engine.structures.StructurePrice
+class Trade(typing.NamedTuple):
+    chunk: typing.Any   # the ladder chunk
+    i: int              # event index into the chunk
+    event_id: str
+    structure: str
+    legs: tuple         # every resolved leg dict, reference legs of qty 0 included
 
-    def exit_value(self, chunk, traded, alpha, mid=False): ...   # per-share exit value of the traded legs (dicts with idx into chunk, side, qty)
+
+class Skip(typing.NamedTuple):
+    reason: str         # a counted non-trade with its own reason
+
+
+class Exit(typing.NamedTuple):
+    value: float
+    flags: frozenset = frozenset()
+    unquoted: bool = False   # the whole structure is at the defined-risk floor: value must be 0.0
+
+
+class Fills(typing.Protocol):
+    exit_flags: tuple   # names of the boolean flag columns this model adds to score rows
+
+    def entry(self, trade, priced): ...   # (entry cost per share, mean relative spread), None, or Skip
+
+    def exit_value(self, trade, traded, alpha, mid=False): ...   # float or Exit; traded legs as in size_pnl_shortvol
 
 
 class CurrentFills:
     """Today's marks: size_pnl_shortvol.entry and size_pnl_shortvol._exit_value."""
-    def entry(self, priced):
+    exit_flags = ()
+
+    def entry(self, trade, priced):
         return sv.entry(priced)
 
-    def exit_value(self, chunk, traded, alpha, mid=False):
-        return sv._exit_value(chunk, traded, alpha, mid=mid)
+    def exit_value(self, trade, traded, alpha, mid=False):
+        return sv._exit_value(trade.chunk, traded, alpha, mid=mid)
