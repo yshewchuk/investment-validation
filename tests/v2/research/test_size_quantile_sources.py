@@ -13,10 +13,11 @@ from engine.v2.data.errors import DataError
 from engine.v2.data.errors import fail as data_fail
 from engine.v2.foundation import content_hash, to_document
 from engine.v2.ops.errors import OpsError
-from engine.v2.research.derived_features import LOG_COLUMNS, derived_names
+from engine.v2.research.derived_features import LOG_COLUMNS, PRODUCT_PAIRS, derived_names
 from engine.v2.research.magnitude_panel_qualified_table import recipe
 from experiments import size_panel
 from experiments import size_quantile_sources as qsrc
+from experiments.size_pnl_readers import admit_events as REAL_ADMIT_EVENTS
 from experiments.size_search_binding import SCHEMA
 from tests.v2.research.test_magnitude_panel_qualified import panel_data  # noqa: F401  (fixture)
 
@@ -40,6 +41,14 @@ def _refusal(exc):
     return exc.value.problem.code, exc.value.problem.details.get("reason")
 
 
+def _assert_message(exc, reason):
+    message = exc.value.problem.message
+    if reason in ("plan_malformed", "snapshot_mismatch"):  # raised by size_pnl_sources: non-empty only
+        assert message
+    else:
+        assert message.startswith(f"{reason}: ")
+
+
 def _plan():
     dictionary = recipe("HMOSXLP")
     candidate = {"candidate_id": "c1", "source_binding_id": PANEL_ID,
@@ -56,8 +65,8 @@ def _rows():
 @pytest.fixture
 def world(monkeypatch):
     st = types.SimpleNamespace(
-        calls=[], panel_args=[], binding_doc=COMPACT, plan=_plan(), rows=_rows(), admitted=["e1", "e2", "e4"],
-        panel_error=None, resolved={"snap-1": SNAP, "feat-1": FEAT},
+        calls=[], panel_args=[], admit_args=[], binding_doc=COMPACT, plan=_plan(), rows=_rows(),
+        admitted=["e1", "e2", "e4"], panel_error=None, resolved={"snap-1": SNAP, "feat-1": FEAT},
         document={"schema_version": SCHEMA, "snapshot": SNAP, "holdouts": {"holdout_as_of_month": "2025-01-01"},
                   "size_panel": {"context": {"context_id": "ctx-1", "target_events": copy.deepcopy(TARGETS)},
                                  "feature_snapshot": FEAT}})
@@ -72,10 +81,12 @@ def world(monkeypatch):
         return st.plan
 
     def snapshot(repository, snapshot_id):
+        st.calls.append(("resolve", snapshot_id))
         return copy.deepcopy(st.resolved[snapshot_id])
 
     def admit(repository, snap, month, *, max_object_bytes):
         st.calls.append("admit")
+        st.admit_args.append((repository, snap, month, max_object_bytes))
         return {"events": {"event_id": list(st.admitted)}}
 
     def read(repository, feature, context, columns, lineage=True):
@@ -109,6 +120,11 @@ def test_happy_path_filters_sorts_and_keeps_only_lead_one_admitted_rows(world):
     assert sealed["dictionary_hash"] == recipe("HMOSXLP")["dictionary_hash"]
     assert sealed["model_columns"] == recipe("HMOSXLP")["model_columns"]
     assert world.panel_args == [(tuple(HMOSX), False)]
+    assert ("bound", "snap-1") in world.calls and ("bound", "feat-1") in world.calls
+    assert world.calls.index(("bound", "snap-1")) < world.calls.index(("resolve", "snap-1"))
+    assert world.calls.index(("resolve", "snap-1")) < world.calls.index("admit")
+    assert world.calls.index(("bound", "feat-1")) < world.calls.index(("resolve", "feat-1"))
+    assert world.calls.index(("resolve", "feat-1")) < world.calls.index("panel")
 
 
 def test_none_values_stay_missing_through_the_derived_columns(world):
@@ -131,6 +147,40 @@ def test_binding_is_stable_and_follows_the_admitted_event_set(world):
     assert _load()["binding"] != first
 
 
+def test_binding_names_plan_panel_snapshot_dictionary_and_sorted_events(world):
+    expected = content_hash({"plan_id": "plan-1", "panel_id": PANEL_ID, "snapshot_id": "snap-1",
+                             "dictionary_hash": recipe("HMOSXLP")["dictionary_hash"],
+                             "event_ids": ["e4", "e1", "e2"]})
+    assert _load()["binding"] == expected
+
+
+def test_derived_columns_are_computed_from_the_source_values(world):
+    values = {name: 2.0 + index for index, name in enumerate(LOG_COLUMNS)}
+    world.rows[0].update(values)  # e1 at horizon 1
+    row = next(r for r in _load()["rows"] if r["event_id"] == "e1")
+    assert row[f"log1p_{LOG_COLUMNS[0]}"] == pytest.approx(math.log1p(values[LOG_COLUMNS[0]]))
+    left, right = PRODUCT_PAIRS[0]
+    assert row[f"{left}_x_{right}"] == pytest.approx(values[left] * values[right])
+
+
+def test_admit_receives_repository_snapshot_month_and_default_cap(world):
+    _load()
+    assert world.admit_args == [("repo", SNAP, "2025-01-01", qsrc.MAX_OBJECT_BYTES)]
+
+
+def test_explicit_byte_cap_is_forwarded_to_admission(world):
+    qsrc.load_sealed_panel(CONN, STORE, SPEC, PLAN_REF, max_object_bytes=123)
+    assert world.admit_args[0][3] == 123
+
+
+def test_real_admission_refuses_a_zero_byte_cap_before_the_panel_read(world, monkeypatch):
+    monkeypatch.setattr(qsrc, "admit_events", REAL_ADMIT_EVENTS)
+    with pytest.raises(OpsError) as exc:
+        qsrc.load_sealed_panel(CONN, STORE, SPEC, PLAN_REF, max_object_bytes=0)
+    assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "max_object_bytes_invalid")
+    assert "panel" not in world.calls
+
+
 def _no_hgb_subset(st):
     st.plan["candidates"][0]["feature_recipe"]["subset"] = "HMO"
 
@@ -141,6 +191,13 @@ def _wrong_hash(st):
 
 def _wrong_columns(st):
     st.plan["candidates"][0]["feature_recipe"]["model_columns"] = list(reversed(recipe("HMOSXLP")["model_columns"]))
+
+
+def _second_candidate_wrong_hash(st):
+    second = copy.deepcopy(st.plan["candidates"][0])
+    second["candidate_id"] = "c2"
+    second["feature_recipe"]["dictionary_hash"] = "sha256:bad"
+    st.plan["candidates"].append(second)
 
 
 def _snapshot_extra(st):
@@ -175,6 +232,7 @@ REFUSALS = [
     pytest.param(_no_hgb_subset, "dictionary_mismatch", id="dictionary_no_candidate"),
     pytest.param(_wrong_hash, "dictionary_mismatch", id="dictionary_wrong_hash"),
     pytest.param(_wrong_columns, "dictionary_mismatch", id="dictionary_wrong_columns"),
+    pytest.param(_second_candidate_wrong_hash, "dictionary_mismatch", id="dictionary_second_candidate_wrong_hash"),
     pytest.param(_snapshot_extra, "snapshot_mismatch", id="snapshot_mismatch"),
     pytest.param(_feature_extra, "panel_mismatch", id="panel_feature_differs"),
     pytest.param(_no_admitted, "admission_empty", id="admission_empty"),
@@ -190,6 +248,7 @@ def test_refusals_stop_before_the_panel_read(world, mutate, reason):
     with pytest.raises(OpsError) as exc:
         _load()
     assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", reason)
+    _assert_message(exc, reason)
     assert "panel" not in world.calls
 
 
@@ -199,6 +258,7 @@ def test_panel_read_refusal_codes_become_panel_mismatch(world, code):
     with pytest.raises(OpsError) as exc:
         _load()
     assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "panel_mismatch")
+    assert exc.value.problem.message.startswith("panel_mismatch: ")
     assert exc.value.__cause__ is None
 
 
@@ -215,10 +275,15 @@ def test_refusal_classes_are_not_treated_as_malformed_documents():
 
 
 @pytest.fixture
-def labels(monkeypatch):
+def frame():
+    out = pd.DataFrame({"event_id": ["e1"], "absolute_move_pct": [3.0]})
+    out.attrs["omitted_labels"] = []
+    return out
+
+
+@pytest.fixture
+def labels(monkeypatch, frame):
     calls = []
-    frame = pd.DataFrame({"event_id": ["e1"], "absolute_move_pct": [3.0]})
-    frame.attrs["omitted_labels"] = []
 
     def fake(repository, snapshot, *, as_of_month, labels_before, event_ids):
         calls.append({"repository": repository, "snapshot": snapshot, "as_of_month": as_of_month,
@@ -237,6 +302,8 @@ def test_unadmitted_label_request_refuses_before_the_reader(labels):
     with pytest.raises(OpsError) as exc:
         qsrc.training_labels(SEALED, ["e1", "e9"], CUTOFF)
     assert _refusal(exc) == ("HOLDOUT_ACCESS_DENIED", "key_not_admitted")
+    assert exc.value.problem.message == "requested event ids are not admitted"
+    assert "e9" not in exc.value.problem.message
     assert labels == []
 
 
@@ -245,15 +312,20 @@ def test_invalid_event_ids_refuse_before_the_reader(labels, event_ids):
     with pytest.raises(OpsError) as exc:
         qsrc.training_labels(SEALED, event_ids, CUTOFF)
     assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "event_ids_invalid")
+    assert exc.value.problem.message == "event_ids must be a non-empty list of unique strings"
     assert labels == []
 
 
-def test_admitted_ids_reach_the_reader_with_snapshot_month_and_cutoff(labels, capsys):
-    frame = qsrc.training_labels(SEALED, ("e2", "e1"), CUTOFF)
+def test_admitted_ids_reach_the_reader_with_snapshot_month_and_cutoff(labels, frame, capsys):
+    returned = qsrc.training_labels(SEALED, ("e2", "e1"), CUTOFF)
     assert labels == [{"repository": "repo", "snapshot": "snap", "as_of_month": "2025-01-01",
                        "labels_before": CUTOFF, "event_ids": ["e2", "e1"]}]
-    assert list(frame["event_id"]) == ["e1"]
-    assert "[quantile_labels] requested=2 qualified=1 omitted=0" in capsys.readouterr().err
+    assert returned is frame
+    assert list(returned["event_id"]) == ["e1"]
+    assert list(returned["absolute_move_pct"]) == [3.0]
+    err = capsys.readouterr().err
+    assert "[quantile training labels] start" in err
+    assert "[quantile_labels] requested=2 qualified=1 omitted=0" in err
 
 
 def test_module_source_never_calls_the_rederiving_readers():

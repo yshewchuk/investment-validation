@@ -110,9 +110,10 @@ def training_labels(sealed, event_ids, labels_before):
     if not set(event_ids) <= {e["event_id"] for e in sealed["events"]}:
         raise fail("HOLDOUT_ACCESS_DENIED", "requested event ids are not admitted",
                    details={"reason": "key_not_admitted"})
-    frame = qualify_magnitude_training_targets(sealed["repository"], sealed["snapshot"],
-                                               as_of_month=sealed["as_of_month"], labels_before=labels_before,
-                                               event_ids=list(event_ids))
+    with stage("quantile training labels"):
+        frame = qualify_magnitude_training_targets(sealed["repository"], sealed["snapshot"],
+                                                   as_of_month=sealed["as_of_month"], labels_before=labels_before,
+                                                   event_ids=list(event_ids))
     omitted = len(frame.attrs.get("omitted_labels", []))
     print(f"[quantile_labels] requested={len(event_ids)} qualified={len(frame)} omitted={omitted} "
           f"labels_before={labels_before}", file=sys.stderr)
