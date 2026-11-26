@@ -108,8 +108,7 @@ def outer(frozen, flex_inner, rec, months, total, base, out, inputs_hash, sessio
     label_t = target(rec)
     labels = ["production"] + ([label_t] if label_t not in (None, "production") else [])
     window = WINDOWS["2025"]
-    fbs = _run({label: frozen[label] for label in labels}, months, total, out, inputs_hash, sessions, pricing, True, "outer",
-               getattr(base, "store", None))
+    fbs = _run({label: frozen[label] for label in labels}, months, total, out, inputs_hash, sessions, pricing, True, "outer", getattr(base, "store", None))
     sets = {}
     for label in labels:
         phis = {}

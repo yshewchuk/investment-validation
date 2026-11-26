@@ -16,7 +16,6 @@ Public interface (W7b1 and W7d build on this; nothing else is public):
   fair value or rate took V = mid) and ``exit_negative``. An F-``unpriceable`` leg gives ``Exit(0.0, unquoted=True)``
   with no flags: the seam labels that row's rung ``exit_unquoted_worst_case``, as it does a ladder rung 3.
 - ``exit_value_at_v(trade)`` -> float: the positive-quantity legs closed at V with no concession (NaN when a leg is unpriceable).
-- ``was_priced(trade)`` -> bool: True iff the ENTRY result of these legs is already computed for the trade's chunk (computes nothing).
 - ``entry_result(trade)`` / ``exit_result(trade)`` -> F's own ``fair_value_fills.EntryResult`` / ``ExitResult`` (the
   three debits, spread sum, sensitivities, per-leg flags) for the same legs.
 
@@ -45,7 +44,7 @@ class FFills:
         self._quotes, self._chunk, self._memo = quotes, None, {}
         self.quotes = quotes
 
-    def was_priced(self, trade):
+    def was_priced(self, trade):  # True iff the ENTRY result of these legs is already computed for the trade's chunk (computes nothing)
         return trade.chunk is self._chunk and _memo_key(trade, trade.legs, False) in self._memo
 
     def _result(self, trade, legs, exit):

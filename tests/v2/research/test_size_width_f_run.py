@@ -437,7 +437,8 @@ def test_the_report_input_receipts_bind_every_table_and_match_the_stage_summarie
             assert entry["bytes"] == file.stat().st_size
         assert tables["rows"] == sum(e["rows"] for e in entries.values())
         assert tables["bytes"] == sum(e["bytes"] for e in entries.values())
-        assert tables["leg_rows"] == sum(e["rows"] for n, e in entries.items() if n.startswith("legs_"))
+        legs_files = sorted((out / "report_inputs" / stage).glob("legs_*.parquet"))
+        assert sum(entries[p.stem]["rows"] for p in legs_files) == sum(len(pd.read_parquet(p)) for p in legs_files)
 
 
 def test_every_taken_trade_has_entry_and_exit_legs_on_the_same_contracts_and_no_duplicates(tmp_path, monkeypatch, m0, stubbed):

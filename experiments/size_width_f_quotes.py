@@ -87,7 +87,8 @@ class FQuotes:
         self._read, self._root, self._pins, self._rules = read_quotes, tables_root, pins, dict(rate_rules or {})
         self._ids, self._scales = (snapshot_id, expected_snapshot_id), (vol_scale, rate_scale)
         self.counts, self.table_hashes, self._chunk, self._tables = Counter(), {}, None, {}
-        self._built, self.coverage = {}, []
+        self._built = {}
+        self.coverage = []
 
     def table(self, chunk, *, exit=False):
         """Built once per (quarter chunk, side) and kept for the run (A1.7 R2)."""

@@ -78,10 +78,11 @@ def test_a_fallback_taken_row_is_labelled_with_its_phi_and_sorted_factors(tmp_pa
     assert len(store.keys) == 2  # the entry and the exit leg of the one taken row
 
 
-def test_close_with_nothing_recorded_writes_empty_tables_and_no_leg_rows(tmp_path):
+def test_close_with_nothing_recorded_writes_empty_tables_and_no_legs_part(tmp_path):
     st.Store(tmp_path, "inner", Stub({})).close("H", "W")
     receipt = receipts.load_receipt(tmp_path / "receipts" / "report_inputs_inner.json")
-    assert receipt["leg_rows"] == 0 and receipt["tables"]["coverage"]["rows"] == 0 and receipt["tables"]["exit_flags"]["rows"] == 0
+    assert receipt["tables"]["coverage"]["rows"] == 0 and receipt["tables"]["exit_flags"]["rows"] == 0
+    assert not any(name.startswith("legs_") for name in receipt["tables"])
 
 
 def test_open_store_is_none_for_current_pricing(tmp_path):
