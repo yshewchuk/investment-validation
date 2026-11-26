@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 
 import numpy as np
 import pandas as pd
@@ -18,6 +19,14 @@ NAN = float("nan")
 ABSENT = object()
 OK_Q = {"files": 1, "rows": 4, "unreadable": 0, "unrecognized": 0}
 OK_R = {"files": 1, "rows": 2, "unreadable": 0, "unrecognized": 0, "extra_key": 7}
+UNITS = {"borrow30": "percent", "borrow2yr": "percent", "divAmt": "dollars_per_share"}
+
+
+def _carry(n):
+    """Carry columns for n loaded rate rows: borrow in percent (divided by 100 on load), no dividend."""
+    return {"borrow30": [10.0] * n, "borrow2yr": [10.0] * n, "divAmt": [0.0] * n, "divDate": pd.to_datetime([None] * n),
+            "annIdiv": [0.0] * n, "annActDiv": [0.0] * n, "assetType": [1.0] * n}
+
 
 QUOTES = pd.DataFrame({
     "ticker": ["AAA"] * 4,
@@ -34,10 +43,7 @@ RATES = pd.DataFrame({
     "obs_date": pd.to_datetime(["2024-01-02"] * 2),
     "iRate5wk": [5.3, 30.0],
     "iRateLt": [4.1, 4.1],
-    "borrow30": [0.2, 0.2],
-    "annIdiv": [0.0, 0.0],
-    "divDate": ["", ""],
-    "assetType": ["stock", "stock"],
+    **_carry(2),
 })
 # Lookup fixture: queries at obs 2024-01-10 (see LOOKUP_CASES).
 LOOKUP_RATES = pd.DataFrame({
@@ -46,7 +52,7 @@ LOOKUP_RATES = pd.DataFrame({
                                 "2024-01-10", "2024-01-03", "2024-01-10", "2024-01-12"]),
     "iRate5wk": [5.0, 30.0, 30.0, 5.0, 5.0, 5.0, 5.0, NAN, 5.0],
     "iRateLt": [4.0, 4.0, -9.0, 4.0, 4.0, NAN, 4.0, NAN, 4.0],
-    "borrow30": 0.1, "annIdiv": 0.0, "divDate": "x", "assetType": "stock",
+    **_carry(9),
 })
 
 
@@ -60,7 +66,7 @@ def _mani(q=OK_Q, r=OK_R):
         tables["quotes"] = q
     if r is not None:
         tables["rates"] = r
-    return {"version": "3", "tables": tables, "dividend_fields": {}, "extra_top": 1}
+    return {"version": "3", "tables": tables, "units": UNITS, "dividend_fields": {}, "extra_top": 1}
 
 
 def _setup(tmp_path, files=None, manifest=None):
@@ -120,7 +126,7 @@ def test_happy_load_selects_columns_scales_and_hashes(tmp_path):
     root, file_sha, manifest_sha = _setup(tmp_path)
     tables = _load(root, file_sha, manifest_sha)
     assert list(tables.vols.columns) == fvi.VOL_KEYS + ["smvVol"]
-    assert list(tables.rates.columns) == fvi.RATE_KEYS + fvi.RATE_COLUMNS
+    assert list(tables.rates.columns) == fvi.RATE_KEYS + fvi.RATE_COLUMNS + fvi.CARRY_COLUMNS
     vols = tables.vols.set_index("strike")["smvVol"]
     assert vols[100.0] == pytest.approx(0.25)
     assert vols[[110.0, 90.0, 95.0]].isna().all()
@@ -157,7 +163,7 @@ def test_load_rate_bounds_inclusive_after_conversion(tmp_path):
     rates = pd.DataFrame({
         "ticker": ["AAA", "BBB", "CCC", "DDD"], "obs_date": pd.to_datetime(["2024-01-02"] * 4),
         "iRate5wk": [-5.0, 20.0, -5.01, 4.0], "iRateLt": [-5.0, 20.0, 4.0, 20.01],
-        "borrow30": 0.2, "annIdiv": 0.0, "divDate": "", "assetType": "stock",
+        **_carry(4),
     })
     root, file_sha, manifest_sha = _setup(tmp_path, files={RATE_REL: rates})
     got = _load(root, file_sha, manifest_sha).rates.set_index("ticker")
@@ -536,6 +542,7 @@ def test_lookup_rate_is_independent_of_row_order():
         "obs_date": pd.to_datetime(["2024-01-02", "2024-01-08", "2024-01-08", "2024-01-02"]),
         "iRate5wk": [0.02, 0.06, 0.07, 0.04],
         "iRateLt": [0.02, 0.05, 0.06, 0.03],
+        **_carry(4),
     })
     rows = pd.concat([_query("BBB", "2024-01-10", 200), _query("AAA", "2024-01-10", 0), _query("AAA", "2024-01-03", 0),
                       _query("BBB", "2024-01-10", 0), _query("AAA", "2024-01-09", 200), _query("AAA", "2024-01-10", 365)],
@@ -669,7 +676,7 @@ def test_lookup_rate_missing_rate_column_refused(column):
 
 def _rate_table(obs, r5=0.05, rl=0.04):
     n = len(obs)
-    return pd.DataFrame({"ticker": ["AAA"] * n, "obs_date": obs, "iRate5wk": [r5] * n, "iRateLt": [rl] * n})
+    return pd.DataFrame({"ticker": ["AAA"] * n, "obs_date": obs, "iRate5wk": [r5] * n, "iRateLt": [rl] * n, **_carry(n)})
 
 
 @pytest.mark.parametrize("rows", ["one-row", "empty-rows"])
@@ -750,7 +757,7 @@ def _coverage_tables():
     vols = pd.DataFrame({"ticker": ["AAA"], "obs_date": pd.to_datetime(["2024-01-02"]),
                          "expiry": pd.to_datetime(["2024-02-16"]), "strike": [100.0], "smvVol": [0.25]})
     rates = pd.DataFrame({"ticker": ["AAA"], "obs_date": pd.to_datetime(["2024-01-02"]),
-                          "iRate5wk": [0.05], "iRateLt": [0.04]})
+                          "iRate5wk": [0.05], "iRateLt": [0.04], **_carry(1)})
     return fvi.InputTables(vols=vols, rates=rates, hashes={}, rate_rules={})
 
 
@@ -878,7 +885,7 @@ EDGE_RATES = pd.DataFrame({
                                 "2024-01-10", "2024-01-10", "2024-01-05", "2024-01-10"]),
     "iRate5wk": [4.0, 30.0, 4.0, NAN, 4.0, NAN, NAN, 4.0, float("inf")],
     "iRateLt": [4.0, 3.0, 4.0, NAN, 4.0, NAN, 3.0, 4.0, 3.0],
-    "borrow30": 0.1, "annIdiv": 0.0, "divDate": "x", "assetType": "stock",
+    **_carry(9),
 })
 EDGE_EXPECT = {
     ("missing", "rate_unknown"): {"A": 0.03, "B": NAN, "C": NAN, "D": 0.03, "E": 0.03},
@@ -899,9 +906,105 @@ def test_rate_rule_combinations_on_edge_rows(tmp_path, combo):
 
 def test_duplicate_rate_key_with_both_rows_empty_refused_under_earlier_row(tmp_path):
     dup = pd.DataFrame({"ticker": ["A", "A"], "obs_date": pd.to_datetime(["2024-01-10"] * 2),
-                        "iRate5wk": [NAN, NAN], "iRateLt": [NAN, NAN]})
+                        "iRate5wk": [NAN, NAN], "iRateLt": [NAN, NAN], **_carry(2)})
     root, file_sha, manifest_sha = _setup(tmp_path, files={RATE_REL: dup})
     with pytest.raises(FairValueRefusal) as exc:
         _load(root, file_sha, manifest_sha, rate_empty_row="earlier_row")
     _refused(exc, "duplicate_key")
     assert exc.value.details["table"] == "rates"
+
+
+@pytest.mark.parametrize("units", [
+    None,
+    "percent",
+    {"borrow30": "decimal", "borrow2yr": "percent", "divAmt": "dollars_per_share"},
+    {"borrow30": "percent", "borrow2yr": "percent", "divAmt": "cents"},
+    {"borrow30": "percent", "divAmt": "dollars_per_share"},
+], ids=["missing", "not-object", "borrow-decimal", "divamt-cents", "borrow2yr-absent"])
+def test_input_unit_refused(tmp_path, units):
+    manifest = _mani()
+    if units is None:
+        del manifest["units"]
+    else:
+        manifest["units"] = units
+    root, file_sha, manifest_sha = _setup(tmp_path, manifest=manifest)
+    with pytest.raises(FairValueRefusal) as exc:
+        _load(root, file_sha, manifest_sha)
+    _refused(exc, "input_unit")
+
+
+@pytest.mark.parametrize("column", fvi.CARRY_COLUMNS)
+def test_missing_carry_column_refused(tmp_path, column):
+    root, file_sha, manifest_sha = _setup(tmp_path, files={RATE_REL: RATES.drop(columns=[column])})
+    with pytest.raises(FairValueRefusal) as exc:
+        _load(root, file_sha, manifest_sha)
+    _refused(exc, "required_column")
+    assert exc.value.details["columns"] == [column]
+
+
+def test_borrow_percent_divided_explicitly_bounds_inclusive_and_counted(tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger="fair_value_inputs")
+    rates = RATES.assign(borrow30=[-100.0, 20.01], borrow2yr=[20.0, np.inf])
+    root, file_sha, manifest_sha = _setup(tmp_path, files={RATE_REL: rates})
+    got = _load(root, file_sha, manifest_sha, rate_scale=0.0001).rates.set_index("ticker")  # rate_scale does not touch borrow
+    assert got.loc["AAA", "borrow30"] == pytest.approx(-1.0) and got.loc["AAA", "borrow2yr"] == pytest.approx(0.2)
+    assert np.isnan(got.loc["BBB", "borrow30"]) and np.isnan(got.loc["BBB", "borrow2yr"])  # 0.2001 and inf
+    assert "borrow_out_of_range=2" in caplog.text
+
+
+def test_negative_dividend_kept_and_missing_div_date_is_nat(tmp_path):
+    rates = RATES.assign(divAmt=[-0.5, 1.25], divDate=pd.to_datetime(["2024-03-01", None]))
+    root, file_sha, manifest_sha = _setup(tmp_path, files={RATE_REL: rates})
+    got = _load(root, file_sha, manifest_sha).rates.set_index("ticker")
+    assert got.loc["AAA", "divAmt"] == -0.5 and got.loc["BBB", "divAmt"] == 1.25  # the pricer rules decide, not the loader
+    assert got.loc["AAA", "divDate"] == pd.Timestamp("2024-03-01") and pd.isna(got.loc["BBB", "divDate"])
+
+
+def _one_rate(**over):
+    """One AAA rate row on 2024-01-02 with decimal carry, for direct lookup_inputs calls (no load)."""
+    row = {"ticker": ["AAA"], "obs_date": pd.to_datetime(["2024-01-02"]), "iRate5wk": [0.05], "iRateLt": [0.04],
+           "borrow30": [0.02], "borrow2yr": [0.03], "divAmt": [0.0], "divDate": pd.to_datetime([None]),
+           "annIdiv": [0.0], "annActDiv": [0.0], "assetType": [1.0]}
+    return pd.DataFrame({**row, **over})
+
+
+def test_lookup_inputs_takes_every_carry_field_from_the_selected_row():
+    rates = pd.DataFrame({
+        "ticker": ["AAA", "AAA"], "obs_date": pd.to_datetime(["2023-12-31", "2024-01-02"]),
+        "iRate5wk": [0.05, 0.06], "iRateLt": [0.04, 0.05], "borrow30": [0.02, np.nan], "borrow2yr": [0.03, 0.03],
+        "divAmt": [0.0, 0.5], "divDate": pd.to_datetime(["2024-01-20", "2024-02-01"]),
+        "annIdiv": [0.0, 0.0], "annActDiv": [0.0, 0.0], "assetType": [1.0, 1.0],
+    })
+    got = fvi.lookup_inputs(_query("AAA", "2024-01-03", 30), rates).iloc[0]
+    # The 2024-01-02 row is selected; its missing borrow30 is not filled from the 2023-12-31 row.
+    assert np.isnan(got["borrow30"]) and got["borrow2yr"] == pytest.approx(0.03)
+    assert got["divAmt"] == 0.5 and got["divDate"] == pd.Timestamp("2024-02-01") and got["rate"] == pytest.approx(0.06)
+
+
+def test_lookup_inputs_no_row_gives_nan_and_nat():
+    got = fvi.lookup_inputs(_query("ZZZ", "2024-01-03", 30), _one_rate())
+    assert got["divDate"].isna().all() and got.drop(columns="divDate").isna().all().all()
+
+
+def test_lookup_inputs_empty_frames_keep_columns_and_datetime_dates():
+    empty = fvi.lookup_inputs(_query("AAA", "2024-01-03", 30).iloc[:0], _one_rate())
+    assert empty.empty and list(empty.columns) == ["rate"] + fvi.CARRY_COLUMNS
+    assert empty["divDate"].dtype == "datetime64[ns]"
+    none = fvi.lookup_inputs(_query("AAA", "2024-01-03", 30), _one_rate().iloc[:0])
+    assert len(none) == 1 and none["divDate"].dtype == "datetime64[ns]" and pd.isna(none["divDate"].iloc[0])
+
+
+@pytest.mark.parametrize("bad", [0.21, -1.01, np.inf, -np.inf])
+def test_lookup_inputs_out_of_range_borrow_refused(bad):
+    with pytest.raises(FairValueRefusal) as exc:
+        fvi.lookup_inputs(_query("AAA", "2024-01-03", 30), _one_rate(borrow2yr=[bad]))
+    _refused(exc, "table_value")
+    assert exc.value.details["columns"] == ["borrow2yr"]
+
+
+@pytest.mark.parametrize("column", fvi.CARRY_COLUMNS)
+def test_lookup_inputs_missing_carry_column_refused(column):
+    with pytest.raises(FairValueRefusal) as exc:
+        fvi.lookup_inputs(_query("AAA", "2024-01-03", 30), _one_rate().drop(columns=[column]))
+    _refused(exc, "required_column")
+    assert exc.value.details["columns"] == [column]

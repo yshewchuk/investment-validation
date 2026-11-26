@@ -42,6 +42,9 @@ def quotes_frame(rows, expiry=EXP):
     df.insert(0, "ticker", "XYZ")
     df.insert(1, "obs_date", OBS)
     df.insert(2, "expiry", expiry)
+    # No carry input by default: borrow missing gives b = r, and no dividend.
+    df["borrow30"], df["borrow2yr"], df["divAmt"] = np.nan, np.nan, 0.0
+    df["divDate"] = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
     return df
 
 
@@ -372,7 +375,8 @@ def test_output_columns_and_passthrough():
     q = quotes_frame(rows)
     out = legs.leg_values(q, vols_frame())
     assert list(out.columns) == ["ticker", "obs_date", "expiry", "strike", "right", "status", "V", "vol",
-                                 "source", "rate", "clamp_side", "repaired", "eff_bid", "eff_ask"]
+                                 "source", "rate", "b", "carry_fallback", "dividend_fallback", "dividend_applied",
+                                 "clamp_side", "repaired", "eff_bid", "eff_ask"]
     for name in ("ticker", "obs_date", "expiry", "strike", "right", "rate"):
         assert out[name].tolist() == q[name].tolist(), name
     assert out.repaired.tolist() == q.quote_repaired.tolist() == [False, True, False]
@@ -491,3 +495,65 @@ def test_published_anchor_through_leg_values():
     V = dict(zip(out.right, out.V))
     assert V["C"] == pytest.approx(10.4506, abs=1e-4)  # Black-Scholes textbook value
     assert V["P"] == pytest.approx(6.090, abs=0.01)  # published American put value
+
+
+@pytest.mark.parametrize("column", ["borrow30", "borrow2yr", "divAmt", "divDate"])
+def test_missing_carry_column_refused(column):
+    q = quotes_frame(smile_rows(BASE, iv_curve)).drop(columns=[column])
+    with pytest.raises(legs.FairValueRefusal) as info:
+        legs.leg_values(q, vols_frame())
+    assert info.value.details == {"reason": "column_missing", "table": "quotes", "columns": [column]}
+
+
+# (borrow30, borrow2yr, divAmt, divDate in days from obs or None, b, carry_fallback, dividend_fallback, applied)
+CARRY_CASES = [
+    (0.02, 0.03, 0.0, None, 0.02, False, False, False),    # 30 days: borrow30; divAmt 0 is known, no dividend
+    (np.nan, 0.03, 0.0, None, 0.03, False, False, False),  # borrow30 missing: borrow2yr used
+    (np.nan, np.nan, 0.0, None, RATE, True, False, False),  # both missing: b = r, flagged
+    (0.02, 0.03, 0.5, 15, 0.02, False, False, True),       # ex-date 15 days out: applied
+    (0.02, 0.03, -1.0, 15, 0.02, False, True, False),      # negative amount: fallback
+    (0.02, 0.03, 0.5, None, 0.02, False, True, False),     # no divDate: fallback
+    (0.02, 0.03, 0.5, 45, 0.02, False, False, False),      # after expiry: known, no dividend
+    (0.02, 0.03, 0.5, 30, 0.02, False, False, True),       # divDate == expiry: still applied
+]
+
+
+@pytest.mark.parametrize("b30, b2, amt, days, b, carry_fb, div_fb, div_ok", CARRY_CASES)
+def test_carry_and_dividend_flags_per_case(b30, b2, amt, days, b, carry_fb, div_fb, div_ok):
+    q = quotes_frame(smile_rows(BASE, iv_curve, bid=0.0, ask=1000.0))  # wide quotes: no clamping
+    q["borrow30"], q["borrow2yr"], q["divAmt"] = b30, b2, amt
+    if days is not None:
+        q["divDate"] = OBS + pd.Timedelta(days=days)
+    out = legs.leg_values(q, vols_frame())
+    assert set(out.status) == {"ok"}
+    np.testing.assert_allclose(out.b.to_numpy(), b, rtol=0, atol=1e-12)
+    assert out.carry_fallback.tolist() == [carry_fb] * len(out)
+    assert out.dividend_fallback.tolist() == [div_fb] * len(out)
+    assert out.dividend_applied.tolist() == [div_ok] * len(out)
+
+
+def test_unpriced_and_expiring_rows_have_no_b_or_flags():
+    q = quotes_frame(smile_rows(BASE, iv_curve, bid=0.0, ask=1000.0))
+    extra = [
+        quotes_frame([(90.0, "C", 0.0, 1000.0, 0.25, SPOT, False, RATE)], expiry=OBS),  # T = 0
+        quotes_frame([(77.5, "P", np.nan, 1.5, 0.25, SPOT, False, RATE)]),              # unpriceable
+        quotes_frame([(77.5, "P", 0.0, 1000.0, 0.25, SPOT, False, np.nan)]),            # rate_unknown
+    ]
+    q = pd.concat([q] + extra, ignore_index=True)
+    q["divAmt"], q["divDate"] = 0.5, OBS + pd.Timedelta(days=15)  # would apply if the row were priced
+    out = legs.leg_values(q, vols_frame())
+    tail = out.iloc[-3:]
+    assert tail.status.tolist() == ["ok", "unpriceable", "rate_unknown"]
+    assert tail.b.isna().all()
+    assert not tail[["carry_fallback", "dividend_fallback", "dividend_applied"]].to_numpy().any()
+    assert out.b.iloc[:-3].notna().all()
+
+
+def test_dividend_changes_value_but_not_smile_vol():
+    base_q = quotes_frame(smile_rows(BASE, iv_curve, bid=0.0, ask=1000.0))
+    base = legs.leg_values(base_q, vols_frame())
+    out = legs.leg_values(base_q.assign(divAmt=3.0, divDate=OBS + pd.Timedelta(days=15)), vols_frame())
+    assert out.dividend_applied.all()
+    np.testing.assert_array_equal(out.vol.to_numpy(), base.vol.to_numpy())  # fit and k keep the unadjusted spot
+    calls = (out.right == "C").to_numpy()
+    assert (out.V.to_numpy()[calls] != base.V.to_numpy()[calls]).all()
