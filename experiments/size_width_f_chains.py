@@ -43,7 +43,7 @@ def option_chain_reader(repository, snapshot, *, max_object_bytes):
         def batch_filter(frame):
             return frame if frame.empty else frame[_triples(frame).isin(triples)]
 
-        _LOG.info("option_chains read: expiries=%d tickers=%s years=%s cap=%d", len(expiries), sorted(tickers), years,
+        _LOG.info("option_chains read: expiries=%d tickers=%d years=%s cap=%d", len(expiries), len(tickers), years,
                   max_object_bytes)
         started = time.perf_counter()
         # `_scan.read_table` visits partitions in manifest first-seen order, as `load_chain_index` does.

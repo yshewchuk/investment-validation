@@ -46,10 +46,22 @@ WANTED = [_key("BBB", "2023-03-01", "2023-03-17", "C", 100.0), _key("BBB", "2023
           _key("AAA", "2024-01-05", "2024-01-19", "C", 100.0), _key("AAA", "2024-01-05", "2024-01-19", "P", 105.0)]
 EXPIRIES = pd.DataFrame({"ticker": ["AAA", "BBB"], "obs_date": pd.to_datetime(["2024-01-05", "2023-03-01"]),
                          "expiry": pd.to_datetime(["2024-01-19", "2023-03-17"])})  # AAA/2024 listed first
+# Distinct hand-typed (bid, ask) per WANTED row, so a swapped or altered column is caught.
+QUOTES = {_key("BBB", "2023-03-01", "2023-03-17", "C", 100.0): (1.1, 1.3),
+          _key("BBB", "2023-03-01", "2023-03-17", "P", 105.0): (2.1, 2.3),
+          _key("AAA", "2024-01-05", "2024-01-19", "C", 100.0): (3.1, 3.3),
+          _key("AAA", "2024-01-05", "2024-01-19", "P", 105.0): (4.1, 4.3)}
 
 
-def _contract_row(ticker, obs, expiry, right, strike):
-    return chain_row(ticker, pd.Timestamp(obs).to_pydatetime(), pd.Timestamp(expiry).to_pydatetime(), strike, right=right)
+def _contract_row(ticker, obs, expiry, right, strike, **quote):
+    return chain_row(ticker, pd.Timestamp(obs).to_pydatetime(), pd.Timestamp(expiry).to_pydatetime(), strike, right=right,
+                     **quote)
+
+
+def _quoted_row(row):
+    """A contract row carrying its QUOTES pair when it has one; decoy rows keep chain_row's defaults."""
+    key = _key(*row)
+    return _contract_row(*row, **dict(zip(("bid", "ask"), QUOTES[key]))) if key in QUOTES else _contract_row(*row)
 
 
 def _commit(tmp_path, partitions):
@@ -66,7 +78,7 @@ def _commit(tmp_path, partitions):
 
 @pytest.fixture
 def committed(tmp_path):
-    return _commit(tmp_path, {y: [_contract_row(*r) for r in rows] for y, rows in PARTITIONS.items()})
+    return _commit(tmp_path, {y: [_quoted_row(r) for r in rows] for y, rows in PARTITIONS.items()})
 
 
 def _run():
@@ -100,8 +112,11 @@ def test_factory_reads_the_pinned_snapshot_in_manifest_order(tmp_path, capsys, c
     assert capsys.readouterr().out == ""
     assert list(frame.columns) == fvi.QUOTE_COLUMNS
     got = [(t, pd.Timestamp(o), pd.Timestamp(e), r, k) for t, o, e, r, k in frame[KEY_COLS].itertuples(index=False, name=None)]
-    assert [key[0] for key in got] == ["BBB", "BBB", "AAA", "AAA"]  # 2023 partition before 2024
-    assert sorted(got) == sorted(WANTED)
+    assert got == WANTED  # manifest order: 2023 partition before 2024
+    pairs = list(frame[["bid", "ask"]].itertuples(index=False, name=None))
+    assert pairs == [QUOTES[key] for key in WANTED]
+    assert (frame["iv"] == 30.0).all() and (frame["spot"] == 100.0).all()
+    assert not frame["quote_repaired"].any() and (frame["chain_kind"] == "entry").all()
 
 
 @pytest.mark.parametrize("extra,cap", [(["--f-max-object-bytes", "123456789"], 123456789), ([], 1 << 28)],
@@ -181,6 +196,7 @@ def test_a_contract_without_the_f_columns_refuses_before_any_scan(monkeypatch):
     with pytest.raises(fvi.FairValueRefusal) as exc:
         chains.option_chain_reader(repository, None, max_object_bytes=1 << 28)
     assert exc.value.details == {"reason": "required_column", "columns": ["chain_kind"]}
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert scans == []
 
 
@@ -188,6 +204,7 @@ def test_no_sources_config_is_refused():
     with pytest.raises(OpsError) as exc:
         chains.build_f_quotes(SimpleNamespace(f_max_object_bytes=None, sources_config=None))
     assert exc.value.problem.details["reason"] == "sources_config_invalid"
+    assert exc.value.problem.code == "INVALID_EXPERIMENT_SPEC"
 
 
 def test_an_unknown_snapshot_is_refused_and_its_connection_closed(tmp_path, monkeypatch, committed):
@@ -202,12 +219,14 @@ def test_an_unknown_snapshot_is_refused_and_its_connection_closed(tmp_path, monk
     with pytest.raises(OpsError) as exc:
         _factory(tmp_path, "snap-missing")
     assert exc.value.problem.details["reason"] == "snapshot_missing"
+    assert exc.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
     with pytest.raises(sqlite3.ProgrammingError):
         opened[0].execute("SELECT 1")
 
 
 def test_no_matching_ticker_gives_an_empty_frame_with_the_quote_columns(tmp_path, committed):
     read, _ = _factory(tmp_path, committed)
+    assert len(read(EXPIRIES)) == len(WANTED)
     frame = read(EXPIRIES.assign(ticker="ZZZ"))
     assert frame.empty and list(frame.columns) == fvi.QUOTE_COLUMNS
 
