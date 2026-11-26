@@ -59,7 +59,7 @@ Neither imports a new module; `engine/fills.py` and `engine/structures.py` do no
 - Above 0.9: over donors with `y > q90`, `d = (y - q90)/max(q90 - q50, 0.5)`; `Q(u) = q90 + s_hi * quantile(d, (u - 0.9)/0.1)`.
 - Below 0.1: over donors with `y < q10`, `d = (y - q10)/max(q50 - q10, 0.5)`; `Q(u) = max(0, q10 + s_lo * quantile(d, u/0.1))`.
 
-The event's own widths are `s_hi = max(q90 - q50, 0.5)` and `s_lo = max(q50 - q10, 0.5)`. Under 50 donors in a tail, the **whole event** is unscored for that arm (`tail_pool_thin`). The 0.5-point floor is **provisional** (the user is unsure of the value): the report **MUST** print, per arm and year, the share of events where the 0.5 floor binds, for the event width and for the donor normalisation; for arm S it also prints the scale-floor share above.
+The event's own widths are `s_hi = max(q90 - q50, 0.5)` and `s_lo = max(q50 - q10, 0.5)`. Under 50 donors in a tail, the **whole event** is unscored for that arm (`tail_pool_thin`). The 0.5-point floor is a **user decision** (2026-11-26: "keep 0.5 floor and report"): the report **MUST** print, per arm and year, the share of events where the 0.5 floor binds, for the event width and for the donor normalisation; for arm S it also prints the scale-floor share above.
 
 **Zero median.** Quantiles flooring to 0 are valid output, but a ratio over `q50` (`W / q50`; part 2's band ratios) is **undetermined** when `q50 <= 1e-9`: counted `zero_median`, never 0/0.
 

@@ -54,7 +54,7 @@ distribution_tails:
   floor: 0.5
   interpolation: "inverse CDF linear between knots, per arm from its own predictions"
   rule: "tail pool fixed at start of each month (calibration pool's events rule). Above 0.9: d = (y - q90) / max(q90 - q50, floor) over donors with y > q90; Q(u) = q90 + s_hi * quantile(d, (u - 0.9)/0.1). Below 0.1: d = (y - q10) / max(q50 - q10, floor) over donors with y < q10; Q(u) = max(0, q10 + s_lo * quantile(d, u/0.1)). Event's own s_hi = max(q90 - q50, floor), s_lo = max(q50 - q10, floor). numpy linear; a jump at the knots is allowed. Under min_donors in a tail: whole event unscored for that arm (tail_pool_thin)"
-  floor_report: "floor is provisional (user unsure of value): report MUST print, per arm and year, the share of events where the 0.5 floor binds, for the event width and for the donor normalisation; for arm S also the scale-floor share (arms.S)"
+  floor_report: "0.5 floor is a user decision (2026-11-26: keep 0.5 floor and report): report MUST print, per arm and year, the share of events where the 0.5 floor binds, for the event width and for the donor normalisation; for arm S also the scale-floor share (arms.S)"
 zero_median:
   threshold: 1.0e-09
   rule: "ratio over q50 (W / q50) undetermined when q50 <= threshold: counted zero_median, never 0/0; quantiles stay valid."
