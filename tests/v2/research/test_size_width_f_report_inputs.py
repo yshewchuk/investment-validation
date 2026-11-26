@@ -229,7 +229,7 @@ def test_write_publishes_each_table_then_one_receipt_bound_by_hashes(tmp_path):
     assert receipt["stage"] == "inner" and receipt["inputs_hash"] == "H1" and receipt["scope"] == "W"
     assert receipt["tables"] == {name: {"sha256": _sha(stage / f"{name}.parquet"), "rows": len(frame),
                                         "bytes": (stage / f"{name}.parquet").stat().st_size} for name, frame in tables.items()}
-    assert receipt["rows"] == sum(len(f) for f in tables.values())
+    assert receipt["rows"] == sum(len(f) for f in tables.values()) and receipt["leg_rows"] == 0
     assert receipt["bytes"] == sum(e["bytes"] for e in receipt["tables"].values())
     for name, frame in tables.items():
         pd.testing.assert_frame_equal(pd.read_parquet(stage / f"{name}.parquet"), frame)
@@ -295,6 +295,14 @@ def test_a_bad_stage_or_no_tables_is_refused_before_anything_is_written(tmp_path
         ri.write(out, "middle", "H", "W", _tables())
     with pytest.raises(ValueError, match="tables"):
         ri.write(out, "inner", "H", "W", {})
+    assert not out.exists()
+
+
+def test_a_name_in_both_parts_and_tables_is_refused_before_anything_is_written(tmp_path):
+    out = tmp_path / "out"
+    part = {"sha256": "0" * 64, "rows": 1, "bytes": 1}
+    with pytest.raises(ValueError, match="both parts and tables: \\['exits'\\]"):
+        ri.write(out, "inner", "H", "W", _tables(), parts={"exits": part})
     assert not out.exists()
 
 
