@@ -1,7 +1,7 @@
 """Fill model F, slice F3: fit set, fallback smile, vol source, leg values (design sections 3, 4, 7, 10).
 
 Callers pass WHOLE listed expiries (a row's source depends on its whole expiry; memory scales with
-put rows, so the caller chunks by whole expiries). Values never depend on row order.
+tree rows (puts plus tree-routed calls), so the caller chunks by whole expiries). Values never depend on row order.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from collections import Counter
 import numpy as np
 import pandas as pd
 
-from experiments import fair_value_pricer
+from experiments import fair_value_carry
 
 FIT_MIN_STRIKES = 5
 WEIGHT_SPREAD_FLOOR = 0.02
@@ -24,10 +24,10 @@ EXPIRY_KEY = ["ticker", "obs_date", "expiry"]
 VOL_KEY = EXPIRY_KEY + ["strike"]
 QUOTE_KEY = VOL_KEY + ["right"]
 PROGRESS_S = 30.0
-QUOTE_COLUMNS = QUOTE_KEY + ["bid", "ask", "iv", "spot", "quote_repaired", "rate"]
+QUOTE_COLUMNS = QUOTE_KEY + ["bid", "ask", "iv", "spot", "quote_repaired", "rate", "borrow30", "borrow2yr", "divAmt", "divDate"]
 VOL_COLUMNS = VOL_KEY + ["smvVol"]
 OUT_COLUMNS = ["ticker", "obs_date", "expiry", "strike", "right", "status", "V", "vol", "source",
-               "rate", "clamp_side", "repaired", "eff_bid", "eff_ask"]
+               "rate", "b", "carry_fallback", "dividend_fallback", "dividend_applied", "clamp_side", "repaired", "eff_bid", "eff_ask"]
 
 
 class FairValueRefusal(ValueError):
@@ -174,14 +174,20 @@ def leg_values(quotes: pd.DataFrame, vol_table: pd.DataFrame) -> pd.DataFrame:
         rate_unknown = (c["T"] > 0) & ~np.isfinite(c["rate"])
     priced = ~bad & ~rate_unknown
     put_rows, call_rows = priced & c["put"], priced & c["call"]
+    run = priced & (c["T"] > 0) & np.isfinite(c["spot"]) & (c["spot"] > 0)  # carry and dividend resolved only here
+    dates = pd.to_datetime(quotes["obs_date"])
+    exp_days = float_array((pd.to_datetime(quotes["expiry"]) - dates).dt.days)
+    div_days = float_array((pd.to_datetime(quotes["divDate"]) - dates).dt.days)
+    b, carry_fb = fair_value_carry.carry_rate(exp_days, float_array(quotes["borrow30"]), float_array(quotes["borrow2yr"]), c["rate"])
+    div, div_fb, div_ok = fair_value_carry.dividend(float_array(quotes["divAmt"]), div_days, exp_days, c["spot"], c["rate"])
+    b, carry_fb, div_fb, div_ok = np.where(run, b, np.nan), carry_fb & run, div_fb & run, div_ok & run
+    div, div_years = np.where(div_ok, div, 0.0), np.where(div_ok, div_days / 365.0, 0.0)
     _log(f"sources per expiry: smvvol={counts['smvvol']} smile={counts['smile']} "
-         f"intrinsic={counts['intrinsic']} none={counts[None]}; pricing {put_rows.sum()} puts, {call_rows.sum()} calls")
-    args = (c["spot"], c["strike"], c["T"], vol_in, c["rate"])
+         f"intrinsic={counts['intrinsic']} none={counts[None]}; pricing {put_rows.sum()} puts, {call_rows.sum()} calls; "
+         f"carry_fallback={carry_fb.sum()} dividend_fallback={div_fb.sum()} dividend_applied={div_ok.sum()}")
     model = np.full(n, np.nan)
-    if put_rows.any():
-        model[put_rows] = fair_value_pricer.american_put(*(a[put_rows] for a in args))
-    if call_rows.any():
-        model[call_rows] = fair_value_pricer.european_call(*(a[call_rows] for a in args))
+    model[priced] = fair_value_carry.value(c["spot"][priced], c["strike"][priced], c["T"][priced], vol_in[priced],
+                                           c["rate"][priced], b[priced], div[priced], div_years[priced], c["put"][priced])
 
     lo, hi = effective_quote(c["bid"], c["ask"], c["rep"])
     ok = priced & np.isfinite(model)
@@ -197,6 +203,7 @@ def leg_values(quotes: pd.DataFrame, vol_table: pd.DataFrame) -> pd.DataFrame:
          "status": pd.Series(status, index=quotes.index, dtype=object), "V": value,
          "vol": np.where(ok, vol_in, np.nan),
          "source": pd.Series(source, index=quotes.index, dtype=object), "rate": c["rate"],
+         "b": b, "carry_fallback": carry_fb, "dividend_fallback": div_fb, "dividend_applied": div_ok,
          "clamp_side": pd.Series(side, index=quotes.index, dtype=object),
          "repaired": c["rep"], "eff_bid": lo, "eff_ask": hi},
         index=quotes.index, columns=OUT_COLUMNS,

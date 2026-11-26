@@ -18,7 +18,8 @@ from experiments import fair_value_inputs as fvi
 from experiments import fair_value_legs as fvl
 
 BATCH_ROWS, LEG_KEYS = 50_000, ["structure_id", "ticker", "entry_date", "exit_date", "expiry"]
-SOURCE_FILES = ("fair_value_fills.py", "fair_value_inputs.py", "fair_value_legs.py", "fair_value_pricer.py")
+SOURCE_FILES = ("fair_value_carry.py", "fair_value_fills.py", "fair_value_inputs.py", "fair_value_legs.py",
+                "fair_value_pricer.py")
 SUMMED = ("rows", "put_rows", "expiries", "expiries_missing", "load_s", "price_s")
 EXPIRY, LOG = fvl.EXPIRY_KEY, logging.getLogger("fair_value_run")
 
@@ -79,7 +80,7 @@ def _run_chunk(cfg, quarter, wanted: pd.DataFrame):
                            expected_snapshot_id=cfg.expected_snapshot_id).reset_index(drop=True)
     rows[fvi.VOL_KEYS] = fvi._norm(rows, fvi.VOL_KEYS)
     rows = rows.merge(wanted, on=EXPIRY, how="inner").reset_index(drop=True)
-    rows["rate"] = fvi.lookup_rate(rows, tables.rates)
+    rows = rows.join(fvi.lookup_inputs(rows, tables.rates))
     load_s = time.monotonic() - started
     _check_rss(cfg, quarter)
     ids = (rows.groupby(EXPIRY).size().cumsum().shift(fill_value=0) // BATCH_ROWS).to_numpy()  # whole expiries

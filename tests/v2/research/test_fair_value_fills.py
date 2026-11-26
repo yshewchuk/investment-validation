@@ -26,7 +26,8 @@ def row(K, right, bid, ask, spot=101.0, expiry=OBS, rep=False, oi=1000, bsz=50, 
     """One quote row. Expiry OBS gives T = 0 (V = intrinsic clamped to [bid, ask])."""
     return {"ticker": "XYZ", "obs_date": OBS, "expiry": expiry, "strike": float(K), "right": right,
             "bid": bid, "ask": ask, "iv": 0.3, "spot": spot, "quote_repaired": rep, "rate": rate,
-            "open_interest": oi, "bid_size": bsz, "ask_size": asz}
+            "open_interest": oi, "bid_size": bsz, "ask_size": asz,
+            "borrow30": NAN, "borrow2yr": NAN, "divAmt": 0.0, "divDate": pd.NaT}  # no carry input: b = r, no dividend
 
 
 def no_vols():

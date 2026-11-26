@@ -30,8 +30,11 @@ QUOTE_COLUMNS = QUOTE_KEYS + ["bid", "ask", "iv", "spot", "quote_repaired", "ope
 VOL_KEYS = ["ticker", "obs_date", "expiry", "strike"]
 RATE_KEYS = ["ticker", "obs_date"]
 RATE_COLUMNS = ["iRate5wk", "iRateLt"]
-NEEDED_COLUMNS = {"quotes": VOL_KEYS + ["smvVol"], "rates": RATE_KEYS + RATE_COLUMNS}
+BORROW_COLUMNS = ["borrow30", "borrow2yr"]
+CARRY_COLUMNS = BORROW_COLUMNS + ["divAmt", "divDate", "annIdiv", "annActDiv", "assetType"]  # last three: diagnostics only
+NEEDED_COLUMNS = {"quotes": VOL_KEYS + ["smvVol"], "rates": RATE_KEYS + RATE_COLUMNS + CARRY_COLUMNS}
 RATE_BOUNDS = (-0.05, 0.20)
+BORROW_BOUNDS = (-1.00, 0.20)
 RATE_RULE_VALUES = {"rate_out_of_range": ("missing", "row_unknown"), "rate_empty_row": ("rate_unknown", "earlier_row")}
 VOL_MEDIAN_BOUNDS = (0.05, 5.0)
 RATE_LOOKBACK_DAYS = 7
@@ -104,6 +107,8 @@ def _norm(frame, columns):
                 out[col] = pd.to_datetime(raw).astype("datetime64[ns]").to_numpy()
             except (TypeError, ValueError, OverflowError) as err:
                 raise FairValueRefusal("key_value", "date column holds a value that is not a date", column=col) from err
+        elif col == "divDate":  # NaT is missing; not a key
+            out[col] = pd.to_datetime(raw, errors="coerce").astype("datetime64[ns]").to_numpy()
         else:
             out[col] = _floats(frame[col])
     return pd.DataFrame(out)
@@ -136,6 +141,9 @@ def _check_manifest(blob):
         for key in ("unreadable", "unrecognized"):
             if type(entry.get(key)) is not int or entry[key] != 0:
                 raise FairValueRefusal("manifest_unread_payloads", f"{kind}.{key} must be integer 0", table=kind, key=key)
+    units = manifest.get("units")
+    if not (isinstance(units, dict) and units.get("borrow30") == "percent" and units.get("borrow2yr") == "percent" and units.get("divAmt") == "dollars_per_share"):
+        raise FairValueRefusal("input_unit", "manifest units must label borrow percent and divAmt dollars_per_share")
 
 
 def _estimate(blob, kind, rel):
@@ -279,11 +287,16 @@ def load_tables(root, *, manifest_sha256, file_sha256, vol_scale, rate_scale,
     for col in RATE_COLUMNS:
         keep = inside[col] & ~row_outside if rules["rate_out_of_range"] == "row_unknown" else inside[col]
         rates[col] = conv[col].where(keep)
+    borrow = {col: rates[col] / 100.0 for col in BORROW_COLUMNS}  # percent, explicit; not rate_scale
+    borrow_out = sum(int((b.notna() & ~b.between(*BORROW_BOUNDS)).sum()) for b in borrow.values())
+    for col, b in borrow.items():
+        rates[col] = b.where(b.between(*BORROW_BOUNDS))
     if rules["rate_empty_row"] == "earlier_row":
         rates = rates[rates[RATE_COLUMNS].notna().any(axis=1)]
     rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
-    _LOG.info("load end: %.1f s, rss %.0f MB, decoded tables %.1f MB", time.monotonic() - started, rss_mb, total / 2**20)
-    return InputTables(quotes[VOL_KEYS + ["smvVol"]], rates[RATE_KEYS + RATE_COLUMNS], hashes, rules)
+    _LOG.info("load end: %.1f s, rss %.0f MB, decoded tables %.1f MB, borrow_out_of_range=%d",
+              time.monotonic() - started, rss_mb, total / 2**20, borrow_out)
+    return InputTables(quotes[VOL_KEYS + ["smvVol"]], rates[RATE_KEYS + RATE_COLUMNS + CARRY_COLUMNS], hashes, rules)
 
 
 def attach_vol(quotes, vols):
@@ -296,24 +309,31 @@ def attach_vol(quotes, vols):
     return pd.Series(merged["smvVol"].to_numpy(dtype=float, copy=True), index=quotes.index, name="smvVol")
 
 
-def lookup_rate(rows, rates):
-    """Rate per row: the ticker's row at obs_date, else its latest earlier one within 7 days; then a blend."""
+def lookup_inputs(rows, rates):
+    """Rate and carry columns per row, all from ONE selected rates row (the ticker's obs_date row, else its latest earlier within 7 days); NaN/NaT when none."""
     left = _norm(rows, ["ticker", "obs_date", "expiry"])
-    right = _norm(rates, RATE_KEYS + RATE_COLUMNS)
+    right = _norm(rates, RATE_KEYS + RATE_COLUMNS + CARRY_COLUMNS)
     _unique(right, RATE_KEYS, "rates", "duplicate rate key in the rate table")
     _table_values(right, RATE_COLUMNS, lambda v: np.isnan(v) | ((v >= RATE_BOUNDS[0]) & (v <= RATE_BOUNDS[1])), "rates")
-    out = np.full(len(rows), np.nan)
+    _table_values(right, BORROW_COLUMNS, lambda v: np.isnan(v) | ((v >= BORROW_BOUNDS[0]) & (v <= BORROW_BOUNDS[1])), "rates")
     if left.empty or right.empty:
-        return pd.Series(out, index=rows.index, name="rate")
+        out = pd.DataFrame(np.nan, index=rows.index, columns=["rate"] + CARRY_COLUMNS)
+        out["divDate"] = pd.Series(pd.NaT, index=rows.index, dtype="datetime64[ns]")
+        return out
     left["_pos"] = np.arange(len(left))
     m = pd.merge_asof(left.sort_values("obs_date", kind="mergesort"), right.sort_values("obs_date", kind="mergesort"),
                       on="obs_date", by="ticker", direction="backward", tolerance=pd.Timedelta(days=RATE_LOOKBACK_DAYS))
+    m = m.sort_values("_pos", kind="mergesort")  # back in input row order
     days = np.maximum((m["expiry"] - m["obs_date"]).dt.days.to_numpy(dtype=float), 0.0)
     r5, rl = m["iRate5wk"].to_numpy(dtype=float), m["iRateLt"].to_numpy(dtype=float)
     weight = np.clip((days - SHORT_DAYS) / (LONG_DAYS - SHORT_DAYS), 0.0, 1.0)
     blend = np.where(np.isfinite(r5) & np.isfinite(rl), r5 + weight * (rl - r5), np.where(np.isfinite(r5), r5, rl))
-    out[m["_pos"].to_numpy()] = np.where(np.isfinite(days), blend, np.nan)
-    return pd.Series(out, index=rows.index, name="rate")
+    return pd.DataFrame({"rate": blend, **{c: m[c].to_numpy() for c in CARRY_COLUMNS}}, index=rows.index)
+
+
+def lookup_rate(rows, rates):
+    """Rate per row (see lookup_inputs)."""
+    return lookup_inputs(rows, rates)["rate"]
 
 
 def usable_quote(bid, ask):

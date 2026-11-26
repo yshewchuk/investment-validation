@@ -5,6 +5,8 @@ Synthetic inputs only (guides/fair_value_fill_design.md, sections 3, 4, 7, 10).
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -42,6 +44,9 @@ def quotes_frame(rows, expiry=EXP):
     df.insert(0, "ticker", "XYZ")
     df.insert(1, "obs_date", OBS)
     df.insert(2, "expiry", expiry)
+    # No carry input by default: borrow missing gives b = r, and no dividend.
+    df["borrow30"], df["borrow2yr"], df["divAmt"] = np.nan, np.nan, 0.0
+    df["divDate"] = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
     return df
 
 
@@ -283,17 +288,20 @@ def test_expired_rows_are_intrinsic_without_vol_or_rate():
         (95.0, "C", 6.0, 7.0, np.nan, SPOT, False, np.nan),   # intrinsic 5, clamps to bid 6
         (95.0, "P", 0.0, 0.5, np.nan, SPOT, False, np.nan),   # intrinsic 0, inside
         (100.0, "C", 0.0, 1.0, np.nan, 0.0, False, np.nan),   # bad spot
+        (110.0, "C", 0.0, 1.0, np.nan, SPOT, False, np.nan),  # out of the money call: intrinsic 0, exactly 0
+        (90.0, "P", 0.0, 1.0, np.nan, SPOT, False, np.nan),   # out of the money put: intrinsic 0, exactly 0
     ]
     out = legs.leg_values(quotes_frame(rows, expiry=OBS), vols_frame(expiry=OBS))
     assert set(out.source) == {"intrinsic"}
-    assert out.status.tolist() == ["ok", "ok", "ok", "ok", "no_fair_value"]
+    assert out.status.tolist() == ["ok", "ok", "ok", "ok", "no_fair_value", "ok", "ok"]
     np.testing.assert_array_equal(out.V.to_numpy()[:4], [10.0, 6.0, 6.0, 0.0])
-    assert out.clamp_side.tolist() == ["none", "ask", "bid", "none", None]
+    np.testing.assert_array_equal(out.V.to_numpy()[5:], [0.0, 0.0])
+    assert out.clamp_side.tolist() == ["none", "ask", "bid", "none", None, "none", "none"]
     for c in ("status", "source", "clamp_side"):
         assert out[c].dtype == object
-    assert out.clamp_side.iloc[-1] is None
+    assert out.clamp_side.iloc[4] is None
     assert out.vol.isna().all() and out.rate.isna().all()
-    assert_unavailable(out.iloc[[-1]])
+    assert_unavailable(out.iloc[[4]])
 
 
 def test_nat_expiry_has_no_source_and_no_fair_value():
@@ -372,7 +380,8 @@ def test_output_columns_and_passthrough():
     q = quotes_frame(rows)
     out = legs.leg_values(q, vols_frame())
     assert list(out.columns) == ["ticker", "obs_date", "expiry", "strike", "right", "status", "V", "vol",
-                                 "source", "rate", "clamp_side", "repaired", "eff_bid", "eff_ask"]
+                                 "source", "rate", "b", "carry_fallback", "dividend_fallback", "dividend_applied",
+                                 "clamp_side", "repaired", "eff_bid", "eff_ask"]
     for name in ("ticker", "obs_date", "expiry", "strike", "right", "rate"):
         assert out[name].tolist() == q[name].tolist(), name
     assert out.repaired.tolist() == q.quote_repaired.tolist() == [False, True, False]
@@ -491,3 +500,177 @@ def test_published_anchor_through_leg_values():
     V = dict(zip(out.right, out.V))
     assert V["C"] == pytest.approx(10.4506, abs=1e-4)  # Black-Scholes textbook value
     assert V["P"] == pytest.approx(6.090, abs=0.01)  # published American put value
+
+
+@pytest.mark.parametrize("column", ["borrow30", "borrow2yr", "divAmt", "divDate"])
+def test_missing_carry_column_refused(column):
+    q = quotes_frame(smile_rows(BASE, iv_curve)).drop(columns=[column])
+    with pytest.raises(legs.FairValueRefusal) as info:
+        legs.leg_values(q, vols_frame())
+    assert info.value.details == {"reason": "column_missing", "table": "quotes", "columns": [column]}
+    assert "EXPERIMENT_IDENTITY_CONFLICT" in str(info.value) and "column_missing" in str(info.value)
+
+
+# (borrow30, borrow2yr, divAmt, divDate in days from obs or None, b, carry_fallback, dividend_fallback, applied)
+CARRY_CASES = [
+    (0.02, 0.03, 0.0, None, 0.02, False, False, False),    # 30 days: borrow30; divAmt 0 is known, no dividend
+    (np.nan, 0.03, 0.0, None, 0.03, False, False, False),  # borrow30 missing: borrow2yr used
+    (np.nan, np.nan, 0.0, None, RATE, True, False, False),  # both missing: b = r, flagged
+    (0.02, 0.03, 0.5, 15, 0.02, False, False, True),       # ex-date 15 days out: applied
+    (0.02, 0.03, -1.0, 15, 0.02, False, True, False),      # negative amount: fallback
+    (0.02, 0.03, 0.5, None, 0.02, False, True, False),     # no divDate: fallback
+    (0.02, 0.03, 0.5, 45, 0.02, False, False, False),      # after expiry: known, no dividend
+    (0.02, 0.03, 0.5, 30, 0.02, False, False, True),       # divDate == expiry: still applied
+]
+
+
+@pytest.mark.parametrize("b30, b2, amt, days, b, carry_fb, div_fb, div_ok", CARRY_CASES)
+def test_carry_and_dividend_flags_per_case(b30, b2, amt, days, b, carry_fb, div_fb, div_ok):
+    q = quotes_frame(smile_rows(BASE, iv_curve, bid=0.0, ask=1000.0))  # wide quotes: no clamping
+    q["borrow30"], q["borrow2yr"], q["divAmt"] = b30, b2, amt
+    if days is not None:
+        q["divDate"] = OBS + pd.Timedelta(days=days)
+    out = legs.leg_values(q, vols_frame())
+    assert set(out.status) == {"ok"}
+    np.testing.assert_allclose(out.b.to_numpy(), b, rtol=0, atol=1e-12)
+    assert out.carry_fallback.tolist() == [carry_fb] * len(out)
+    assert out.dividend_fallback.tolist() == [div_fb] * len(out)
+    assert out.dividend_applied.tolist() == [div_ok] * len(out)
+
+
+def test_unpriced_and_expiring_rows_have_no_b_or_flags():
+    q = quotes_frame(smile_rows(BASE, iv_curve, bid=0.0, ask=1000.0))
+    extra = [
+        quotes_frame([(90.0, "C", 0.0, 1000.0, 0.25, SPOT, False, RATE)], expiry=OBS),  # T = 0
+        quotes_frame([(77.5, "P", np.nan, 1.5, 0.25, SPOT, False, RATE)]),              # unpriceable
+        quotes_frame([(77.5, "C", 0.0, 1000.0, 0.25, SPOT, False, np.nan)]),            # rate_unknown (call: distinct key)
+    ]
+    q = pd.concat([q] + extra, ignore_index=True)
+    q["divAmt"], q["divDate"] = 0.5, OBS + pd.Timedelta(days=15)  # would apply if the row were priced
+    out = legs.leg_values(q, vols_frame())
+    tail = out.iloc[-3:]
+    assert tail.status.tolist() == ["ok", "unpriceable", "rate_unknown"]
+    assert tail.b.isna().all()
+    assert not tail[["carry_fallback", "dividend_fallback", "dividend_applied"]].to_numpy().any()
+    assert out.b.iloc[:-3].notna().all()
+
+
+def test_dividend_changes_value_but_not_smile_vol():
+    # Force the fallback smile: strike 95 (in the fit set) has no smvVol, so every row takes the smile.
+    strikes = [K for K in BASE if K != 95.0]
+    vols = vols_frame(strikes, [smv_of(K) for K in strikes])
+    # Non-quadratic quote ivs: a per-strike bump (+0.03 at 100, -0.02 at 90) plus +0.02 on calls, so C and P at a
+    # strike differ and a membership flip at strike 100 changes the fit. All fitted values stay positive.
+    def bumped_iv(K, right):
+        bump = {100.0: 0.03, 90.0: -0.02}.get(float(K), 0.0)
+        return iv_curve(K) + bump + (0.02 if right == "C" else 0.0)
+
+    base_rows = [(float(K), r, 0.0, 1000.0, bumped_iv(K, r), SPOT, False, RATE) for K in BASE for r in ("C", "P")]
+    base_q = quotes_frame(base_rows)
+    base = legs.leg_values(base_q, vols)
+    # Ex-date 15 days out: S - PV(D) is about 97.0, across the 100 strike, so the fit set would change if it used it.
+    out = legs.leg_values(base_q.assign(divAmt=3.0, divDate=OBS + pd.Timedelta(days=15)), vols)
+    assert set(out.source) == {"smile"} and set(out.status) == {"ok"}
+    assert out.dividend_applied.all()
+    np.testing.assert_array_equal(out.vol.to_numpy(), base.vol.to_numpy())  # fit and k keep the unadjusted spot
+    # Expected smile: fit_smile on the UNADJUSTED spot, fit set = puts K <= SPOT and calls K > SPOT.
+    strike, right = base_q["strike"].to_numpy(), base_q["right"].to_numpy()
+    bid, ask, iv = (base_q[name].to_numpy(dtype=float) for name in ("bid", "ask", "iv"))
+    k = np.log(strike / SPOT) / np.sqrt(T)
+    fit = ((right == "P") & (strike <= SPOT)) | ((right == "C") & (strike > SPOT))
+    fitted = legs.fit_smile(strike[fit], k[fit], iv[fit], ((ask - bid) / ((bid + ask) / 2.0))[fit])
+    assert fitted is not None
+    np.testing.assert_allclose(out.vol.to_numpy(), legs.smile_vol(fitted, k), rtol=0, atol=1e-9)
+    assert np.ptp(out.vol.to_numpy()) > 0.01  # non-flat smile across strikes
+    # The fixture must tell the unadjusted fit from one built on S_adj = SPOT - PV(D): membership and k both change.
+    s_adj = SPOT - 3.0 * math.exp(-RATE * 15 / 365)
+    fit_adj = ((right == "P") & (strike <= s_adj)) | ((right == "C") & (strike > s_adj))
+    k_adj = np.log(strike / s_adj) / np.sqrt(T)
+    alt = legs.fit_smile(strike[fit_adj], k_adj[fit_adj], iv[fit_adj], ((ask - bid) / ((bid + ask) / 2.0))[fit_adj])
+    assert alt is not None and not np.array_equal(fit, fit_adj)
+    assert np.abs(legs.smile_vol(alt, k_adj) - out.vol.to_numpy()).max() > 1e-6
+    calls = (out.right == "C").to_numpy()
+    assert (out.V.to_numpy()[calls] != base.V.to_numpy()[calls]).all()
+
+
+def _N(x):
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _euro_call_carry(S, K, T, v, r, b):
+    """Closed form for a European call with carry b and no dividend (math.erf; not fair_value_carry)."""
+    d1 = (math.log(S / K) + (b + 0.5 * v * v) * T) / (v * math.sqrt(T))
+    d2 = d1 - v * math.sqrt(T)
+    return S * math.exp((b - r) * T) * _N(d1) - K * math.exp(-r * T) * _N(d2)
+
+
+def _reference_escrowed(S, K, T, v, r, b, D, tD, is_put):
+    """Copy of the independent escrowed American CRR reference in test_fair_value_carry.py, pure python."""
+    n = fvp.TREE_STEPS
+    dt = T / n
+    v = max(v, fvp.PUT_VOL_FLOOR)
+    u = math.exp(v * math.sqrt(dt))
+    d = 1.0 / u
+    p = (math.exp(b * dt) - d) / (u - d)
+    disc = math.exp(-r * dt)
+    root = S - D * math.exp(-r * tD)
+    sign = -1.0 if is_put else 1.0
+
+    def payoff(i, j):
+        t_i = T * (i / n)
+        stock = root * u ** (2 * j - i) + (D * math.exp(-r * (tD - t_i)) if t_i < tD else 0.0)
+        return max(sign * (stock - K), 0.0)
+
+    vals = [payoff(n, j) for j in range(n + 1)]
+    for i in range(n - 1, -1, -1):
+        vals = [max(disc * (p * vals[j + 1] + (1.0 - p) * vals[j]), payoff(i, j)) for j in range(i + 1)]
+    return vals[0]
+
+
+# (days to expiry, borrow30, borrow2yr, strike, right, divAmt, days to ex-date, oracle). Vol is smv_of(strike).
+# Expiry 100: b = 0.02 + (100 - 30)/700 * 0.04 = 0.024 < r = 0.04: tree. Expiry 400: b = 0.02 + (370/700) * 0.08 = 0.0623 > r.
+CARRY_ROWS = [
+    (100, 0.02, 0.06, 105.0, "P", 2.0, 40, "tree"),    # put, applied dividend
+    (100, 0.02, 0.06, 95.0, "C", 2.0, 40, "tree"),     # tree call (b < r), applied dividend
+    (100, 0.02, 0.06, 95.0, "P", None, None, "tree"),  # put, no dividend
+    (100, 0.02, 0.06, 105.0, "C", None, None, "tree"), # tree call (b < r), no dividend
+    (400, 0.02, 0.10, 105.0, "C", None, None, "euro"), # European call (b > r >= 0), no dividend
+    (400, 0.02, 0.10, 110.0, "C", None, None, "euro"), # European call, no dividend
+    (400, 0.02, 0.10, 95.0, "P", 3.0, 200, "tree"),    # put, applied dividend, ex-date 200 != expiry 400
+    (400, 0.02, 0.10, 105.0, "P", None, None, "tree"), # put, no dividend, b > r still a tree
+]
+
+
+def _carry_oracle(days, b30, b2, K, right, amt, dd, oracle, vol):
+    """(b, V) by hand: b is linear in days from 30 to 730; V from the escrowed reference or the closed form."""
+    T = days / 365.0
+    b = b30 + (days - 30.0) / 700.0 * (b2 - b30)
+    if oracle == "euro":
+        assert right == "C" and dd is None and b > RATE >= 0
+        return b, _euro_call_carry(SPOT, K, T, vol, RATE, b)
+    D, tD = (0.0, 0.0) if dd is None else (amt, dd / 365.0)
+    return b, _reference_escrowed(SPOT, K, T, vol, RATE, b, D, tD, right == "P")
+
+
+def test_leg_values_carry_and_dividend_match_independent_oracle():
+    frames, b_expected, v_expected = [], [], []
+    for days, b30, b2, K, right, amt, dd, oracle in CARRY_ROWS:
+        q = quotes_frame([(K, right, 0.0, 1000.0, 0.25, SPOT, False, RATE)], expiry=OBS + pd.Timedelta(days=days))
+        q["borrow30"], q["borrow2yr"] = b30, b2
+        if dd is not None:
+            q["divAmt"], q["divDate"] = amt, OBS + pd.Timedelta(days=dd)
+        frames.append(q)
+        b, value = _carry_oracle(days, b30, b2, K, right, amt, dd, oracle, smv_of(K))
+        b_expected.append(b)
+        v_expected.append(value)
+    q = pd.concat(frames, ignore_index=True)
+    strikes = [95.0, 105.0, 110.0]
+    vols = pd.concat([vols_frame(strikes, [smv_of(K) for K in strikes], expiry=OBS + pd.Timedelta(days=d))
+                      for d in (100, 400)], ignore_index=True)
+    out = legs.leg_values(q, vols)
+    assert set(out.source) == {"smvvol"} and set(out.status) == {"ok"}
+    assert out.clamp_side.tolist() == ["none"] * len(CARRY_ROWS)
+    np.testing.assert_allclose(out.vol.to_numpy(), [smv_of(K) for K in out.strike], rtol=1e-12, atol=0)
+    np.testing.assert_allclose(out.b.to_numpy(), b_expected, rtol=0, atol=1e-12)
+    assert out.dividend_applied.tolist() == [row[6] is not None for row in CARRY_ROWS]
+    np.testing.assert_allclose(out.V.to_numpy(), v_expected, rtol=1e-9, atol=0)

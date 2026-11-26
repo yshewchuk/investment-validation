@@ -54,6 +54,16 @@ def _main_legs():
     return _legs(_leg("S1", "2024-01-02", "2024-04-02", "2024-05-17"), _leg("S2", "2024-01-02", "2024-01-02", "2024-02-16"))
 
 
+UNITS = {"borrow30": "percent", "borrow2yr": "percent", "divAmt": "dollars_per_share"}
+
+
+def _carry(n, borrow30=10.0, borrow2yr=10.0, div_amt=0.0, div_date=None):
+    """Carry columns for n raw rate-table rows: borrow in percent (the loader divides by 100), dividend in dollars."""
+    return {"borrow30": [borrow30] * n, "borrow2yr": [borrow2yr] * n, "divAmt": [div_amt] * n,
+            "divDate": pd.to_datetime([div_date] * n), "annIdiv": [0.0] * n, "annActDiv": [0.0] * n,
+            "assetType": [1.0] * n}
+
+
 @pytest.fixture
 def world(tmp_path):
     root, qdir = tmp_path / "tables", tmp_path / "quotes"
@@ -63,14 +73,14 @@ def world(tmp_path):
             [{"ticker": "AAA", "obs_date": pd.Timestamp(y, m, 2), "expiry": pd.Timestamp(e), "strike": k, "smvVol": 25.0}
              for e in EXPIRIES for k in STRIKES])
         files[f"rates/year={y}/month={m:02d}.parquet"] = pd.DataFrame(
-            {"ticker": ["AAA"], "obs_date": [pd.Timestamp(y, m, 28)], "iRate5wk": [5.0], "iRateLt": [4.0]})
+            {"ticker": ["AAA"], "obs_date": [pd.Timestamp(y, m, 28)], "iRate5wk": [5.0], "iRateLt": [4.0], **_carry(1)})
     # The rate row for early-January queries sits in the previous month's file.
     files["rates/year=2023/month=12.parquet"] = pd.DataFrame(
-        {"ticker": ["AAA"], "obs_date": [pd.Timestamp(2023, 12, 28)], "iRate5wk": [5.0], "iRateLt": [4.0]})
+        {"ticker": ["AAA"], "obs_date": [pd.Timestamp(2023, 12, 28)], "iRate5wk": [5.0], "iRateLt": [4.0], **_carry(1)})
     for rel, frame in files.items():
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         frame.to_parquet(root / rel, index=False)
-    manifest = json.dumps({"version": "3", "tables": {"quotes": OK_TABLE, "rates": OK_TABLE}}).encode()
+    manifest = json.dumps({"version": "3", "tables": {"quotes": OK_TABLE, "rates": OK_TABLE}, "units": UNITS}).encode()
     (root / "manifest.json").write_bytes(manifest)
     qdir.mkdir()
     _chain("2024-01-02", ["2024-02-16", "2024-03-15", "2024-05-17"]).to_parquet(qdir / "2024Q1.parquet", index=False)
@@ -193,6 +203,20 @@ def test_early_quarter_rate_comes_from_previous_month(world, spy):
     days = (q1["expiry"] - pd.Timestamp("2024-01-02")).dt.days
     weight = ((days - 35) / (365 - 35)).clip(0, 1)
     assert q1["rate"].to_numpy() == pytest.approx((0.05 + weight * (0.04 - 0.05)).to_numpy())
+
+
+def test_rate_table_borrow_and_dividend_reach_priced_rows(world, spy):
+    # The previous-month rate row is the one Q1 queries read: borrow 3% (30d) and 4% (2y), a $0.50 dividend ex 2024-01-20.
+    rel = "rates/year=2023/month=12.parquet"
+    frame = pd.DataFrame({"ticker": ["AAA"], "obs_date": [pd.Timestamp(2023, 12, 28)], "iRate5wk": [5.0], "iRateLt": [4.0],
+                          **_carry(1, borrow30=3.0, borrow2yr=4.0, div_amt=0.5, div_date="2024-01-20")})
+    frame.to_parquet(world["root"] / rel, index=False)
+    files = {**world["pins"]["files"], rel: _sha((world["root"] / rel).read_bytes())}
+    _run(world, pins={**world["pins"], "files": files})
+    q1 = spy[0][0]
+    assert len(q1) == 12
+    assert q1["borrow30"].eq(0.03).all() and q1["borrow2yr"].eq(0.04).all()
+    assert q1["divAmt"].eq(0.5).all() and q1["divDate"].eq(pd.Timestamp("2024-01-20")).all()
 
 
 def test_unrequested_expiries_are_not_priced(world, spy):
