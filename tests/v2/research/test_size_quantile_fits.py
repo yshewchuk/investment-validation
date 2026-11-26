@@ -204,3 +204,22 @@ def test_bad_panel_rows_refuse_before_any_fit(monkeypatch, kind, reason):
         fits.fit_fold(SPEC, sealed, TRAINING, EVALUATION)
     assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", reason)
     assert calls == []
+
+
+def test_fit_fold_real_sklearn_recovers_a_step_function():
+    # Noise-free two-value target: every level of the quantile fit should sit on its side's value.
+    spec = _spec([7], [20])
+    rows = [{"event_id": f"s{k:03d}", "f_a": -1.0 if k % 2 == 0 else 1.0, "f_b": 0.0, "f_empty": None}
+            for k in range(400)]
+    sealed = {"model_columns": ["f_a", "f_b", "f_empty"], "dictionary_hash": "sha256:" + "a" * 64, "rows": rows}
+    training = [(r["event_id"], 2.0 if r["f_a"] < 0 else 10.0) for r in rows[:360]]
+    evaluation = [r["event_id"] for r in rows[360:]]
+    side = {r["event_id"]: (2.0 if r["f_a"] < 0 else 10.0) for r in rows[360:]}
+    out = fits.fit_fold(spec, sealed, training, evaluation)
+    assert out["event_ids"] == evaluation
+    assert len(out["raw"]) == 1
+    for raw in out["raw"].values():
+        raw = np.asarray(raw)
+        assert raw.shape == (len(evaluation), 7)
+        for i, event_id in enumerate(evaluation):
+            assert np.abs(raw[i] - side[event_id]).max() <= 0.2, event_id
