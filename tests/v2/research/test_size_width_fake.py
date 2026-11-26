@@ -722,3 +722,20 @@ def test_anchor_sweep_continues_past_an_empty_pool_slice_with_forecasts_at_their
         want = labels["abs_move"].reindex(events["event_id"].astype(str)).to_numpy(dtype=float)
         np.testing.assert_array_equal(got, want)
         assert np.isfinite(got).all()
+
+
+def test_on_sweep_runs_once_per_draw_and_once_for_the_anchor_and_changes_no_score(tmp_path, monkeypatch):
+    _small_window(monkeypatch)
+    _small_draws(monkeypatch)
+    table, labels, model = _world()
+    months, sessions = _months()
+    seen = []
+    hooked = fake.run_fake(months, table, labels, model, sessions, tmp_path / "hooked", "hash-1", n=2, draws=DRAW, on_sweep=seen.append)
+    plain = fake.run_fake(months, table, labels, model, sessions, tmp_path / "plain", "hash-1", n=2, draws=DRAW)
+    assert hooked["status"] == plain["status"] == "ok"
+    assert len(seen) == 2 and seen[0] is not seen[1]
+    assert hooked["body"] == plain["body"] and hooked["pooled"] == plain["pooled"]
+    anchor_seen = []
+    anchor = fake.run_anchor(months, table, labels, sessions, draws=DRAW, on_sweep=anchor_seen.append)
+    assert len(anchor_seen) == 1
+    assert anchor == fake.run_anchor(months, table, labels, sessions, draws=DRAW)

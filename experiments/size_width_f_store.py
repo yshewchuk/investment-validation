@@ -1,12 +1,16 @@
 """EXP-189 A1 W7c3 part b: the F report inputs of one run stage (design A1.10; #3010: no section 8 statistic at run time).
 ``legs_NNNN``: one row per positive-quantity leg (event_id, structure, k, point, right, strike, side; unlisted exit: nulls); entry rows are the
-grid-k candidates F priced, plus taken legs. ``taken_NNNN``: the taken rows plus ``arm``. Anchor and fake draws are not stored; only run stages open a Store."""
+grid-k candidates F priced, plus taken legs. ``taken_NNNN``: the taken rows plus ``arm``. No legs or taken rows of the anchor or fake draws are stored, only their A1.4 counts: inner table
+``anchor_c_nontrades`` (columns arm, draws, structure, k, year, metric, reason, count; ``draws`` = sweeps summed; metric ``candidates`` is the
+denominator, metric ``nontrade`` is per decline reason, all reasons, by event year over the inner window). No C rows when C is omitted (the inner
+summary's c_status says why). Only run stages open a Store."""
 import sys
 import time
 
 import pandas as pd
 
-from experiments import size_width_f_report_inputs as ri, size_width_f_rows
+from experiments import size_width_f_counts as fcounts, size_width_f_report_inputs as ri, size_width_f_rows
+from experiments.size_width_sweep import WINDOWS
 from experiments.size_pnl_ladder import _rss_mib
 from experiments.size_width_fills import Trade
 
@@ -14,6 +18,8 @@ _KEYS = ["point", "event_id", "structure", "k", "side", "qty", "ticker", "obs_da
 _TABLE = ["bid", "ask", "eff_bid", "eff_ask", "V", "status", "source", "vol", "smvVol", "rate", "c_buy", "c_sell", "fill_buy",
           "fill_sell", "repaired", "open_interest", "bid_size", "ask_size", "chain_kind", "assetType", "spot"]
 _LEG = ["point", "event_id", "structure", "k", "right", "strike", "side", "qty", "ticker", "obs_date", "expiry", "year", "mid", *_TABLE]
+_NONTRADE = ["arm", "structure", "k", "year", "metric", "reason", "count"]
+_NONTRADE_OUT = ["arm", "draws", "structure", "k", "year", "metric", "reason", "count"]
 
 
 def open_store(out, stage, pricing):
@@ -24,6 +30,7 @@ def open_store(out, stage, pricing):
 class Store:
     def __init__(self, out, stage, quotes):
         self.out, self.stage, self.quotes, self.keys, self.taken_buf, self.parts, self.flags, self.n = out, stage, quotes, [], [], {}, [], 0
+        self.arm_counts = {}  # arm -> one count frame per sweep counted (A1.4)
 
     def _resolved(self, sweep, chunk, events, triples):
         """(position, event_id, structure, k, resolved legs) for each (event_id, structure, k) triple of the chunk."""
@@ -57,6 +64,17 @@ class Store:
             f"fallback phi={sweep.phi} factors=" + ",".join(f"{n}={v}" for n, v in sorted(sweep.factors.items())))
         self.taken_buf.append(rows.assign(arm=label))
 
+    def count_sweep(self, arm, sweep):
+        """A1.4 non-trade counts of one anchor or C sweep: candidates and decline reasons per name and grid k, per window (E is not counted)."""
+        rows = []
+        for name in sweep.names:
+            for k in sweep.ks:
+                for window in (WINDOWS["2023H2"], WINDOWS["2024"]):
+                    got, group = fcounts.nontrades(sweep, name, k, window), {"arm": arm, "structure": name, "k": float(k), "year": window[0].year}
+                    rows.append({**group, "metric": "candidates", "reason": "", "count": got["candidates"]})
+                    rows += [{**group, "metric": "nontrade", "reason": reason, "count": n} for reason, n in got["reasons"].items()]
+        self.arm_counts.setdefault(arm, []).append(pd.DataFrame(rows, columns=_NONTRADE))
+
     def _buffer(self, chunk, i, eid, name, k, legs, points):
         """Buffers the positive-quantity legs of one row at each of ``points`` (no legs: nothing buffered)."""
         self.keys += [(p, eid, name, float(k), leg["side"], float(leg["qty"]), *self.quotes.leg_key(chunk, i, leg["idx"], exit=p == "exit"))
@@ -87,8 +105,12 @@ class Store:
         return legs.assign(year=pd.to_datetime(legs["obs_date"]).dt.year, mid=(legs["bid"] + legs["ask"]) / 2)[_LEG]
 
     def close(self, inputs_hash, scope):
-        """Writes the stage's receipt with the coverage and exit-flag tables; refused while any leg or taken row is unflushed."""
+        """Writes the stage's receipt with the coverage, exit-flag and (when a sweep was counted) A1.4 non-trade tables; refused while any leg or taken row is unflushed."""
         if self.keys or self.taken_buf: raise ValueError("close needs a flush first: buffered legs or taken rows are unpublished")
         flags = ri.merge_counts(self.flags) if self.flags else pd.DataFrame(columns=["arm", "structure", "year", "metric", "count"])
         coverage = ri.merge_counts(self.quotes.coverage) if self.quotes.coverage else pd.DataFrame(columns=ri.POINT_COLS)
-        ri.write(self.out, self.stage, inputs_hash, scope, {"coverage": coverage, "exit_flags": flags}, parts=self.parts)
+        tables = {"coverage": coverage, "exit_flags": flags}
+        if self.arm_counts:  # each arm's sweeps summed; draws = its sweeps (anchor: 1, C: one per draw)
+            tables["anchor_c_nontrades"] = pd.concat([ri.merge_counts(self.arm_counts[a]).assign(draws=len(self.arm_counts[a])) for a in sorted(self.arm_counts)],
+                                                     ignore_index=True)[_NONTRADE_OUT]
+        ri.write(self.out, self.stage, inputs_hash, scope, tables, parts=self.parts)
