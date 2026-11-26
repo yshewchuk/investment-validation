@@ -49,8 +49,8 @@ CONCESSION = [
     (0.9, 1.1, 50, 50, 1000, 0.45, 0.45, 1.045, 0.955),        # s = 0.20
     (0.75, 1.25, 50, 50, 1000, 0.75, 0.75, 1.1875, 0.8125),    # s = 0.50
     (0.5, 1.5, 50, 50, 1000, 0.75, 0.75, 1.375, 0.625),        # s = 1.00, capped at SPREAD_SCALE
-    (0.75, 1.25, 9, 9, 99, 1.0, 1.0, 1.25, 0.75),              # s = 0.50, both thin: cap at 1
-    (0.5, 1.5, 9, 9, 99, 1.0, 1.0, 1.5, 0.5),                  # s = 1.00, both thin: cap at 1
+    (0.75, 1.25, 9, 9, 99, 1.0, 1.0, 1.25, 0.75),              # s = 0.50, both thin: c = 1, the largest possible sum
+    (0.5, 1.5, 9, 9, 99, 1.0, 1.0, 1.5, 0.5),                  # s = 1.00, both thin: c = 1, the largest possible sum
     (0.9, 1.1, 10, 9, 100, 0.60, 0.45, 1.06, 0.955),           # ask thin, bid not; OI 100 not thin
     (0.9, 1.1, 0, 0, 1000, 0.60, 0.60, 1.06, 0.94),            # zero sizes are known and thin
     (0.9, 1.1, 50, 50, 99, 0.55, 0.55, 1.055, 0.945),          # OI 99 adds 0.10
@@ -79,6 +79,50 @@ def test_unknown_liquidity_sensitivities_and_flags(capsys):
     assert zero.fill_buy_unknown0 == near(1.07) and zero.fill_buy_unknown1 == near(1.07)
     assert (zero.thin_size_buy, zero.thin_size_sell, zero.thin_oi) == (1.0, 1.0, 1.0)
     assert not (zero.unknown_ask_size or zero.unknown_bid_size or zero.unknown_oi)
+
+
+def test_one_sided_unknown_size_ask_side_known():
+    # bid size unknown, ask size 50: the unknown bid side takes the 0.10 penalty on the buy side
+    out = fills(row(100, "C", 0.9, 1.1, bsz=None, asz=50, oi=1000)).iloc[0]
+    assert out.V == near(1.0)
+    assert out.c_buy == near(0.45) and out.c_sell == near(0.525)
+    assert out.fill_buy == near(1.045) and out.fill_sell == near(0.9475)
+    assert out.fill_buy_unknown0 == near(1.045) and out.fill_sell_unknown0 == near(0.955)
+    assert out.fill_buy_unknown1 == near(1.045) and out.fill_sell_unknown1 == near(0.94)
+    assert out.fill_buy_midfloor == near(1.045) and out.fill_sell_midfloor == near(0.9475)
+    assert out.unknown_bid_size and not out.unknown_ask_size
+
+
+def test_one_sided_unknown_size_bid_side_known():
+    # mirror of the case above: ask size unknown, bid size 50
+    out = fills(row(100, "C", 0.9, 1.1, bsz=50, asz=None, oi=1000)).iloc[0]
+    assert out.V == near(1.0)
+    assert out.c_buy == near(0.525) and out.c_sell == near(0.45)
+    assert out.fill_buy == near(1.0525) and out.fill_sell == near(0.955)
+    assert out.fill_buy_unknown0 == near(1.045) and out.fill_sell_unknown0 == near(0.955)
+    assert out.fill_buy_unknown1 == near(1.06) and out.fill_sell_unknown1 == near(0.955)
+    assert out.unknown_ask_size and not out.unknown_bid_size
+
+
+SENSITIVITY_FILLS = ("fill_buy_unknown0", "fill_sell_unknown0", "fill_buy_unknown1", "fill_sell_unknown1",
+                     "fill_buy_midfloor", "fill_sell_midfloor")
+
+
+def test_unpriceable_crossed_quote_is_nan():
+    # finite spread but crossed quote (bid above ask): status unpriceable, all price-derived columns NaN
+    out = fills(row(100, "C", 1.2, 0.8, spot=101.0)).iloc[0]
+    assert out.status == "unpriceable"
+    for c in ("s", "c_buy", "c_sell", "fill_buy", "fill_sell") + SENSITIVITY_FILLS:
+        assert pd.isna(out[c]), c
+
+
+def test_no_fair_value_row_keeps_concession_and_nan_fills():
+    # spot NaN with expiry == obs_date: no fair value, but the liquid sizes still give c = 0.45
+    out = fills(row(100, "C", 0.9, 1.1, spot=NAN)).iloc[0]
+    assert out.status == "no_fair_value"
+    assert out.c_buy == near(0.45) and out.c_sell == near(0.45)
+    for c in ("fill_buy", "fill_sell") + SENSITIVITY_FILLS:
+        assert pd.isna(out[c]), c
 
 
 def test_v_away_from_mid_and_midfloor_floors_both_sides():

@@ -977,10 +977,11 @@ EXP-188: `size_pnl_{inputs,outer_inputs}` bind v14 and 2025 forecasts; `size_pnl
 
 ## Fill model F
 
-No production caller ([design §4](../guides/fair_value_fill_design.md)). `fair_value_pricer` prices; `fair_value_legs`/`fair_value_fills` clamp/fill quotes ([README](README.md)).
+No production caller ([design](../guides/fair_value_fill_design.md)). `fair_value_pricer` prices; `fair_value_legs`/`fair_value_fills` clamp/fill quotes ([README](README.md)).
 
 |Condition|Outcome|
 |-|-|
+|Null liquidity|thin=0.5|
 |Invalid pricer input|NaN|
 |Missing column, duplicate quote/vol key, invalid `right`/`quote_repaired`|`FairValueRefusal` (`EXPERIMENT_IDENTITY_CONFLICT`), no partial output|
 |`fair_value_inputs` check fails|Same|
