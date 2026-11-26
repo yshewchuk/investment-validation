@@ -16,6 +16,7 @@ from experiments import size_pnl_readers as readers
 from experiments import size_pnl_receipts as receipts
 from experiments import size_pnl_shortvol as sv
 from experiments import size_width_band as band
+from experiments import size_width_choices as choices
 from experiments import size_width_deviation as deviation
 from experiments import size_width_driver as driver
 from experiments import size_width_fake as fake
@@ -82,7 +83,7 @@ def pricing(monkeypatch):
         ids = [str(e) for e in decisions["event_id"]]
         n = len(ids)
         return pd.DataFrame({"event_id": pd.Series(ids, dtype=object), "structure": [name] * n, "entry_cost": [2.0] * n, "exit_value": [1.0] * n,
-                             "pnl_dollars": [0.0] * n, "pnl_per_share": [0.0] * n})
+                             "pnl_dollars": [0.0] * n, "pnl_per_share": [0.0] * n, "lots": [1] * n})
 
     def secured(chunk_, events, decisions, name):
         ids = [str(e) for e in decisions["event_id"]]
@@ -117,7 +118,7 @@ def taking(monkeypatch):
         ids = [str(e) for e in decisions["event_id"]]
         n = len(ids)
         return pd.DataFrame({"event_id": pd.Series(ids, dtype=object), "structure": [name] * n, "entry_cost": [2.0] * n,
-                             "exit_value": [3.0] * n, "pnl_dollars": [100.0] * n, "pnl_per_share": [1.0] * n})
+                             "exit_value": [3.0] * n, "pnl_dollars": [100.0] * n, "pnl_per_share": [1.0] * n, "lots": [1] * n})
 
     def secured(chunk_, events, decisions, name):
         ids = [str(e) for e in decisions["event_id"]]
@@ -825,3 +826,45 @@ def test_inner_then_outer_smoke_writes_t8_the_fallback_stage_and_the_report(tmp_
         report.assemble(out)
     assert caught.value.details["reason"] == "tuning_receipt_changed"
     assert (out / "REPORT.md").read_text(encoding="utf-8") == text
+
+
+# ---- arm E choices change no other receipt or month --------------------------------
+
+def _kept(root):
+    """Every file under ``root`` except the arm E choice files (``e_choices/`` and ``receipts/e_choices_*``)."""
+    return sorted(p.relative_to(root) for p in root.rglob("*")
+                  if p.is_file() and "e_choices" not in p.parts and not p.name.startswith("e_choices"))
+
+
+def test_arm_e_choices_leave_every_other_receipt_and_month_byte_identical(tmp_path, m0, taking, monkeypatch):
+    ids = ["E1", "E2", "E3", "E4"]
+    real = deviation.DeviationSweep
+
+    class NoChoices(real):
+        def __init__(self, *args, **kwargs):
+            kwargs.pop("choices", None)
+            super().__init__(*args, **kwargs)
+
+    def run(out, sweep_class):
+        monkeypatch.setattr(deviation, "DeviationSweep", sweep_class)
+        use_chunks(monkeypatch, [("2023Q3", chunk("E1")), ("2024Q3", chunk("E2"))])
+        driver.run(sources(), "inner", out, event_ids=ids, prereg=OK)
+        use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+        driver.run(sources(), "outer", out, event_ids=ids, prereg=OK)
+
+    on, off = tmp_path / "on", tmp_path / "off"
+    run(on, real)
+    run(off, NoChoices)
+    kept = _kept(on)
+    assert kept == _kept(off)
+    assert any(p.parts[0] == "months" for p in kept) and any(p.parts[0] == "receipts" for p in kept)
+    for rel in kept:
+        assert (on / rel).read_bytes() == (off / rel).read_bytes(), rel
+    # with recording off the driver still writes its e_choices month files, but each one is empty (NoChoices leaves fresh_choices empty)
+    names = sorted(p.name for p in (on / "e_choices").glob("*.parquet"))
+    assert names and names == sorted(p.name for p in (off / "e_choices").glob("*.parquet"))
+    for name in names:
+        off_frame = pd.read_parquet(off / "e_choices" / name)
+        assert len(off_frame) == 0 and list(off_frame.columns) == choices.COLS, name
+    # the taking fixture decides every arm-E candidate (taken or thin_history), so the recording run has rows in at least one month
+    assert any(len(pd.read_parquet(on / "e_choices" / name)) > 0 for name in names)
