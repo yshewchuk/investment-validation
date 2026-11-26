@@ -35,7 +35,7 @@ walk_forward:
 arms:
   Q: {role: eligible, rule: "one quantile HGB per level and fold, sorted, then causally calibrated"}
   Q_raw: {role: eligible, rule: "one quantile HGB per level and fold, sorted, floored at 0, uncalibrated"}
-  S: {role: reported, can_pass: false, rule: "q = median + scale * z_q at year Y's chosen configuration. Median: absolute_error HGB. Scale: second HGB, loss absolute_error (conditional median), on out-of-fold |y - median| in year-blocked expanding folds within training rows; any year with an earlier training row is predicted, training only on labels available before that year. scale = max(scale, 0.5) both when standardising and in q; report MUST print, per year, the share of events where this floor binds (distribution_tails' binding-share report). z_q from S's own earlier out-of-sample standardised residuals, labels available before cutoff; trailing 12 months, refreshed monthly (same as Q); at least 500 events, else unscored (scale_burn_in); Y0 unscored. Raw = median + scale * z_q; scored after sort and floor at 0; crossing rate on raw."}
+  S: {role: reported, can_pass: false, rule: "q = median + scale * z_q at year Y's chosen configuration. Median: absolute_error HGB. Scale: second HGB, loss absolute_error (conditional median), on out-of-fold |y - median| in year-blocked expanding folds within training rows; any year with an earlier training row is predicted, training only on labels available before that year. scale = max(scale, 0.5) both when standardising and in q; report MUST print, per year, the share of events where this floor binds (distribution_tails' binding-share report). z_q from S's own earlier out-of-sample standardised residuals ((y - median) over the floored scale), labels available before cutoff (start of month m); trailing 12 months, refreshed monthly (same as Q); at least 500 events, else unscored (scale_burn_in); Y0 unscored. Raw = median + scale * z_q; scored after sort and floor at 0; crossing rate on raw."}
 
 grid:
   axes: {max_leaf_nodes: [7, 15], min_samples_leaf: [300, 1000]}
@@ -54,7 +54,7 @@ distribution_tails:
   floor: 0.5
   interpolation: "inverse CDF linear between knots, per arm from its own predictions"
   rule: "tail pool fixed at start of each month (calibration pool's events rule). Above 0.9: d = (y - q90) / max(q90 - q50, floor) over donors with y > q90; Q(u) = q90 + s_hi * quantile(d, (u - 0.9)/0.1). Below 0.1: d = (y - q10) / max(q50 - q10, floor) over donors with y < q10; Q(u) = max(0, q10 + s_lo * quantile(d, u/0.1)). Event's own s_hi = max(q90 - q50, floor), s_lo = max(q50 - q10, floor). numpy linear; a jump at the knots is allowed. Under min_donors in a tail: whole event unscored for that arm (tail_pool_thin)"
-  floor_report: "floor is provisional (user unsure of value): report MUST print, per arm and year, the share of events where the 0.5 floor binds, for the event width and for the donor normalisation"
+  floor_report: "floor is provisional (user unsure of value): report MUST print, per arm and year, the share of events where the 0.5 floor binds, for the event width and for the donor normalisation; for arm S also the scale-floor share (arms.S)"
 zero_median:
   threshold: 1.0e-09
   rule: "ratio over q50 (W / q50) undetermined when q50 <= threshold: counted zero_median, never 0/0; quantiles stay valid."
