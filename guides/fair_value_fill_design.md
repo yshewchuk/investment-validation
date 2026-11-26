@@ -28,7 +28,7 @@
 
 **Data facts (supervisor-checked 2026-11-25, not re-read here).** `engine/data/normalize/n_chains.py` drops `smvVol` from curated `option_chains`; the raw cache has it per strike. Open interest and both sizes exist only on `chain_kind=fetch` rows (2023-01-03 to 2025-12-31), about 75-80% of rows; `eod`, `t14` and `c2` rows have none, so earlier history has none.
 
-**The re-ingest tool** (`tools/orats_smoothed_vol.py`) writes no production store. F binds the content hash of its `manifest.json` (written last) and of every table file read. A missing manifest, or one that reports unread payloads, refuses (Amendment 1). F reads only the columns above; extra columns and manifest keys are ignored.
+**The re-ingest tool** (`tools/orats_smoothed_vol.py`) writes no production store. F binds the content hash of its `manifest.json` (written last) and of every table file read. A missing manifest, or one that reports unread payloads, refuses (Amendment 1). F reads only the columns above; extra columns and manifest keys are ignored, except that F7 also reads `units` (below).
 
 **Units.** `spot`, strikes and quotes are dollars per share; vols and rates are annualised decimals. The raw units are confirmed from the re-ingest and pinned in each consumer's spec before registration, using no outcome. After conversion, a rate value outside [-0.05, 0.20] is by default missing (Amendment 1, item 3, pending); a non-finite or non-positive vol is missing; a bound vol table whose median `smvVol` is outside (0.05, 5) refuses `vol_unit` (bounds mine).
 

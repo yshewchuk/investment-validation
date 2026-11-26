@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import gzip
 import json
+import re
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -482,6 +485,8 @@ def test_rates_without_required_fields_does_not_override(tmp_path):
     assert tool.main(_args(raw, out, tmp_path / "work")) == 0
     manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["tables"]["rates"]["without_required_fields"] == 1
+    # the skipped payload's annIdiv is still counted
+    assert manifest["dividend_fields"] == {"annActDiv": 1, "annIdiv": 2, "divAmt": 1, "divDate": 1}
     r = pd.read_parquet(out / "rates" / "year=2025" / "month=01.parquet")
     first = r.iloc[0]
     assert first["iRate5wk"] == 0.04
@@ -550,7 +555,30 @@ def test_merge_heartbeat(tmp_path, monkeypatch, caplog):
     monkeypatch.setattr(tool, "PROGRESS_S", 0.0)
     caplog.set_level("INFO", logger="smvvol")
     assert tool.main(_args(raw, out, tmp_path / "work")) == 0
-    assert "merge quotes 2025-01: shards 1/" in caplog.text
-    assert "shards/s" in caplog.text
-    assert "dedupe " in caplog.text
-    assert "rss " in caplog.text
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(re.match(r"^\[smvvol\] merge quotes 2025-01: shards 1/\d+, [\d.]+ shards/s, ETA \d+ s, rss \d+ MB$", m)
+               for m in messages)
+    assert any(re.match(r"^\[smvvol\] merge quotes 2025-01: dedupe \d+ rows, rss \d+ MB$", m) for m in messages)
+
+
+def test_month_heartbeat_logs_while_blocked(monkeypatch, caplog):
+    monkeypatch.setattr(tool, "PROGRESS_S", 0.01)
+    caplog.set_level("INFO", logger="smvvol")
+    before = threading.active_count()
+
+    def wait_for(text):
+        deadline = time.monotonic() + 5
+        while not any(text in r.getMessage() for r in caplog.records):
+            assert time.monotonic() < deadline, f"no record containing {text!r}"
+            time.sleep(0.01)
+
+    with tool._heartbeat("rates", "2025-01", 0, 3, time.monotonic()):
+        wait_for("still merging")
+    assert any(re.match(r"^\[smvvol\] merge rates 2025-01: still merging, 0/3 months done, \d+ s on this month, "
+                        r"ETA unknown, rss \d+ MB$", r.getMessage()) for r in caplog.records)
+
+    with tool._heartbeat("rates", "2025-01", 1, 3, time.monotonic()):
+        wait_for("1/3 months done")
+    assert any(re.match(r"^\[smvvol\] merge rates 2025-01: still merging, 1/3 months done, \d+ s on this month, "
+                        r"ETA \d+ s, rss \d+ MB$", r.getMessage()) for r in caplog.records)
+    assert threading.active_count() == before

@@ -12,6 +12,7 @@ import os
 import resource
 import shutil
 import sys
+import threading
 import time
 import zlib
 from collections import Counter
@@ -90,6 +91,27 @@ def _stage(name: str):
 
 def _eta(done: int, total: int, start: float) -> float:
     return (total - done) * (time.monotonic() - start) / done
+
+
+@contextmanager
+def _heartbeat(table: str, month: str, completed: int, total: int, start: float):
+    stop = threading.Event()
+    interval, t0 = max(PROGRESS_S, 0.01), time.monotonic()
+
+    def beat():
+        while not stop.wait(interval):
+            eta = f"{_eta(completed, total, start):.0f} s" if completed > 0 else "unknown"
+            LOG.info("[smvvol] merge %s %s: still merging, %d/%d months done, %.0f s on this month, "
+                     "ETA %s, rss %.0f MB", table, month, completed, total, time.monotonic() - t0,
+                     eta, _rss_mb())
+
+    thread = threading.Thread(target=beat, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join()
 
 
 def _parse_date(series: pd.Series) -> pd.Series:
@@ -249,17 +271,18 @@ def merge_stage(work: Path, out: Path, markers: dict) -> dict:
         start = time.monotonic()
         for done, (month, entry_keys) in enumerate(sorted(index.items()), 1):
             shards = _read_shards(work, table, month, entry_keys, markers)
-            df = pd.concat(shards, ignore_index=True)
-            LOG.info("[smvvol] merge %s %s: dedupe %d rows, rss %.0f MB",
-                     table, month, len(df), _rss_mb())
-            nc_cols = [*keys, *(v for v in values if v not in CARRY)]
-            conflicts = (df[nc_cols].drop_duplicates().groupby(keys, sort=False).size() > 1).sum()
-            conflicts_all = conflicts if len(nc_cols) == len(cols) else (
-                df[cols].drop_duplicates().groupby(keys, sort=False).size() > 1).sum()
-            final = df.sort_values([*keys, "fetched_at", "cache_key", "row_no"], kind="mergesort")
-            final = final.drop_duplicates(subset=keys, keep="last")[cols].reset_index(drop=True)
-            path = out / table / f"year={month[:4]}" / f"month={month[5:]}.parquet"
-            _atomic(path, lambda t: final.to_parquet(t, index=False, engine="pyarrow"))
+            with _heartbeat(table, month, done - 1, len(index), start):
+                df = pd.concat(shards, ignore_index=True)
+                LOG.info("[smvvol] merge %s %s: dedupe %d rows, rss %.0f MB",
+                         table, month, len(df), _rss_mb())
+                nc_cols = [*keys, *(v for v in values if v not in CARRY)]
+                conflicts = (df[nc_cols].drop_duplicates().groupby(keys, sort=False).size() > 1).sum()
+                conflicts_all = conflicts if len(nc_cols) == len(cols) else (
+                    df[cols].drop_duplicates().groupby(keys, sort=False).size() > 1).sum()
+                final = df.sort_values([*keys, "fetched_at", "cache_key", "row_no"], kind="mergesort")
+                final = final.drop_duplicates(subset=keys, keep="last")[cols].reset_index(drop=True)
+                path = out / table / f"year={month[:4]}" / f"month={month[5:]}.parquet"
+                _atomic(path, lambda t: final.to_parquet(t, index=False, engine="pyarrow"))
             totals.update({"rows_out": len(final), "conflicting_keys": int(conflicts),
                            "conflicting_keys_all_columns": int(conflicts_all)})
             non_null.update({v: int(final[v].notna().sum()) for v in values})
