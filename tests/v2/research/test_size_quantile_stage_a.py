@@ -29,8 +29,7 @@ LEVELS = [0.1, 0.25, 0.4, 0.5, 0.6, 0.75, 0.9]
 Z = [statistics.NormalDist().inv_cdf(level) for level in LEVELS]
 YEARS = ["2022", "2023", "2024", "2025"]
 BINDING, DICT = "sha256:" + "b" * 64, "sha256:" + "a" * 64
-PRODUCTION_BINDING, TABLE_HASH = "sha256:" + "d" * 64, "sha256:" + "e" * 64
-ALT_BINDING = "sha256:" + "f" * 64
+TABLE_HASH, ALT_TABLE = "sha256:" + "e" * 64, "sha256:" + "f" * 64
 
 
 def _candidates():
@@ -39,6 +38,15 @@ def _candidates():
                         "estimator": {"params": {**FIXED, "max_leaf_nodes": leaves, "min_samples_leaf": leaf,
                                                  "loss": "quantile", "quantile": 0.5}}}}
             for leaves in (7, 15) for leaf in (300, 1000)]
+
+
+def _binding(table_hash, frame):
+    """The production binding from its definition: the table hash and the rows sorted by event id, each as
+    [event_id, event_date.isoformat(), pred_move, pred_crush]."""
+    rows = [[event, day.isoformat(), float(move), float(crush)]
+            for event, day, move, crush in sorted(zip(frame.index, frame["event_date"], frame["pred_move"],
+                                                      frame["pred_crush"]), key=lambda row: row[0])]
+    return content_hash({"table": table_hash, "rows": rows})
 
 
 def _world():
@@ -72,13 +80,16 @@ def _world():
         "rows": [{"event_id": e["id"], "f_mu": e["mu"], "f_s": e["s"], "f_empty": None} for e in events],
     }
     # Production forecast drifts biased from 2023-07-01: its pooled earlier errors hide the bias, so its bands under/over-cover in the judged periods.
-    production = {"frame": pd.DataFrame({"pred_move": [e["mu"] + (3.0 if e["date"] >= "2023-07-01" else 0.0) for e in events],
-                                         "pred_crush": 0.0,
-                                         "event_date": [e["date"] for e in events]}, index=ids),
-                  "binding": PRODUCTION_BINDING, "table_hash": TABLE_HASH}
+    frame = pd.DataFrame({"pred_move": [e["mu"] + (3.0 if e["date"] >= "2023-07-01" else 0.0) for e in events],
+                          "pred_crush": 0.0,
+                          "event_date": [pd.Timestamp(e["date"]) for e in events]}, index=ids)
+    production = {"frame": frame, "binding": _binding(TABLE_HASH, frame), "table_hash": TABLE_HASH}
     labels = pd.DataFrame({"abs_move": [e["y"] for e in events], "crush_pct_iv30": 0.0}, index=ids)
     return {"events": events, "mu": {e["id"]: e["mu"] for e in events}, "s": {e["id"]: e["s"] for e in events},
             "y": {e["id"]: e["y"] for e in events}, "sealed": sealed, "production": production, "labels": labels}
+
+
+PRODUCTION_BINDING = _binding(TABLE_HASH, _world()["production"]["frame"])
 
 
 def _fake_fit(boom=False):
@@ -165,6 +176,48 @@ def _why(doc):
     return "\n".join(lines)
 
 
+def _oracle_mean_crps(world, quarter):
+    """Mean CRPS over the quarter's events, from the design rule alone (no production helper).
+    quantiles[0], [3], [6] are the event's q10, q50, q90."""
+    grid = (np.arange(20000) + 0.5) / 20000
+    dated = [(date.fromisoformat(e["date"]), date.fromisoformat(e["label_end"]) + timedelta(days=1), e["id"])
+             for e in world["events"]]
+    z = np.array(Z)
+
+    def quantiles(event_id):
+        return np.maximum(world["mu"][event_id] + world["s"][event_id] * z, 0.0)
+
+    pools = {}
+
+    def donor_pools(month):
+        if month not in pools:
+            start = month.replace(year=month.year - 1)
+            hi, lo = [], []
+            for day, ready, event_id in dated:
+                if not (start <= day < month and day >= date(2022, 1, 1) and ready < month):
+                    continue
+                q, y = quantiles(event_id), world["y"][event_id]
+                if y > q[6]:
+                    hi.append((y - q[6]) / max(q[6] - q[3], 0.5))
+                if y < q[0]:
+                    lo.append((y - q[0]) / max(q[3] - q[0], 0.5))
+            pools[month] = (np.array(hi), np.array(lo))
+        return pools[month]
+
+    scores = []
+    for event in quarter:
+        month = date.fromisoformat(event["date"]).replace(day=1)
+        hi, lo = donor_pools(month)
+        q = quantiles(event["id"])
+        q10, q50, q90 = q[0], q[3], q[6]
+        upper = q90 + max(q90 - q50, 0.5) * np.quantile(hi, np.clip((grid - 0.9) / 0.1, 0.0, 1.0))
+        lower = np.maximum(0.0, q10 + max(q50 - q10, 0.5) * np.quantile(lo, np.clip(grid / 0.1, 0.0, 1.0)))
+        Q = np.where(grid > 0.9, upper, np.where(grid < 0.1, lower, np.interp(grid, LEVELS, q)))
+        y = world["y"][event["id"]]
+        scores.append(2 * np.mean(np.where(y >= Q, grid * (y - Q), (1 - grid) * (Q - y))))
+    return float(np.mean(scores))
+
+
 @pytest.fixture(scope="module")
 def full_run(tmp_path_factory):
     case = tmp_path_factory.mktemp("stage_a_full")
@@ -174,7 +227,8 @@ def full_run(tmp_path_factory):
         _install(patch, world)
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             doc = _run(world, out, guard)
-    return {"world": world, "out": out, "doc": doc, "stdout": stdout.getvalue(), "stderr": stderr.getvalue()}
+    return {"world": world, "out": out, "doc": doc, "guard": guard, "stdout": stdout.getvalue(),
+            "stderr": stderr.getvalue()}
 
 
 def test_full_run_passes_and_every_checked_number_matches_the_oracle(full_run):
@@ -198,6 +252,14 @@ def test_full_run_passes_and_every_checked_number_matches_the_oracle(full_run):
     assert inputs["b0_labels_hash"] == content_hash(b0)
     evaluated = [e["id"] for e in world["events"] if e["date"] >= "2022-01-01"]
     assert inputs["evaluation_labels_hash"] == content_hash(sorted([e, world["y"][e]] for e in evaluated))
+    assert inputs["unlabelled_outside_periods"] == []
+    assert inputs["sealed_binding"] == BINDING
+    assert inputs["spec_hash"] == prereg.load_spec(full_run["guard"]["spec_path"])[1]
+    # require_preregistration returns preregistered_at as str(datetime), not the raw stamp.
+    assert inputs["preregistered_at"] == "2026-11-25 12:00:00+00:00" and inputs["years"] == YEARS
+    assert inputs["evaluation_labels_before"] == "2026-02-01"
+    assert inputs["bootstrap"] == {"resamples": 10000, "seed": 188}
+    assert doc["selection_period_disclosure"] == SPEC["stage_a"]["selection_period_disclosure"]
 
     rows = doc["arms"]["Q_raw"]["conditional"]["rows"]
     losses = []
@@ -227,6 +289,14 @@ def test_full_run_passes_and_every_checked_number_matches_the_oracle(full_run):
     assert share["share"] == pytest.approx(share["paired"] / len(admitted))
 
 
+def test_q_raw_quarter_crps_matches_an_independent_oracle(full_run):
+    world, doc = full_run["world"], full_run["doc"]
+    quarter = [e for e in world["events"] if "2024-04-01" <= e["date"] <= "2024-06-30"]
+    row = next(t for t in doc["arms"]["Q_raw"]["tables"] if t["slice"] == "quarter" and t["label"] == "2024Q2")
+    assert row["n"] == len(quarter)
+    assert row["crps"] == pytest.approx(_oracle_mean_crps(world, quarter), rel=1e-3)
+
+
 def test_replay_is_identical_and_a_changed_binding_refuses_without_touching_the_report(monkeypatch, tmp_path):
     world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
     _install(monkeypatch, world)
@@ -234,11 +304,30 @@ def test_replay_is_identical_and_a_changed_binding_refuses_without_touching_the_
     before = (out / REPORT).read_bytes()
     assert _run(world, out, guard) == first
     assert (out / REPORT).read_bytes() == before
+    changed = {**world["production"], "table_hash": ALT_TABLE}
+    changed["binding"] = _binding(ALT_TABLE, world["production"]["frame"])
     with pytest.raises(OpsError) as exc:
-        _run(world, out, guard, production={**world["production"], "binding": ALT_BINDING})
+        _run(world, out, guard, production=changed)
     assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "stage_a_report_changed")
     assert (out / REPORT).read_bytes() == before
     assert not list(out.glob("*.tmp"))
+
+
+@pytest.mark.parametrize("change", ["frame", "table_hash"])
+def test_production_binding_mismatch_refuses_before_any_label_read_or_fit(monkeypatch, tmp_path, change):
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    calls = _spy(monkeypatch, world)
+    production = dict(world["production"])
+    if change == "frame":
+        frame = world["production"]["frame"].copy()
+        frame.loc[frame.index[0], "pred_move"] += 1.0
+        production["frame"] = frame
+    else:
+        production["table_hash"] = ALT_TABLE
+    with pytest.raises(OpsError) as exc:
+        _run(world, out, guard, production=production)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "production_binding_mismatch")
+    assert calls == [] and not out.exists()
 
 
 def test_unsettled_stage_b_refuses_before_any_label_read_or_fit(monkeypatch, tmp_path):
@@ -282,11 +371,23 @@ def test_in_period_admitted_event_without_a_label_refuses_and_drops_nothing(monk
     assert not (out / REPORT).exists()
 
 
+def test_unlabelled_event_outside_the_periods_is_recorded_not_refused(monkeypatch, tmp_path):
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    omitted = next(e["id"] for e in world["events"] if e["date"].startswith("2022"))
+    _install(monkeypatch, world, omit=(omitted,))
+    doc = _run(world, out, guard)
+    assert doc["inputs"]["unlabelled_outside_periods"] == [omitted]
+    assert json.loads((out / REPORT).read_text(encoding="utf-8")) == doc
+
+
 def test_fit_failure_publishes_a_not_testable_report(monkeypatch, tmp_path):
     world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
     _install(monkeypatch, world, regress=_fake_fit(boom=True))
     doc = _run(world, out, guard)
-    assert doc["status"] == "not_testable" and "Q_raw:fit_failed" in doc["reasons"]
+    assert doc["status"] == "not_testable"
+    assert doc["reasons"] == ["Q:fit_failed", "Q_raw:fit_failed"]
+    assert doc["arm_verdicts"] == {"Q": "not_testable", "Q_raw": "not_testable"}
+    assert doc["inputs"]["unlabelled_outside_periods"] is None
     assert doc["arms"] == {} and doc["fit_status"] == {"2022": "fit_failed"} and doc["floor_report"] == []
     assert json.loads((out / REPORT).read_text(encoding="utf-8")) == doc
 
