@@ -996,5 +996,5 @@ Uncalled ([design](../guides/fair_value_fill_design.md)). `fair_value_carry` pri
 |`exit_negative`|kept|
 |Invalid pricer input|NaN|
 |Missing column, duplicate quote/vol key, invalid `right`/`quote_repaired`|`FairValueRefusal` (`EXPERIMENT_IDENTITY_CONFLICT`), no partial output|
-|`fair_value_inputs`/`fair_value_run` check fails|Same|
-|`fair_value_inputs`/`fair_value_run` cap exceeded|`RESOURCE_LIMIT_EXCEEDED`|
+|`fair_value_inputs`/`fair_value_run`/`size_width_f_quotes` check fails|Same|
+|`fair_value_inputs`/`fair_value_run`/`size_width_f_quotes` cap exceeded|`RESOURCE_LIMIT_EXCEEDED`|
