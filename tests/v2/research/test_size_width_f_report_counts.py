@@ -59,7 +59,7 @@ MUTATIONS = [
     ("missing nontrades", lambda b: b["A"]["2024"]["structures"][NAMES[0]].pop("nontrades")),
     ("missing one structure", lambda b: b["A"]["2024"]["structures"].pop(NAMES[-1])),
     ("extra key", lambda b: _at(b).update(extra=0)),
-    ("bool count", lambda b: _at(b).update(candidates=True)),
+    ("bool count", lambda b: _at(b).update(only_arm_f_skipped=True)),
     ("negative count", lambda b: _at(b).update(only_arm_f_skipped=-1)),
     ("float count", lambda b: _at(b).update(f_skipped=2.0)),
     ("None only_arm_f_skipped", lambda b: _at(b).update(only_arm_f_skipped=None)),
@@ -79,6 +79,12 @@ MUTATIONS = [
     ("missing one alpha key", lambda b: _debit(b).pop("0.50")),
     ("extra alpha key", lambda b: _debit(b).update({"0.10": 1})),
     ("debit count above trades", lambda b: _debit(b).update({"1.00": 401})),
+    ("non-int non-F reason", lambda b: _at(b)["reasons"].update(below_cutoff=4.0)),
+    ("bool non-F reason", lambda b: _at(b)["reasons"].update(below_cutoff=True)),
+    ("negative non-F reason", lambda b: _at(b)["reasons"].update(below_cutoff=-1)),
+    ("bool nonpositive_debit", lambda b: _debit(b).update({"1.00": True})),
+    ("negative debit", lambda b: _debit(b).update({"1.00": -1})),
+    ("float debit", lambda b: _debit(b).update({"1.00": 1.0})),
 ]
 
 
@@ -136,6 +142,18 @@ def test_admit_accepts_a_structure_with_no_candidates_and_no_share():
     assert counts.admit(body, LABELS, PERIODS)
 
 
+def test_admit_accepts_boundary_equal_counts():
+    # Case 1: f_skipped == candidates, only_arm == f_skipped, only_production == candidates - f_skipped == 0.
+    # Case 2: only_arm < f_skipped, only_production == candidates - f_skipped > 0. Reasons sum to f_skipped in both.
+    body = _body()
+    body["A"]["2024"]["structures"][NAMES[0]]["nontrades"] = {"candidates": 2, "f_skipped": 2, "reasons": {ENTRY_REASONS[0]: 1, ENTRY_REASONS[4]: 1},
+                                                             "only_arm_f_skipped": 2, "only_production_f_skipped": 0}
+    body["A"]["2024"]["structures"][NAMES[1]]["nontrades"] = {"candidates": 10, "f_skipped": 2, "reasons": {ENTRY_REASONS[0]: 1, ENTRY_REASONS[4]: 1, "below_cutoff": 8},
+                                                             "only_arm_f_skipped": 1, "only_production_f_skipped": 8}
+    _debit(body)["1.00"] = 400
+    assert counts.admit(body, LABELS, PERIODS)
+
+
 def test_admit_refuses_none_and_malformed_input():
     assert not counts.admit(None, LABELS, PERIODS)
     assert not counts.admit({}, LABELS, PERIODS)
@@ -170,7 +188,9 @@ def test_real_f_evaluate_output_passes_admit_and_is_json_safe(tmp_path, monkeypa
     assert counts.admit(got, LABELS, PERIODS)
     nt = got["A"]["2024"]["structures"][NAME]["nontrades"]
     assert nt["candidates"] == 2 and nt["f_skipped"] == 1 and nt["reasons"] == {"f_fill_over_fair": 1}
-    assert got["E"]["2024"]["structures"][NAME]["nontrades"]["any_k_f_skipped_share"] is not None
+    # any_k_f_skipped_share = |events F-skipped at some grid k, among E's candidates| / |E's candidates|. With ks=(1.0,) the only
+    # F-skipped event is E1, and E's 2 candidates include it: 1 / 2.
+    assert got["E"]["2024"]["structures"][NAME]["nontrades"]["any_k_f_skipped_share"] == 0.5
 
 
 def _corrupt(out, name, fn):
@@ -187,6 +207,7 @@ def _refuse(out):
     with pytest.raises(Refusal) as caught:
         report.assemble(out)
     assert caught.value.code == CONFLICT and caught.value.details["reason"] == "tuning_receipt_changed"
+    assert "the F counts in results are missing, malformed or inconsistent" in str(caught.value)
     assert not (out / "REPORT.md").exists() and not (out / "proposed_rule.json").exists()
 
 
