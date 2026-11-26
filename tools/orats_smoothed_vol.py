@@ -90,7 +90,7 @@ def _eta(done: int, total: int, start: float) -> float:
 
 
 def _parse_date(series: pd.Series) -> pd.Series:
-    parsed = pd.to_datetime(series, errors="coerce", format="ISO8601")
+    parsed = pd.to_datetime(series, errors="coerce", format="%Y-%m-%d")
     in_range = parsed.between(pd.Timestamp.min, pd.Timestamp.max)
     return parsed.where(in_range).astype(DATE)
 
@@ -246,8 +246,9 @@ def merge_stage(work: Path, out: Path, markers: dict) -> dict:
             totals.update({"rows_out": len(final), "conflicting_keys": int(conflicts),
                            "conflicting_keys_all_columns": int(conflicts_all)})
             non_null.update({v: int(final[v].notna().sum()) for v in values})
-            LOG.info("[smvvol] merge %s %s: %d/%d months, rows_out %d, ETA %.0f s",
-                     table, month, done, len(index), len(final), _eta(done, len(index), start))
+            LOG.info("[smvvol] merge %s %s: %d/%d months, rows_out %d, %.1f months/s, ETA %.0f s",
+                     table, month, done, len(index), len(final),
+                     done / max(time.monotonic() - start, 1e-9), _eta(done, len(index), start))
         result[table] = {**totals, "non_null": dict(non_null)}
     return result
 

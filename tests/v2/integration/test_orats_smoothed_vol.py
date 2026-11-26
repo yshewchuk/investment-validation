@@ -499,7 +499,13 @@ def test_carry_sentinel_bad_date_and_zero(tmp_path):
         {"ticker": "SPY", "tradeDate": "2025-01-03", "iRate5wk": 0.04, "iRateLt": 0.045,
          "divDate": "9999-12-31"},
         {"ticker": "SPY", "tradeDate": "2025-01-06", "iRate5wk": 0.04, "iRateLt": 0.045,
-         "divDate": "0001-01-01"}]),
+         "divDate": "0001-01-01"},
+        {"ticker": "SPY", "tradeDate": "2025-01-07", "iRate5wk": 0.04, "iRateLt": 0.045,
+         "divDate": "2025-04-03T00:00:00Z"},
+        {"ticker": "SPY", "tradeDate": "2025-01-08", "iRate5wk": 0.04, "iRateLt": 0.045,
+         "divDate": "2025-04-03T00:00:00+09:00"},
+        {"ticker": "SPY", "tradeDate": "2025-01-09", "iRate5wk": 0.04, "iRateLt": 0.045,
+         "divDate": "2025-04-03 13:00:00"}]),
         "2025-01-02T00:00:00+00:00")
     out = tmp_path / "out"
     assert tool.main(_args(raw, out, tmp_path / "work")) == 0
@@ -507,5 +513,29 @@ def test_carry_sentinel_bad_date_and_zero(tmp_path):
     assert r["borrow30"].isna().all()
     assert r["divDate"].isna().all()
     assert r.loc[0, "divAmt"] == 0.0
-    assert len(r) == 3
-    assert r["iRate5wk"].tolist() == [0.04, 0.04, 0.04]
+    assert len(r) == 6
+    assert r["iRate5wk"].tolist() == [0.04] * 6
+
+
+def test_rates_conflicts_accumulate_across_months(tmp_path):
+    raw = tmp_path / "raw"
+    _entry(raw, "hist/strikes", K_EARLY_BIG, _payload([_quote("SPY", 100.0, 0.2)]),
+           "2025-01-01T00:00:00+00:00")
+    dates = ("2025-01-02", "2025-02-03")
+    _entry(raw, "hist/cores", K_RATES, _payload([
+        {"ticker": "SPY", "tradeDate": d, "iRate5wk": 0.04, "iRateLt": 0.045} for d in dates]),
+        "2025-01-02T00:00:00+00:00")
+    _entry(raw, "hist/cores", "9" * 64, _payload([
+        {"ticker": "SPY", "tradeDate": d, "iRate5wk": 0.05, "iRateLt": 0.045} for d in dates]),
+        "2025-01-06T00:00:00+00:00")
+    out = tmp_path / "out"
+    assert tool.main(_args(raw, out, tmp_path / "work")) == 0
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    rates_m = manifest["tables"]["rates"]
+    assert rates_m["conflicting_keys"] == 2
+    assert rates_m["conflicting_keys_all_columns"] == 2
+    assert rates_m["rows_out"] == 2
+    assert rates_m["duplicates_dropped"] == 2
+    assert rates_m["non_null"]["iRate5wk"] == 2
+    assert rates_m["non_null"]["iRateLt"] == 2
+    assert rates_m["non_null"]["borrow30"] == 0
