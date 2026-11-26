@@ -257,11 +257,16 @@ def test_table_is_built_once_per_side_and_rebuilt_for_a_new_chunk(tmp_path):
     first = fq.table(chunk)
     assert fq.table(chunk) is first
     assert len(calls) == 1 and set(calls[0]["obs_date"]) == {_ts(ENTRY)}  # entry never asks for exit dates
-    fq.table(chunk, exit=True)
-    fq.table(chunk, exit=True)
+    exit_first = fq.table(chunk, exit=True)
+    assert fq.table(chunk, exit=True) is exit_first
     assert len(calls) == 2 and set(calls[1]["obs_date"]) == {_ts(EXIT)}
-    other = _chunk(frames, DEFAULT_PLAN)
-    assert fq.table(other) is not first
+    other = _chunk(frames, DEFAULT_PLAN)  # a new object with the same events and expiries reuses the tables
+    assert fq.table(other) is first and fq.table(other, exit=True) is exit_first
+    assert len(calls) == 2
+    subset = _chunk(frames, _plan(("E0", "AAA", ENTRY, EXIT)))  # other events build anew
+    fq.table(subset)
+    assert len(calls) == 3
+    assert fq.table(chunk) is first  # back to the first chunk: no new call
     assert len(calls) == 3
 
 
@@ -386,6 +391,24 @@ def test_malformed_pins_are_refused_before_any_read(tmp_path, pins):
     assert calls == []
 
 
+@pytest.mark.parametrize("edit", [
+    pytest.param(lambda pins: pins.update(files={}), id="empty-files"),
+    pytest.param(lambda pins: pins["files"].update({"quotes/year=2024/month=02.parquet": None}), id="file-hash-not-str"),
+])
+def test_direct_construction_refuses_pins_invalid_before_any_read(tmp_path, edit):
+    calls = []
+    with pytest.raises(FairValueRefusal) as exc:
+        _setup(tmp_path, _frames(), DEFAULT_PLAN, read=_reader(_base(_frames()), calls), pins_edit=edit)
+    _refused(exc, "pins_invalid")
+    assert calls == []
+
+
+def test_direct_construction_refuses_a_non_callable_reader_before_any_read(tmp_path):
+    with pytest.raises(FairValueRefusal) as exc:
+        _setup(tmp_path, _frames(), DEFAULT_PLAN, read="nope")  # truthy, so _setup keeps it; a string cannot be called
+    _refused(exc, "f_quotes_invalid")
+
+
 BAD_PLANS = [
     pytest.param(DEFAULT_PLAN.drop(columns="event_id"), id="missing-event_id"),
     pytest.param(_plan(("E0", "AAA", ENTRY, EXIT), ("E0", "BBB", ENTRY, EXIT)), id="duplicate-event_id"),
@@ -406,7 +429,7 @@ def test_malformed_plan_is_refused_before_any_read(tmp_path, plan):
     calls = []
     with pytest.raises(FairValueRefusal) as exc:
         wf.FQuotes(plan, _reader(_base(_frames()), calls), tables_root=tmp_path,
-                   pins={"manifest_sha256": "0" * 64, "files": {}}, snapshot_id="snap-1",
+                   pins={"manifest_sha256": "0" * 64, "files": {"quotes/year=2024/month=01.parquet": "0" * 64}}, snapshot_id="snap-1",
                    expected_snapshot_id="snap-1", vol_scale=0.01, rate_scale=0.01)
     _refused(exc, "plan_invalid")
     assert calls == []
@@ -435,6 +458,7 @@ def test_batches_never_split_an_expiry_and_match_the_unbatched_table(tmp_path, m
     monkeypatch.setattr(fvr, "BATCH_ROWS", 1)  # every expiry (82 rows) exceeds the bound: one batch each
     fq2, chunk2 = _setup(tmp_path, _frames(), DEFAULT_PLAN)
     caplog.set_level(logging.INFO, logger="size_width_f_quotes")
+    caplog.clear()  # count only the batched build's records, whatever level earlier tests left
     batched = fq2.table(chunk2)
     assert len(spied) == 2
     for frame in spied:
@@ -489,6 +513,27 @@ def test_a_null_strike_in_a_requested_expiry_is_key_value(tmp_path):
     with pytest.raises(FairValueRefusal) as exc:
         fq.table(chunk)
     _refused(exc, "key_value")
+
+
+@pytest.mark.parametrize("column", fvi.QUOTE_COLUMNS)
+def test_a_quote_column_absent_from_the_read_is_refused_before_pricing(tmp_path, column):
+    frames = _frames()
+    read = _reader(_base(frames))
+    fq, chunk = _setup(tmp_path, frames, DEFAULT_PLAN, read=lambda expiries: read(expiries).drop(columns=column))
+    with pytest.raises(FairValueRefusal) as exc:
+        fq.table(chunk)
+    _refused(exc, "required_column")
+    assert exc.value.details["columns"] == [column]
+
+
+def test_an_exit_quote_column_absent_from_the_read_is_refused_before_pricing(tmp_path):
+    frames = _frames()
+    read = _reader(_base(frames))
+    fq, chunk = _setup(tmp_path, frames, DEFAULT_PLAN, read=lambda expiries: read(expiries).drop(columns="bid"))
+    with pytest.raises(FairValueRefusal) as exc:
+        fq.table(chunk, exit=True)
+    _refused(exc, "required_column")
+    assert exc.value.details["columns"] == ["bid"]
 
 
 def test_table_prices_with_unit_scaled_vol_and_rate(tmp_path):

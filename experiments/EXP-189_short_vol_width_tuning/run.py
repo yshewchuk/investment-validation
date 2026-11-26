@@ -7,6 +7,7 @@ import contextlib
 import importlib
 import inspect
 import json
+import logging
 import os
 import re
 import stat
@@ -32,6 +33,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected", required=True, help="JSON with plan_id, registration_id, seal_id, panel_id")
     parser.add_argument("--sources", required=True, help="MODULE:FUNC, called with the parsed args, returns a size_pnl_driver.Sources (never called by report)")
     parser.add_argument("--sources-config", default=None, help="JSON config read by the --sources factory")
+    parser.add_argument("--f-pins", default=None, help="F spec only, inner and outer: JSON with manifest_sha256 and files (the pinned tables)")
+    parser.add_argument("--f-quotes", default=None, help="F spec only, inner and outer: MODULE:FUNC, called with the parsed args, returns (read_quotes, snapshot_id)")
     parser.add_argument("--no-ledger", action="store_true", required=True, help="required: every non-recorded run uses --no-ledger")
     return parser
 
@@ -56,13 +59,25 @@ def _read_json(path: str):
         raise fail(_INVALID, f"{path} is unreadable", details={"reason": "input_unreadable"}) from exc
 
 
+def _factory(spec: str, args, flag: str, reason: str):
+    """The result of ``spec`` (MODULE:FUNC) called with the parsed args; a spec that is not a callable the args bind refuses ``reason``."""
+    module_name, _, func = spec.partition(":")
+    try:  # no colon gives func "", not an attribute; a bad module raises ImportError
+        factory = getattr(importlib.import_module(module_name), func)
+        if not callable(factory): raise AttributeError(func)
+        inspect.signature(factory).bind(args)  # a signature rejecting the parsed args is a refusal
+    except (ValueError, TypeError, ImportError, AttributeError) as exc:
+        raise fail(_INVALID, f"{flag} {spec} is invalid: {(type(exc).__name__ + ': ' + str(exc))[:200]}", details={"reason": reason}) from exc
+    return factory(args)  # outside the try: factory-body errors propagate unchanged
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="[%(name)s] %(message)s")  # F load and pricing progress to stderr (the default stream)
     try:
         with contextlib.redirect_stdout(sys.stderr):  # library prints go to stderr; stdout is one JSON document
             receipt = size_width_prereg.require_preregistration()  # refuses first, with or without --no-ledger
             print(json.dumps(receipt), file=sys.stderr)
-            size_width_f_select.open_run(receipt.get("fill_model"))  # an F spec refuses every stage before inputs or --sources
             if args.stage != "report" and os.environ.get("BOUNDED_RUN_NESTED") != "1":  # refuse before reading inputs or importing --sources
                 raise fail("RESOURCE_UNAVAILABLE", "run under tools/bounded_run.py --heavy", details={"reason": "not_bounded"})
             args.expected_identities = _read_json(args.expected)
@@ -73,21 +88,18 @@ def main(argv: list[str] | None = None) -> int:
             if args.stage == "report" and args.event_ids is not None: raise fail(_INVALID, "--event-ids is not supported by the report stage", details={"reason": "event_ids_not_supported"})
             if args.stage == "report":
                 from experiments import size_width_report  # after the gates; no sources are read
+                size_width_f_select.check_report(receipt, args.out_dir)  # an F spec's report reads only inputs that bind F
                 summary = size_width_report.assemble(args.out_dir, expected=args.expected_identities)
             else:
                 from experiments import size_pnl_driver, size_width_driver  # after the gates, so a missing PLANNED row refuses first
-                module_name, _, func = args.sources.partition(":")
-                try:  # no colon gives func "", not an attribute; a bad module raises ImportError
-                    factory = getattr(importlib.import_module(module_name), func)
-                    if not callable(factory): raise AttributeError(func)
-                    inspect.signature(factory).bind(args)  # a signature rejecting the parsed args is a refusal
-                except (ValueError, TypeError, ImportError, AttributeError) as exc:
-                    raise fail(_INVALID, f"--sources {args.sources} is invalid: {(type(exc).__name__ + ': ' + str(exc))[:200]}", details={"reason": "sources_invalid"}) from exc
-                made = factory(args)  # outside the try: factory-body errors propagate unchanged
-                sources = size_pnl_driver.check_sources(made)
+                if (args.f_pins is None) != (args.f_quotes is None): raise fail(_INVALID, "--f-pins and --f-quotes must be given together", details={"reason": "f_inputs_incomplete"})
+                sources = size_pnl_driver.check_sources(_factory(args.sources, args, "--sources", "sources_invalid"))
                 if sources.expected != args.expected_identities:
                     raise fail(_CONFLICT, "--expected differs from the sources' expected identities", details={"reason": "expected_mismatch"})
-                summary = size_width_driver.run(sources, args.stage, args.out_dir, event_ids=event_ids, prereg=lambda: receipt)
+                pair = _factory(args.f_quotes, args, "--f-quotes", "f_quotes_invalid") if args.f_quotes is not None else None
+                if pair is not None and not (isinstance(pair, (tuple, list)) and len(pair) == 2 and callable(pair[0])): raise fail(_INVALID, "--f-quotes must return (read_quotes, snapshot_id)", details={"reason": "f_quotes_invalid"})
+                kwargs = {} if pair is None else {"f_inputs": size_width_f_select.FInputs(_read_json(args.f_pins), *pair)}
+                summary = size_width_driver.run(sources, args.stage, args.out_dir, event_ids=event_ids, prereg=lambda: receipt, **kwargs)
     except (OpsError, Refusal, DataError, fair_value_inputs.FairValueRefusal, fair_value_legs.FairValueRefusal) as exc:
         details = exc.problem.details if isinstance(exc, (OpsError, DataError)) else exc.details
         print(json.dumps({"refused": exc.code, "message": re.sub(r"(?<![\w.])/[^\s:'\"]+", "<path>", str(exc)), "reason": details.get("reason")}))
