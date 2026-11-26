@@ -305,8 +305,21 @@ def _write_inputs(out, body):
     receipts.write_receipt(out / "receipts" / "inputs_inner.json", body)
 
 
-def test_check_report_is_a_no_op_without_fill_model_and_reads_nothing(tmp_path):
-    sel.check_report({"spec_hash": "SPEC", "spec_hash_checked": True}, tmp_path / "missing")
+NON_F = {"spec_hash": "SPEC", "spec_hash_checked": True}
+
+
+def test_check_report_under_a_non_f_registration_passes_without_a_receipts_dir(tmp_path):
+    assert sel.check_report(NON_F, tmp_path / "missing") is None
+
+
+def test_check_report_under_a_non_f_registration_accepts_inputs_without_fill_model(tmp_path):
+    _write_inputs(tmp_path, {"spec_hash": "SPEC"})
+    assert sel.check_report(NON_F, tmp_path) is None
+
+
+def test_check_report_under_a_non_f_registration_refuses_inputs_that_bind_f(tmp_path):
+    _write_inputs(tmp_path, {"spec_hash": "SPEC", "fill_model": {"fill_model_id": "F"}})
+    _refused("f_report_unbound", lambda: sel.check_report(NON_F, tmp_path))
 
 
 def test_check_report_refuses_an_f_report_whose_inputs_are_missing(tmp_path):
@@ -429,6 +442,20 @@ def test_run_py_report_of_an_f_spec_refuses_when_its_inputs_are_missing(tmp_path
     monkeypatch.setattr(size_width_report, "assemble", boom)
     assert run_py.main(_argv(tmp_path, sources=NO_SOURCES, stage="report")) == 2
     assert json.loads(capsys.readouterr().out)["reason"] == "tuning_receipt_missing"
+
+
+def test_run_py_report_under_a_non_f_spec_refuses_an_out_dir_whose_inputs_bind_f(tmp_path, monkeypatch, capsys):
+    run_py = _run_main()
+    monkeypatch.setattr(size_width_prereg, "require_preregistration", OK)
+    monkeypatch.setenv("BOUNDED_RUN_NESTED", "1")
+    _write_inputs(tmp_path / "out", {"spec_hash": "SPEC", "fill_model": {"fill_model_id": "F"}})
+
+    def boom(out_dir, **kwargs):
+        raise AssertionError("report must not be assembled over F inputs under a non-F registration")
+
+    monkeypatch.setattr(size_width_report, "assemble", boom)
+    assert run_py.main(_argv(tmp_path, sources=NO_SOURCES, stage="report")) == 2
+    assert json.loads(capsys.readouterr().out)["reason"] == "f_report_unbound"
 
 
 # ---- 6. run.py maps the fair-value refusals to a JSON refusal and exit 2 ----------------

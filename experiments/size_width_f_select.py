@@ -1,4 +1,4 @@
-"""EXP-189 A1: the spec selects model F via its one amendment carrying ``fill_model``, id "F" (A1.7 R5, A1.9). ``open_run`` builds the F run (pricing and receipt binding); ``check_report`` refuses an F report whose inputs do not bind F under this registration."""
+"""EXP-189 A1: the spec selects model F via its one amendment carrying ``fill_model``, id "F" (A1.7 R5, A1.9). ``open_run`` builds the F run (pricing and receipt binding); ``check_report`` refuses a report whose inputs do not bind what this registration selects."""
 import hashlib
 import json
 import re
@@ -77,10 +77,12 @@ def open_run(fill, inputs=None, plan=None, expected_snapshot_id=None, *, root=No
 
 
 def check_report(receipt, out_dir):
-    """An F spec's report reads only an out-dir whose inputs bind F under this registration (A1.7 R5)."""
-    if receipt.get("fill_model") is None: return
-    _validate(receipt["fill_model"])
-    inputs = receipts.load_receipt(Path(out_dir) / "receipts" / "inputs_inner.json")
-    if not (isinstance(inputs.get("fill_model"), dict) and inputs["fill_model"].get("fill_model_id") == "F"
-            and inputs.get("spec_hash") == receipt.get("spec_hash")):
-        raise fvi.FairValueRefusal("f_report_unbound", "the out-dir's inputs do not bind F under this registration")
+    """The report's out-dir inputs must bind what this registration selects: F under this spec_hash, or no fill model (A1.7 R5)."""
+    fill, path = receipt.get("fill_model"), Path(out_dir) / "receipts" / "inputs_inner.json"
+    if fill is None and not path.exists(): return  # nothing bound; the report's own load refuses a missing receipt
+    if fill is not None: _validate(fill)
+    inputs = receipts.load_receipt(path)
+    bound = inputs.get("fill_model")
+    ok = "fill_model" not in inputs if fill is None else (isinstance(bound, dict) and bound.get("fill_model_id") == "F" and inputs.get("spec_hash") == receipt.get("spec_hash"))
+    if not ok:
+        raise fvi.FairValueRefusal("f_report_unbound", "the out-dir's inputs do not bind what this registration selects")
