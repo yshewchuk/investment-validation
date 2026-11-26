@@ -7,6 +7,7 @@ import hashlib
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -90,6 +91,19 @@ def spy(monkeypatch):
     return calls
 
 
+@pytest.fixture
+def reads(monkeypatch):
+    calls = []
+    real = pd.read_parquet
+
+    def wrapped(*args, **kwargs):
+        calls.append(kwargs.get("columns") or [])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(pd, "read_parquet", wrapped)
+    return calls
+
+
 def _run(w, legs=None, **over):
     kwargs = {"quotes_dir": w["quotes"], "tables_root": w["root"], "pins": w["pins"], "snapshot_id": "s",
               "expected_snapshot_id": "s", "vol_scale": 0.01, "rate_scale": 0.01, "max_rss_mb": 10_000.0, **over}
@@ -142,6 +156,7 @@ def test_require_fvf_id_accepts_pin_and_refuses_another():
     with pytest.raises(fvi.FairValueRefusal) as exc:
         run.require_fvf_id("0" * 64)
     assert exc.value.details["reason"] == "fvf_id_mismatch"
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 def test_two_quarter_report_counts_and_strict_json(world):
@@ -152,8 +167,8 @@ def test_two_quarter_report_counts_and_strict_json(world):
     assert set(report["chunks"][0]) == {"quarter", "rows", "put_rows", "expiries", "expiries_missing", "batches",
                                         "load_s", "price_s", "total_s", "peak_rss_mb"}
     totals = report["totals"]
-    assert (totals["structures"], totals["chunks"], totals["rows"], totals["put_rows"], totals["expiries"],
-            totals["expiries_missing"]) == (2, 2, 18, 9, 3, 0)
+    assert len(report["chunks"]) == 2
+    assert (totals["rows"], totals["put_rows"], totals["expiries"], totals["expiries_missing"]) == (18, 9, 3, 0)
     assert json.loads(json.dumps(report, allow_nan=False)) == report
     assert not [k for k in _keys(report) if any(word in k for word in FORBIDDEN)]
 
@@ -180,8 +195,10 @@ def test_expiry_shared_by_entry_and_exit_is_priced_once(world, spy):
     assert report["chunks"][1]["expiries"] == 1 and report["chunks"][1]["rows"] == 6
 
 
-def test_batching_is_whole_expiry_and_independent_of_leg_order(world, spy):
-    _run(world, batch_rows=1)
+def test_batching_is_whole_expiry_and_independent_of_leg_order(world, spy, monkeypatch):
+    with monkeypatch.context() as patched:
+        patched.setattr(run, "BATCH_ROWS", 1)
+        _run(world)
     assert len(spy) == 3 and [part["expiry"].nunique() for part, _ in spy] == [1, 1, 1]
     small = _priced(spy)
     spy.clear()
@@ -200,11 +217,13 @@ def test_peak_rss_is_positive_per_chunk(world):
     assert all(c["peak_rss_mb"] > 0 for c in report["chunks"])
 
 
-def test_two_six_row_expiries_batch_by_threshold(world, spy):
-    report = _run(world, batch_rows=7)
+def test_two_six_row_expiries_batch_by_threshold(world, spy, monkeypatch):
+    monkeypatch.setattr(run, "BATCH_ROWS", 7)
+    report = _run(world)
     assert report["chunks"][0]["batches"] == 1 and [len(part) for part, _ in spy] == [12, 6]
     spy.clear()
-    report = _run(world, batch_rows=6)
+    monkeypatch.setattr(run, "BATCH_ROWS", 6)
+    report = _run(world)
     assert report["chunks"][0]["batches"] == 2 and [len(part) for part, _ in spy] == [6, 6, 6]
 
 
@@ -230,6 +249,7 @@ def test_legs_invalid_refused(make):
     with pytest.raises(fvi.FairValueRefusal) as exc:
         run.requested_expiries(make(_main_legs()))
     assert exc.value.details["reason"] == "legs_invalid"
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 def test_missing_second_quarter_file_refused_before_any_pricing(world, spy):
@@ -237,6 +257,7 @@ def test_missing_second_quarter_file_refused_before_any_pricing(world, spy):
     with pytest.raises(fvi.FairValueRefusal) as exc:
         _run(world)
     assert exc.value.details["reason"] == "quotes_file_absent"
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert spy == []
 
 
@@ -244,6 +265,7 @@ def test_snapshot_mismatch_refused(world):
     with pytest.raises(fvi.FairValueRefusal) as exc:
         _run(world, expected_snapshot_id="other")
     assert exc.value.details["reason"] == "snapshot_binding"
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 def test_fvf_id_mismatch_refused_before_any_file_read(tmp_path):
@@ -251,23 +273,83 @@ def test_fvf_id_mismatch_refused_before_any_file_read(tmp_path):
     with pytest.raises(fvi.FairValueRefusal) as exc:
         _run({"quotes": absent, "root": absent, "pins": {}}, expected_fvf_id="0" * 64)
     assert exc.value.details["reason"] == "fvf_id_mismatch"
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 @pytest.mark.parametrize("over,reason", [({"max_rss_mb": 0.0}, "rss_limit"),
-                                         ({"max_rss_mb": float("nan")}, "rss_limit"),
-                                         ({"batch_rows": 0}, "batch_rows")])
+                                         ({"max_rss_mb": float("nan")}, "rss_limit")])
 def test_bad_limits_refused_before_any_file_read(tmp_path, over, reason):
     absent = tmp_path / "absent"
     with pytest.raises(fvi.FairValueRefusal) as exc:
         _run({"quotes": absent, "root": absent, "pins": {}}, **over)
     assert exc.value.details["reason"] == reason
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
-def test_rss_over_limit_raises_with_resource_code(world):
+def test_limit_bounds_the_tables_with_resource_code(world, spy):
     with pytest.raises(fvi.FairValueRefusal) as exc:
         _run(world, max_rss_mb=0.001)
     assert exc.value.code == "RESOURCE_LIMIT_EXCEEDED"
+    assert spy == []
+
+
+def test_rss_over_limit_after_load_refused_before_pricing(world, spy, monkeypatch):
+    monkeypatch.setattr(run, "_peak_mb", lambda: 1e9)
+    with pytest.raises(fvi.FairValueRefusal) as exc:
+        _run(world)
+    assert exc.value.code == "RESOURCE_LIMIT_EXCEEDED"
     assert exc.value.details["reason"] == "rss_over_limit"
+    assert spy == []
+
+
+def test_rss_over_limit_after_first_batch_stops_pricing(world, spy, monkeypatch):
+    readings = iter([1.0, 1e9])
+    monkeypatch.setattr(run, "_peak_mb", lambda: next(readings))
+    monkeypatch.setattr(run, "BATCH_ROWS", 1)
+    with pytest.raises(fvi.FairValueRefusal) as exc:
+        _run(world)
+    assert exc.value.code == "RESOURCE_LIMIT_EXCEEDED"
+    assert exc.value.details["reason"] == "rss_over_limit"
+    assert len(spy) == 1
+
+
+def test_quote_file_over_limit_refused_before_any_decode(world, spy, reads):
+    (world["quotes"] / "2024Q1.parquet").write_bytes(b"\0" * (2**20 + 1))
+    with pytest.raises(fvi.FairValueRefusal) as exc:
+        _run(world, max_rss_mb=1.0)
+    assert exc.value.code == "RESOURCE_LIMIT_EXCEEDED"
+    assert exc.value.details["reason"] == "input_too_large"
+    assert not any("bid" in cols for cols in reads)
+    assert spy == []
+
+
+def test_quote_footer_estimate_over_limit_refused_before_decode(world, spy, reads, monkeypatch):
+    fake = SimpleNamespace(num_rows=10**12, num_row_groups=0, schema=SimpleNamespace(names=[]))
+    monkeypatch.setattr(run.pq, "read_metadata", lambda _source: fake)
+    with pytest.raises(fvi.FairValueRefusal) as exc:
+        _run(world)
+    assert exc.value.code == "RESOURCE_LIMIT_EXCEEDED"
+    assert exc.value.details["reason"] == "input_too_large"
+    assert not any("bid" in cols for cols in reads)
+    assert spy == []
+
+
+def test_quote_read_takes_only_contract_columns(world, spy, reads):
+    _chain("2024-01-02", ["2024-02-16", "2024-03-15", "2024-05-17"]).assign(junk=1.0).to_parquet(
+        world["quotes"] / "2024Q1.parquet", index=False)
+    _run(world)
+    assert not any("junk" in cols for cols in reads)
+    assert "junk" not in spy[0][0].columns
+
+
+def test_quote_file_without_iv_refused_required_column(world, spy):
+    _chain("2024-01-02", ["2024-02-16", "2024-03-15", "2024-05-17"]).drop(columns=["iv"]).to_parquet(
+        world["quotes"] / "2024Q1.parquet", index=False)
+    with pytest.raises(fvi.FairValueRefusal) as exc:
+        _run(world)
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert exc.value.details["reason"] == "required_column"
+    assert spy == []
 
 
 def test_wrong_table_pin_refused(world):
@@ -275,6 +357,7 @@ def test_wrong_table_pin_refused(world):
     with pytest.raises(fvi.FairValueRefusal) as exc:
         _run(world, pins={**world["pins"], "files": files})
     assert exc.value.details["reason"] == "table_hash"
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 def _pins_without(w, *gone):
@@ -285,6 +368,7 @@ def test_missing_quotes_month_refused_with_path(world):
     with pytest.raises(fvi.FairValueRefusal) as exc:
         _run(world, pins=_pins_without(world, "quotes/year=2024/month=01.parquet"))
     assert exc.value.details["reason"] == "table_absent"
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert exc.value.details["paths"] == ["quotes/year=2024/month=01.parquet"]
 
 
@@ -293,6 +377,7 @@ def test_missing_previous_month_rate_refused_with_path(world):
     with pytest.raises(fvi.FairValueRefusal) as exc:
         _run(world, pins=_pins_without(world, "rates/year=2023/month=12.parquet"))
     assert exc.value.details["reason"] == "table_absent"
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert exc.value.details["paths"] == ["rates/year=2023/month=12.parquet"]
 
 
@@ -317,7 +402,7 @@ def _cli(w, tmp_path, *extra):
 def test_main_success_prints_exactly_one_json_line(world, tmp_path, capsys):
     assert run.main(_cli(world, tmp_path)) == 0
     lines = capsys.readouterr().out.splitlines()
-    assert len(lines) == 1 and json.loads(lines[0])["totals"]["chunks"] == 2
+    assert len(lines) == 1 and len(json.loads(lines[0])["chunks"]) == 2
 
 
 def test_main_refusal_prints_one_refusal_line(world, tmp_path, capsys):
@@ -326,6 +411,24 @@ def test_main_refusal_prints_one_refusal_line(world, tmp_path, capsys):
     assert len(lines) == 1
     out = json.loads(lines[0])
     assert out["refusal"] == "EXPERIMENT_IDENTITY_CONFLICT" and out["details"]["reason"] == "fvf_id_mismatch"
+
+
+def test_main_pins_over_cap_refused_with_one_line(world, tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(fvi, "MAX_MANIFEST_BYTES", 1)
+    assert run.main(_cli(world, tmp_path)) == 2
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 1
+    out = json.loads(lines[0])
+    assert out["refusal"] == "RESOURCE_LIMIT_EXCEEDED" and out["details"]["reason"] == "input_too_large"
+
+
+def test_main_legs_over_cap_refused_with_one_line(world, tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(fvi, "MAX_TABLE_BYTES", 1)
+    assert run.main(_cli(world, tmp_path)) == 2
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 1
+    out = json.loads(lines[0])
+    assert out["refusal"] == "RESOURCE_LIMIT_EXCEEDED" and out["details"]["reason"] == "input_too_large"
 
 
 def test_module_imports_only_allowed_modules():
@@ -340,7 +443,7 @@ def test_module_imports_only_allowed_modules():
             names.add(node.module)
     for name in names:
         top = name.split(".")[0]
-        assert name in ALLOWED or top in sys.stdlib_module_names or top in {"pandas", "numpy"}, name
+        assert name in ALLOWED or top in sys.stdlib_module_names or top in {"pandas", "numpy", "pyarrow"}, name
 
 
 def test_run_creates_no_file_under_tmp_path(world, tmp_path):
