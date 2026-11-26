@@ -933,6 +933,7 @@ def test_input_unit_refused(tmp_path, units):
     with pytest.raises(FairValueRefusal) as exc:
         _load(root, file_sha, manifest_sha)
     _refused(exc, "input_unit")
+    assert "EXPERIMENT_IDENTITY_CONFLICT" in str(exc.value) and "input_unit" in str(exc.value)
 
 
 @pytest.mark.parametrize("column", fvi.CARRY_COLUMNS)
@@ -941,6 +942,7 @@ def test_missing_carry_column_refused(tmp_path, column):
     with pytest.raises(FairValueRefusal) as exc:
         _load(root, file_sha, manifest_sha)
     _refused(exc, "required_column")
+    assert "EXPERIMENT_IDENTITY_CONFLICT" in str(exc.value) and "required_column" in str(exc.value)
     assert exc.value.details["columns"] == [column]
 
 
@@ -983,9 +985,43 @@ def test_lookup_inputs_takes_every_carry_field_from_the_selected_row():
     assert got["divAmt"] == 0.5 and got["divDate"] == pd.Timestamp("2024-02-01") and got["rate"] == pytest.approx(0.06)
 
 
+def test_lookup_inputs_rows_align_with_selected_rate_row():
+    # Four rate rows, each with distinct values in every carry and diagnostic column; queries are out of date order.
+    rates = pd.DataFrame({
+        "ticker": ["AAA", "AAA", "BBB", "BBB"],
+        "obs_date": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-02", "2024-01-03"]),
+        "iRate5wk": [0.011, 0.012, 0.021, 0.022], "iRateLt": [0.031, 0.032, 0.041, 0.042],
+        "borrow30": [0.051, 0.052, 0.061, 0.062], "borrow2yr": [0.071, 0.072, 0.081, 0.082],
+        "divAmt": [0.5, 0.6, 0.7, 0.8],
+        "divDate": pd.to_datetime(["2024-01-20", "2024-01-21", "2024-02-01", "2024-02-02"]),
+        "annIdiv": [1.1, 1.2, 1.3, 1.4], "annActDiv": [2.1, 2.2, 2.3, 2.4], "assetType": [3.0, 4.0, 5.0, 6.0],
+    })
+    rows = pd.DataFrame({
+        "ticker": ["BBB", "AAA", "AAA", "BBB"],
+        "obs_date": pd.to_datetime(["2024-01-03", "2024-01-02", "2024-01-04", "2024-01-02"]),
+        "expiry": pd.to_datetime(["2024-02-02", "2025-01-02", "2024-02-03", "2025-01-02"]),  # 30, 366, 30, 366 days
+    }, index=[9, 4, 6, 2])
+    picked = {9: (3, 0.022), 4: (0, 0.031), 6: (1, 0.012), 2: (2, 0.041)}  # query index -> (rates row, rate)
+    for col in fvi.CARRY_COLUMNS:
+        assert rates[col].nunique() == len(rates), col
+    got = fvi.lookup_inputs(rows, rates)
+    assert got.index.tolist() == [9, 4, 6, 2]
+    for idx, (row, rate) in picked.items():
+        assert got.loc[idx, "rate"] == pytest.approx(rate, rel=1e-12), idx
+        for col in fvi.CARRY_COLUMNS:
+            want = rates.loc[row, col]
+            if col == "divDate":
+                assert got.loc[idx, col] == want, (idx, col)
+            else:
+                assert got.loc[idx, col] == pytest.approx(want, rel=1e-12), (idx, col)
+
+
 def test_lookup_inputs_no_row_gives_nan_and_nat():
     got = fvi.lookup_inputs(_query("ZZZ", "2024-01-03", 30), _one_rate())
     assert got["divDate"].isna().all() and got.drop(columns="divDate").isna().all().all()
+    assert len(got) == 1 and got["divDate"].dtype == "datetime64[ns]" and pd.isna(got["divDate"].iloc[0])
+    for col in ["rate", "borrow30", "borrow2yr", "divAmt", "annIdiv", "annActDiv", "assetType"]:
+        assert np.isnan(float(got[col].iloc[0])), col
 
 
 def test_lookup_inputs_empty_frames_keep_columns_and_datetime_dates():
@@ -994,6 +1030,8 @@ def test_lookup_inputs_empty_frames_keep_columns_and_datetime_dates():
     assert empty["divDate"].dtype == "datetime64[ns]"
     none = fvi.lookup_inputs(_query("AAA", "2024-01-03", 30), _one_rate().iloc[:0])
     assert len(none) == 1 and none["divDate"].dtype == "datetime64[ns]" and pd.isna(none["divDate"].iloc[0])
+    for col in ["rate", "borrow30", "borrow2yr", "divAmt", "annIdiv", "annActDiv", "assetType"]:
+        assert np.isnan(float(none[col].iloc[0])), col
 
 
 @pytest.mark.parametrize("bad", [0.21, -1.01, np.inf, -np.inf])
@@ -1002,6 +1040,7 @@ def test_lookup_inputs_out_of_range_borrow_refused(bad):
         fvi.lookup_inputs(_query("AAA", "2024-01-03", 30), _one_rate(borrow2yr=[bad]))
     _refused(exc, "table_value")
     assert exc.value.details["columns"] == ["borrow2yr"]
+    assert "EXPERIMENT_IDENTITY_CONFLICT" in str(exc.value) and "table_value" in str(exc.value)
 
 
 @pytest.mark.parametrize("column", fvi.CARRY_COLUMNS)
@@ -1009,4 +1048,5 @@ def test_lookup_inputs_missing_carry_column_refused(column):
     with pytest.raises(FairValueRefusal) as exc:
         fvi.lookup_inputs(_query("AAA", "2024-01-03", 30), _one_rate().drop(columns=[column]))
     _refused(exc, "required_column")
+    assert "EXPERIMENT_IDENTITY_CONFLICT" in str(exc.value) and "required_column" in str(exc.value)
     assert exc.value.details["columns"] == [column]

@@ -63,6 +63,20 @@ def test_carry_rate_one_missing_uses_the_other_and_both_missing_gives_rate():
     assert np.all(fb)
 
 
+@pytest.mark.parametrize("bad", [np.inf, -np.inf])
+def test_carry_rate_infinite_borrow_counts_as_missing(bad):
+    days = np.array([1.0, 30.0, 31.0, 380.0, 730.0, 2000.0])
+    b, fb = fvc.carry_rate(days, bad, 0.04, 0.03)  # borrow30 infinite: borrow2yr flat
+    np.testing.assert_allclose(b, 0.04, rtol=0, atol=1e-15)
+    assert not np.any(fb)
+    b, fb = fvc.carry_rate(days, 0.02, bad, 0.03)  # borrow2yr infinite: borrow30 flat
+    np.testing.assert_allclose(b, 0.02, rtol=0, atol=1e-15)
+    assert not np.any(fb)
+    b, fb = fvc.carry_rate(days, bad, bad, 0.03)  # both infinite: b = r, flagged
+    np.testing.assert_allclose(b, 0.03, rtol=0, atol=1e-15)
+    assert np.all(fb)
+
+
 DIVIDEND_CASES = [
     # (div_amt, div_days, expiry_days, spot, rate) -> (fallback, applied)
     (np.nan, 10.0, 30.0, 100.0, 0.04, True, False),    # 1: missing amount
@@ -116,21 +130,24 @@ def test_european_call_with_carry_above_rate_matches_independent_formula():
     assert float(got) == pytest.approx(expected, rel=1e-12)
 
 
-@pytest.mark.parametrize("carry_of, div, div_years", [
-    (lambda r: r - 0.03, 0.0, 0.0),  # carry below the rate: tree
-    (lambda r: r, 0.0, 0.0),         # carry = rate: tree only where the rate is negative
-    (lambda r: r, 2.0, 0.05),        # a dividend: tree
+@pytest.mark.parametrize("carry_of, div, div_years, pays", [
+    (lambda r: r - 0.03, 0.0, 0.0, lambda k, t, r: (k == 80.0) & (r <= 0)),  # carry below the rate: tree; early exercise pays for deep ITM calls when r <= 0
+    (lambda r: r, 0.0, 0.0, lambda k, t, r: (k == 80.0) & (r < 0)),          # carry = rate: tree only where the rate is negative; deep ITM pays there
+    (lambda r: r, 2.0, 0.05, lambda k, t, r: (k == 80.0) & (t == 0.1)),     # a dividend: tree; exercise before the ex-date pays at 0.1 years
 ])
-def test_tree_call_never_below_same_lattice_european(carry_of, div, div_years):
+def test_tree_call_never_below_same_lattice_european(carry_of, div, div_years, pays):
     s, k, t, v, r = _grid()
     carry = carry_of(r)
     dv, dy = np.full_like(s, div), np.full_like(s, div_years)
     am = fvc.value(s, k, t, v, r, carry, dv, dy, False)
     eu = fvc._tree(s, k, t, np.maximum(v, fvp.PUT_VOL_FLOOR), r, carry, dv, dy, np.ones_like(s), early=False)
     routed = ~((dv == 0) & (carry >= r) & (r >= 0))  # the rows that take the tree
-    ok = np.isfinite(am) & np.isfinite(eu) & routed
-    assert ok.sum() > 0
-    assert np.all(am[ok] >= eu[ok] - 1e-10)
+    assert routed.sum() > 0
+    assert np.isfinite(am[routed]).all() and np.isfinite(eu[routed]).all()  # no routed row dropped or NaN
+    assert np.all(am[routed] >= eu[routed] - 1e-10)
+    strict = routed & pays(k, t, r)  # rows where early exercise pays: a European-only tree fails here
+    assert strict.sum() > 0
+    assert np.max(am[strict] - eu[strict]) > 1e-6
 
 
 def test_early_exercise_strictly_pays_for_deep_itm_call_with_dividend():
@@ -154,6 +171,20 @@ def test_escrowed_tree_matches_independent_reference(is_put):
         got = fvc.value(S, K, T, v, r, b, D, tD, is_put)
         expected = _reference_escrowed(S, K, T, v, r, b, D, tD, is_put)
         assert float(got) == pytest.approx(expected, rel=1e-9, abs=1e-9)
+
+
+@pytest.mark.parametrize("carry, div, div_years", [
+    (0.01, 0.0, 0.0),   # carry below the rate 0.04: tree
+    (0.04, 2.0, 0.05),  # a dividend: tree
+])
+def test_tree_call_floors_low_vol_like_the_reference(carry, div, div_years):
+    S, K, T, v, r = 100.0, 100.0, 1.0, 0.001, 0.04  # near the money, vol below the floor
+    assert v < fvp.PUT_VOL_FLOOR
+    got = float(fvc.value(S, K, T, v, r, carry, div, div_years, False))
+    floored = _reference_escrowed(S, K, T, fvp.PUT_VOL_FLOOR, r, carry, div, div_years, False)
+    assert got == pytest.approx(floored, rel=1e-9)
+    other = _reference_escrowed(S, K, T, 0.02, r, carry, div, div_years, False)  # a different vol: the floor matters
+    assert abs(floored - other) > 1e-3
 
 
 def test_expired_rows_ignore_carry_and_dividend():

@@ -1,7 +1,7 @@
 """Fill model F, slice F3: fit set, fallback smile, vol source, leg values (design sections 3, 4, 7, 10).
 
 Callers pass WHOLE listed expiries (a row's source depends on its whole expiry; memory scales with
-put rows, so the caller chunks by whole expiries). Values never depend on row order.
+tree rows (puts plus tree-routed calls), so the caller chunks by whole expiries). Values never depend on row order.
 """
 
 from __future__ import annotations

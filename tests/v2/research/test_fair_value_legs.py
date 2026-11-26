@@ -508,6 +508,7 @@ def test_missing_carry_column_refused(column):
     with pytest.raises(legs.FairValueRefusal) as info:
         legs.leg_values(q, vols_frame())
     assert info.value.details == {"reason": "column_missing", "table": "quotes", "columns": [column]}
+    assert "EXPERIMENT_IDENTITY_CONFLICT" in str(info.value) and "column_missing" in str(info.value)
 
 
 # (borrow30, borrow2yr, divAmt, divDate in days from obs or None, b, carry_fallback, dividend_fallback, applied)
@@ -558,7 +559,14 @@ def test_dividend_changes_value_but_not_smile_vol():
     # Force the fallback smile: strike 95 (in the fit set) has no smvVol, so every row takes the smile.
     strikes = [K for K in BASE if K != 95.0]
     vols = vols_frame(strikes, [smv_of(K) for K in strikes])
-    base_q = quotes_frame(smile_rows(BASE, iv_curve, bid=0.0, ask=1000.0))
+    # Non-quadratic quote ivs: a per-strike bump (+0.03 at 100, -0.02 at 90) plus +0.02 on calls, so C and P at a
+    # strike differ and a membership flip at strike 100 changes the fit. All fitted values stay positive.
+    def bumped_iv(K, right):
+        bump = {100.0: 0.03, 90.0: -0.02}.get(float(K), 0.0)
+        return iv_curve(K) + bump + (0.02 if right == "C" else 0.0)
+
+    base_rows = [(float(K), r, 0.0, 1000.0, bumped_iv(K, r), SPOT, False, RATE) for K in BASE for r in ("C", "P")]
+    base_q = quotes_frame(base_rows)
     base = legs.leg_values(base_q, vols)
     # Ex-date 15 days out: S - PV(D) is about 97.0, across the 100 strike, so the fit set would change if it used it.
     out = legs.leg_values(base_q.assign(divAmt=3.0, divDate=OBS + pd.Timedelta(days=15)), vols)
@@ -574,6 +582,13 @@ def test_dividend_changes_value_but_not_smile_vol():
     assert fitted is not None
     np.testing.assert_allclose(out.vol.to_numpy(), legs.smile_vol(fitted, k), rtol=0, atol=1e-9)
     assert np.ptp(out.vol.to_numpy()) > 0.01  # non-flat smile across strikes
+    # The fixture must tell the unadjusted fit from one built on S_adj = SPOT - PV(D): membership and k both change.
+    s_adj = SPOT - 3.0 * math.exp(-RATE * 15 / 365)
+    fit_adj = ((right == "P") & (strike <= s_adj)) | ((right == "C") & (strike > s_adj))
+    k_adj = np.log(strike / s_adj) / np.sqrt(T)
+    alt = legs.fit_smile(strike[fit_adj], k_adj[fit_adj], iv[fit_adj], ((ask - bid) / ((bid + ask) / 2.0))[fit_adj])
+    assert alt is not None and not np.array_equal(fit, fit_adj)
+    assert np.abs(legs.smile_vol(alt, k_adj) - out.vol.to_numpy()).max() > 1e-6
     calls = (out.right == "C").to_numpy()
     assert (out.V.to_numpy()[calls] != base.V.to_numpy()[calls]).all()
 

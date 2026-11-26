@@ -986,7 +986,7 @@ Uncalled ([design](../guides/fair_value_fill_design.md)). `fair_value_carry` pri
 |Condition|Outcome|
 |-|-|
 |Null liquidity|thin=0.5|
-|No borrow/dividend|`b=r`/none; flagged|
+|Borrow/dividend fallback|`b=r`/none; flagged|
 |`leg_invalid`|`FairValueRefusal` (`EXPERIMENT_IDENTITY_CONFLICT`)|
 |Entry leg not `ok`|`undetermined`|
 |Guard `not_a_debit`/`fill_over_fair`/`spread_over_debit`|`skip`|
