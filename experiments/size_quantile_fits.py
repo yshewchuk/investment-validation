@@ -117,7 +117,7 @@ def select_configuration(spec, sealed, outputs, labels):
     return winner, losses
 
 
-def fit_fold(spec, sealed, training, evaluation_ids):
+def fit_fold(spec, sealed, training, evaluation_ids, *, validate_only=False):
     """`training`: [(event_id, y)] label-qualified before the fold cutoff by the caller."""
     raw = {}
     try:
@@ -134,6 +134,8 @@ def fit_fold(spec, sealed, training, evaluation_ids):
         eval_x = _matrix(by_id, evaluation_ids, columns)
         configs = configurations(spec)
         recipes = _recipes(spec, sealed)
+        if validate_only:
+            return None
         progress = Progress("quantile fits", len(configs) * len(levels))
         with stage("quantile fold fits"):
             for c in configs:
