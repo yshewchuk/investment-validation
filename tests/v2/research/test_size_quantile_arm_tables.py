@@ -2,6 +2,7 @@
 
 Synthetic fixtures only. Oracles are plain loops or a sorted-group bootstrap written here, not the module's code.
 """
+import re
 import warnings
 from pathlib import Path
 
@@ -372,13 +373,85 @@ CASES = {
 }
 
 
+MESSAGES = {
+    "events missing a column": "events, arm, b0 and raw need their columns",
+    "duplicate arm index": "indexes must be unique",
+    "duplicate events index": "indexes must be unique",
+    "arm missing reason": "events, arm, b0 and raw need their columns",
+    "b0 missing a quantile": "events, arm, b0 and raw need their columns",
+    "arm id not in events": "arm and b0 ids must all be in events",
+    "null event_date": "event_date must not be null",
+    "null in-period ticker": "in-period events need a ticker and finite non-negative y",
+    "nan in-period y": "in-period events need a ticker and finite non-negative y",
+    "negative in-period y": "in-period events need a ticker and finite non-negative y",
+    "scored row with nan quantile": "scored rows need seven finite quantiles",
+    "raw missing a paired id": "raw needs seven finite values for every paired event",
+    "raw with a nan value": "raw needs seven finite values for every paired event",
+}
+
+
 @pytest.mark.parametrize("case", sorted(CASES))
 def test_each_refusal_raises_value_error(case):
     events = make_events(per_quarter=4)
     arm, b0 = perfect_vs_shift(events)
     a, b, e, raw = CASES[case](events, arm, b0)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=re.escape(MESSAGES[case])):
         tables.evaluate_arm("S", a, b, e, raw=raw, resamples=R)
+
+
+def _population(kind):
+    """Four events per quarter in the ten quarters ("multi"), or one ticker in one quarter ("one_group")."""
+    if kind == "multi":
+        events = make_events(per_quarter=4)
+    else:
+        events = make_events(per_quarter=4, drop=tuple(QUARTERS[1:]))
+        events["ticker"] = "AAA"
+    arm, b0 = perfect_vs_shift(events)
+    return events, arm, b0
+
+
+POPULATIONS = ["multi", "one_group"]
+
+
+@pytest.mark.parametrize("kind", POPULATIONS)
+@pytest.mark.parametrize("resamples", [0, -1, 2.5, True])
+def test_bad_resamples_is_refused(kind, resamples):
+    events, arm, b0 = _population(kind)
+    with pytest.raises(ValueError, match=re.escape("resamples must be an integer >= 1")):
+        tables.evaluate_arm("S", arm, b0, events, resamples=resamples)
+
+
+@pytest.mark.parametrize("kind", POPULATIONS)
+@pytest.mark.parametrize("seed", [-1, None, 1.5, True])
+def test_bad_seed_is_refused(kind, seed):
+    events, arm, b0 = _population(kind)
+    with pytest.raises(ValueError, match=re.escape("seed must be a non-negative integer")):
+        tables.evaluate_arm("S", arm, b0, events, resamples=R, seed=seed)
+
+
+def test_numpy_integer_controls_are_accepted():
+    events, arm, b0 = _population("multi")
+    base = tables.evaluate_arm("S", arm, b0, events, resamples=R, seed=3)
+    got = tables.evaluate_arm("S", arm, b0, events, resamples=np.int64(R), seed=np.int64(3))
+    assert got["status"] == "testable"
+    assert got["accuracy"]["quarter_interval"] == pytest.approx(base["accuracy"]["quarter_interval"])
+    assert got["accuracy"]["ticker_interval"] == pytest.approx(base["accuracy"]["ticker_interval"])
+
+
+@pytest.mark.parametrize("where", ["m0", "m3", "crps"])
+def test_non_numeric_value_is_refused_before_metrics(monkeypatch, where):
+    def boom(*args, **kwargs):
+        raise AssertionError("metrics ran before validation")
+
+    monkeypatch.setattr(tables, "pinball", boom)
+    events, arm, b0 = _population("multi")
+    first = events.index[0]
+    if where == "crps":
+        arm = _edit(arm.assign(crps=0.5).astype({"crps": object}), first, "crps", "abc")
+    else:
+        events = _edit(events.astype({where: object}), first, where, "abc")
+    with pytest.raises(ValueError):
+        tables.evaluate_arm("S", arm, b0, events, resamples=R)
 
 
 # ---------- i. memory ----------

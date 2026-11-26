@@ -86,6 +86,10 @@ def evaluate_arm(name, arm, b0, events, *, raw=None, resamples=RESAMPLES, seed=S
     """Tables, scored share and pass rules 1 and 3 for one arm against B0; no verdict for the arm."""
     try:
         with stage(f"quantile arm tables {name}"):
+            if isinstance(resamples, bool) or not isinstance(resamples, (int, np.integer)) or resamples < 1:
+                raise ValueError("resamples must be an integer >= 1")
+            if isinstance(seed, bool) or not isinstance(seed, (int, np.integer)) or seed < 0:
+                raise ValueError("seed must be a non-negative integer")
             ev, arm_lab, b0_lab = _pair(arm, b0, events, raw)
             paired = (arm_lab == "scored") & (b0_lab == "scored")
             pid, sub = ev.index[paired], ev[paired]
@@ -94,11 +98,12 @@ def evaluate_arm(name, arm, b0, events, *, raw=None, resamples=RESAMPLES, seed=S
                 raise ValueError("raw needs seven finite values for every paired event")
             y = sub["y"].to_numpy(dtype=float)
             q, qb = (f.loc[pid, QCOLS].to_numpy(dtype=float) for f in (arm, b0))
+            crps = arm["crps"].reindex(pid).to_numpy(dtype=float) if "crps" in arm else np.full(len(pid), NAN)
+            m0, m3 = sub["m0"].to_numpy(dtype=float), sub["m3"].to_numpy(dtype=float)
             pa, pb = pinball(y, q, LEVELS), pinball(y, qb, LEVELS)
             cov, covb = ({k: v.to_numpy() for k, v in coverage(y, x, LEVELS).items()} for x in (q, qb))
-            crps = arm["crps"].reindex(pid).to_numpy(dtype=float) if "crps" in arm else np.full(len(pid), NAN)
             a = {"y": y, "q": q, "pa": pa, "pb": pb, "cov": cov, "covb": covb, "raw": rawq, "crps": crps,
-                 "m0": sub["m0"].to_numpy(dtype=float), "m3": sub["m3"].to_numpy(dtype=float),
+                 "m0": m0, "m3": m3,
                  "quarter": sub["quarter"].to_numpy(), "period": sub["period"].to_numpy(),
                  "ticker": sub["ticker"].to_numpy()}
             share = []
