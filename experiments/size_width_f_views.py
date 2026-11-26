@@ -34,12 +34,16 @@ def _entry_ok(entry, names):
 
 
 def admit(results, labels, periods):
-    """True only when, for every label and period, the account passes _entry_ok over VIEWS and every structure of NAMES
-    passes it over ACCOUNT_VIEWS. Missing or malformed input is False, never an exception."""
+    """True only when ``results`` has exactly the keys ``labels``, each results[label] exactly the keys ``periods``, and for every
+    label and period the account passes _entry_ok over VIEWS and every structure of NAMES passes it over ACCOUNT_VIEWS.
+    Missing, extra or malformed input is False, never an exception."""
     try:
+        if not isinstance(results, dict) or set(results) != set(labels): return False
         for label in labels:
+            by = results[label]
+            if not isinstance(by, dict) or set(by) != set(periods): return False
             for period in periods:
-                res = results[label][period]
+                res = by[period]
                 if not _entry_ok(res["account"], VIEWS): return False
                 if not all(_entry_ok(res["structures"][n], ACCOUNT_VIEWS) for n in NAMES): return False
         return True
@@ -48,9 +52,10 @@ def admit(results, labels, periods):
 
 
 def has_views(results):
-    """True when any results[label][period] has a "views" key in its account or in any structure entry (False on the plain non-F shape)."""
+    """True when any results[label][period] has a "views" key in its account or in any structure entry (False on the plain non-F shape).
+    A label whose value is not a mapping is skipped here; the merge in the report refuses or raises on it as before."""
     return any("views" in res["account"] or any("views" in entry for entry in res["structures"].values())
-               for by in results.values() for res in by.values())
+               for by in results.values() if isinstance(by, dict) for res in by.values())
 
 
 def _pct(x):

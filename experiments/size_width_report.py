@@ -255,13 +255,13 @@ def assemble(out_dir, *, expected=None, w5_tables=None):
         flex.admit(inner, band.frozen_bands(out, inner["inputs_hash"]), {"production": {n: 1.0 for n in NAMES},
                    **{arm: tuning.frozen(out, arm, inner["inputs_hash"]) for arm in outer["arms"]}}, outer)
     labels = [label for label in ("production", "A", "B", "C", "D", "E") if label == "production" or label in bodies]
-    merged = {label: {**inner["results"][label], **outer["results"][label]} for label in labels}
-    stats = {label: {**inner["stats"][label], **outer["stats"][label]} for label in labels}
     if f_run:
         if not (f_views.admit(inner["results"], labels, ("2023H2", "2024")) and f_views.admit(outer["results"], labels, ("2025",))):
-            raise _conflict("the F views in results are missing, malformed or differ from the deciding values")
+            raise _conflict("the F views in results are missing, malformed, extra or differ from the deciding values")
     elif f_views.has_views(inner["results"]) or f_views.has_views(outer["results"]):
         raise _conflict("F views in a run that does not bind F")
+    merged = {label: {**inner["results"][label], **outer["results"][label]} for label in labels}
+    stats = {label: {**inner["stats"][label], **outer["stats"][label]} for label in labels}
     body_E = bodies["E"]
     breakevens = {label: {p: stats[label].get(p, {}).get("x") for p in PERIODS} for label in labels}
     table = success.success_table(merged["production"], {label: merged[label] for label in labels if label != "production"},

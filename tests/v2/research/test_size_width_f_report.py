@@ -1,4 +1,5 @@
 """EXP-189 Amendment 1, slice W7c1: F-run report labels, beside-F views and refusals (synthetic receipts only, no market data)."""
+import copy
 import json
 
 import pytest
@@ -331,6 +332,33 @@ def test_fill_model_that_is_not_a_mapping_refuses(tmp_path):
     _refused(tmp_path, "tuning_receipt_changed")
 
 
+def _extra_outer_2024(out):
+    """Outer results A also holds a 2024 cell: a copy of the inner one with different numbers (F view kept equal to the account)."""
+    cell = copy.deepcopy(_body(out / "receipts" / "inner_summary.json")["results"]["A"]["2024"])
+    cell["account"]["total_return"] += 0.01
+    cell["account"]["views"]["F"]["total_return"] += 0.01
+    _mutate(out, "outer_summary.json", lambda b: b["results"]["A"].update({"2024": cell}))
+
+
+def _extra_inner_label(out):
+    _mutate(out, "inner_summary.json", lambda b: b["results"].update(Z=copy.deepcopy(b["results"]["A"])))
+
+
+KEY_CASES = [
+    ("outer extra 2024 cell", _extra_outer_2024),
+    ("inner missing label A", lambda out: _mutate(out, "inner_summary.json", lambda b: b["results"].pop("A"))),
+    ("inner label A a string", lambda out: _mutate(out, "inner_summary.json", lambda b: b["results"].update(A="x"))),
+    ("inner extra label Z", _extra_inner_label),
+]
+
+
+@pytest.mark.parametrize("mutate", [c[1] for c in KEY_CASES], ids=[c[0] for c in KEY_CASES])
+def test_f_run_refuses_a_label_or_period_key_mismatch(tmp_path, mutate):
+    _f_run(tmp_path)
+    mutate(tmp_path)
+    _refused(tmp_path, "tuning_receipt_changed")
+
+
 def _direct(views=True):
     """In-memory results for label A in 2024, the account and every structure; beside-F views added when ``views``."""
     results = {"A": {"2024": {"account": {"total_return": 0.021, "trades": 400},
@@ -410,3 +438,16 @@ def test_admit_refuses_a_missing_label_or_malformed_input():
 def test_has_views_is_false_on_the_plain_shape_and_true_with_views():
     assert not f_views.has_views(_direct(views=False))
     assert f_views.has_views(_direct())
+
+
+def test_direct_admit_refuses_an_extra_label_or_period():
+    results = _direct()
+    results["Z"] = copy.deepcopy(results["A"])
+    assert not f_views.admit(results, ["A"], ["2024"])
+    results = _direct()
+    results["A"]["2025"] = copy.deepcopy(results["A"]["2024"])
+    assert not f_views.admit(results, ["A"], ["2024"])
+
+
+def test_direct_admit_refuses_a_missing_period():
+    assert not f_views.admit(_direct(), ["A"], ["2024", "2025"])
