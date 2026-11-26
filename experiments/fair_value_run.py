@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 import pandas as pd
-import pyarrow.parquet as pq
+import pyarrow.parquet
 
 from engine.fills import MIN_MEANINGFUL_COST
 from experiments import fair_value_fills as fvf
@@ -69,7 +69,7 @@ def _run_chunk(cfg, quarter, wanted: pd.DataFrame):
                              max_total_bytes=limit)
     path = Path(cfg.quotes_dir) / f"{quarter}.parquet"
     blob = fvi._read_capped(path, limit, path.name)
-    meta = pq.read_metadata(io.BytesIO(blob))
+    meta = pyarrow.parquet.read_metadata(io.BytesIO(blob))
     size = sum(meta.row_group(g).total_byte_size for g in range(meta.num_row_groups))
     if (size := max(size, meta.num_rows * fvi.DECODED_ROW_BYTES)) > limit:  # admit from the footer, before decoding
         raise fvi.FairValueRefusal("input_too_large", "quote file estimate over max_rss_mb",
@@ -137,7 +137,7 @@ def main(argv=None) -> int:
         args.pins = json.loads(fvi._read_capped(Path(args.pins), fvi.MAX_MANIFEST_BYTES, "pins"))
         legs = io.BytesIO(fvi._read_capped(Path(args.legs), fvi.MAX_TABLE_BYTES, "legs"))
         report = run_smoke(pd.read_csv(legs), **{k: v for k, v in vars(args).items() if k != "legs"})
-    except (ValueError, OSError) as err:  # refusals and JSON, CSV, Arrow parse errors are ValueErrors
+    except (ValueError, OSError, pyarrow.ArrowException) as err:  # refusals, and JSON, CSV and Arrow read errors
         refusal = err if hasattr(err, "details") else fvi.FairValueRefusal("input_unreadable", "", error=repr(err))
         print(json.dumps({"refusal": refusal.code, "details": refusal.details}, default=str))
         return 2

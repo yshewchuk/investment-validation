@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
+import pyarrow as pa
 import pytest
 
 from experiments import fair_value_fills as fvf
@@ -347,7 +348,7 @@ def test_quote_file_over_limit_refused_before_any_decode(world, spy, reads):
 
 def test_quote_footer_estimate_over_limit_refused_before_decode(world, spy, reads, monkeypatch):
     fake = SimpleNamespace(num_rows=10**12, num_row_groups=0, schema=SimpleNamespace(names=[]))
-    monkeypatch.setattr(run.pq, "read_metadata", lambda _source: fake)
+    monkeypatch.setattr(run.pyarrow.parquet, "read_metadata", lambda _source: fake)
     with pytest.raises(fvi.FairValueRefusal) as exc:
         _run(world)
     assert exc.value.code == "RESOURCE_LIMIT_EXCEEDED"
@@ -494,6 +495,18 @@ def test_main_malformed_input_refused_with_one_line(world, tmp_path, capsys, mut
     assert len(lines) == 1
     out = json.loads(lines[0])
     assert out["refusal"] == "EXPERIMENT_IDENTITY_CONFLICT" and out["details"]["reason"] == reason
+
+
+@pytest.mark.parametrize("error", [pa.ArrowTypeError, pa.ArrowNotImplementedError])
+def test_main_arrow_read_error_refused_with_one_line(world, tmp_path, capsys, monkeypatch, error):
+    def raise_arrow(*_args, **_kwargs):
+        raise error("unreadable quote footer")
+    monkeypatch.setattr(run.pyarrow.parquet, "read_metadata", raise_arrow)
+    assert run.main(_cli(world, tmp_path)) == 2
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 1
+    out = json.loads(lines[0])
+    assert out["refusal"] == "EXPERIMENT_IDENTITY_CONFLICT" and out["details"]["reason"] == "input_unreadable"
 
 
 def test_module_imports_only_allowed_modules():
