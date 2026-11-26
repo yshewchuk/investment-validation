@@ -448,6 +448,24 @@ def test_malformed_label_end_text_raises_value_error():
         calib.calibrate(preds, events)  # x is in the window of month 2020-03, so its label is parsed
 
 
+@pytest.mark.parametrize("label_end", [None, float("nan"), "not-a-date", "2020-13-01", 20200110,
+                                       pd.Timestamp("2020-01-10")])
+def test_finite_y_row_in_no_donor_window_still_needs_an_iso_label_end(label_end):
+    preds = pd.DataFrame([_qrow(0)], index=["a"], columns=calib.QCOLS)  # the only event: no later month uses it
+    events = pd.DataFrame({"event_date": ["2020-01-10"], "y": [1.0],
+                           "label_end": np.array([label_end], dtype=object)}, index=["a"])
+    with pytest.raises(ValueError, match="label_end"):
+        calib.calibrate(preds, events)
+
+
+def test_nan_y_row_keeps_any_label_end():
+    preds = pd.DataFrame([_qrow(0)], index=["a"], columns=calib.QCOLS)
+    events = pd.DataFrame({"event_date": ["2020-01-10"], "y": [np.nan],
+                           "label_end": np.array(["not-a-date"], dtype=object)}, index=["a"])
+    arms, _, _ = calib.calibrate(preds, events)  # label_end is never read: the event has no donors
+    assert arms["Q"].loc["a", "reason"] == "calibration_burn_in"
+
+
 def test_floor_report_counts_and_shares_on_the_chain():
     rows, _, _, report = _run()
     _, qb, yb = _pick(rows, "b")

@@ -981,7 +981,7 @@ EXP-190 (`guides/size_quantile_move_design.md`; uncalled): `size_quantile_prereg
 `size_quantile_baselines.pool_quantiles` (B0): unscored `forecast_missing`/`refused_draw`/`non_finite_output`; bad input `ValueError`.
 `size_quantile_fits`: `panel_*`, `feature_*`, `selection_*`, `fixed_parameters_mismatch`, `training_label_invalid`, `fold_inputs_invalid`, `grid_invalid`, `RESOURCE_LIMIT_EXCEEDED`.
 `size_quantile_walk.fit_walk_forward` write-once `fit_<year>.json`: gap→`years_not_contiguous`; changed/invalid receipt→`fit_receipt_{changed,unreadable}`; memory/oversize-publish→`RESOURCE_LIMIT_EXCEEDED`; fit `ValueError`→`fit_failed`, stops.
-`size_quantile_calibration` (uncalled; user 2026-11-26) calibrates/tails Q, Q_raw: unscored `non_finite_output`/`calibration_burn_in`/`tail_pool_thin`; bad input `ValueError`; memory `RESOURCE_LIMIT_EXCEEDED`. Q6 prints `floor_report` (floor provisional).
+`size_quantile_calibration` (uncalled) calibrates/tails Q, Q_raw: unscored `non_finite_output`/`calibration_burn_in`/`tail_pool_thin`; bad input `ValueError`; memory `RESOURCE_LIMIT_EXCEEDED`.
 
 ## Fill model F
 

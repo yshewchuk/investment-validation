@@ -2,6 +2,7 @@
 admitted events: no file I/O, no production caller yet (Q5b/Q6 first). The Q6 report must print
 `floor_report`; the 0.5 floor is provisional."""
 from collections import Counter
+from datetime import date
 
 import numpy as np
 import pandas as pd
@@ -48,9 +49,13 @@ def _inputs(predictions, events):
     y = np.asarray(ev["y"], dtype=float)
     if dates.isna().any() or np.isinf(y).any() or (y < 0).any():
         raise ValueError("event_date must be set; y must be finite or NaN and non-negative")
-    if (np.isfinite(y) & ev["label_end"].isna().to_numpy()).any():
-        raise ValueError("a finite y needs a label_end")
-    return dates, y, ev["label_end"].to_numpy(dtype=object), np.sort(predictions[QCOLS].to_numpy(dtype=float), axis=1)
+    label_end = ev["label_end"].to_numpy(dtype=object)
+    try:
+        for text in label_end[np.isfinite(y)]:
+            date.fromisoformat(text)
+    except (TypeError, ValueError):
+        raise ValueError("a finite y needs a label_end that is an ISO date") from None
+    return dates, y, label_end, np.sort(predictions[QCOLS].to_numpy(dtype=float), axis=1)
 
 
 def _floor_rows(arm, out, dq, donors, years):
@@ -80,8 +85,7 @@ def calibrate(predictions, events):
             n, width = len(predictions), len(QCOLS)
             finite = np.isfinite(qhat).all(axis=1)
             months, years = dates.to_period("M").to_timestamp(), dates.year.to_numpy()
-            donor_q = {a: np.full((n, width), np.nan) for a in ARMS}
-            out = {a: np.full((n, width), np.nan) for a in ARMS}
+            donor_q, out = ({a: np.full((n, width), np.nan) for a in ARMS} for _ in range(2))
             reason = {a: np.where(finite, None, "non_finite_output") for a in ARMS}
             pools, donors, month_list = {}, {}, months.unique().sort_values()
             progress = Progress("quantile calibration", len(month_list))
@@ -89,15 +93,14 @@ def calibrate(predictions, events):
                 mine = np.flatnonzero(months == m)
                 ok = mine[finite[mine]]
                 window = (dates >= m - pd.DateOffset(months=WINDOW_MONTHS)) & (dates < m) & np.isfinite(y)
-                cut = m.date().isoformat()
-                pool = np.array([i for i in np.flatnonzero(window) if available_before(label_end[i], cut)], dtype=int)
+                pool = np.array([i for i in np.flatnonzero(window)
+                                 if available_before(label_end[i], f"{m:%Y-%m-%d}")], dtype=int)
                 donor_q["Q_raw"][ok] = np.maximum(qhat[ok], 0.0)
                 calib = pool[finite[pool]]
                 if calib.size < MIN_CALIBRATION:
                     reason["Q"][ok] = "calibration_burn_in"
                 else:
-                    err = y[calib][:, None] - qhat[calib]
-                    delta = np.array([np.quantile(err[:, k], LEVELS[k]) for k in range(width)])
+                    delta = np.array([np.quantile(y[calib] - qhat[calib, k], LEVELS[k]) for k in range(width)])
                     fitted = np.maximum(np.sort(qhat[ok] + delta, axis=1), 0.0)
                     good = np.isfinite(fitted).all(axis=1)
                     donor_q["Q"][ok[good]] = fitted[good]
@@ -121,8 +124,7 @@ def calibrate(predictions, events):
                 counts = Counter(r or "scored" for r in reason[arm])
                 decision("quantile calibration", f"arm={arm} events={n} scored={counts['scored']} "
                          f"by_reason={dict(sorted(counts.items()))}")
-                frame = pd.DataFrame(out[arm], index=predictions.index, columns=QCOLS)
-                arms[arm] = frame.assign(month=months.to_numpy(), reason=reason[arm])
+                arms[arm] = pd.DataFrame(out[arm], predictions.index, QCOLS).assign(month=months, reason=reason[arm])
                 frames += _floor_rows(arm, out[arm], donor_q[arm], donors, years)
             for r in frames:
                 decision("quantile calibration", "floor " + " ".join(f"{k}={v}" for k, v in r.items()))
