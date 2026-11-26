@@ -29,6 +29,9 @@ def _cached(build):
 def _wire(module, fills):
     """Route ``module``'s entry, exit marks and row labels through ``fills``. The last resolved trade, the skip reasons and the
     recorded exits live in this closure, so they belong to this one copy."""
+    clash = [name for name in fills.exit_flags if name in module._OUT_COLS]
+    if clash:
+        raise ValueError(f"exit_flags would overwrite score columns: {clash}")
     state = {"trade": None, "skipped": {}, "exits": {}}
     orig_resolve, orig_events, orig_score = module.resolve_priced, module.score_events, module.score
 
@@ -61,8 +64,10 @@ def _wire(module, fills):
     def score_events(chunk, events, sims, name, *, alpha=0.5):
         state["skipped"] = {}
         rows = orig_events(chunk, events, sims, name, alpha=alpha)
-        for eid, reason in state["skipped"].items():
-            rows.loc[(rows["event_id"] == eid) & (rows["reason"] == "entry_quote_unusable"), "reason"] = reason
+        if state["skipped"]:
+            reasons = rows["event_id"].map(state["skipped"])
+            hit = reasons.notna() & (rows["reason"] == "entry_quote_unusable")
+            rows.loc[hit, "reason"] = reasons[hit]
         return rows
 
     def score(chunk, events, decisions, name, alpha, *, drop_unquoted=False, mid_marks=False, repriced=False):

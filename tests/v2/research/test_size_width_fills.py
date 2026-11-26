@@ -1,4 +1,6 @@
 """EXP-189 fill-model seam: the default marks are today's, the seamed sweep reproduces the unseamed one, and a custom model is live."""
+import re
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -177,14 +179,30 @@ def test_the_fills_receive_the_trade_of_the_event_being_priced():
         assert str(chunk["event_id"][trade.i]) == trade.event_id
         lo, hi = int(chunk["offsets"][trade.i]), int(chunk["offsets"][trade.i + 1])
         assert all(lo <= leg["idx"] < hi for leg in traded)
+        assert trade.chunk is chunk and trade.structure == NAME
+        pred = events.loc[events["event_id"] == trade.event_id, "pred_move"].iloc[0]
+        want_legs, _ = seam.load().resolve(chunk, trade.i, NAME, pred)
+        assert trade.legs == tuple(want_legs)
+        assert traded == [leg for leg in trade.legs if leg["qty"] > 0]
+
+
+def test_an_exit_flag_named_like_a_score_column_is_refused():
+    class Clashing(fills.CurrentFills):
+        exit_flags = ("exit_value",)
+
+    with pytest.raises(ValueError, match="exit_flags would overwrite score columns"):
+        seam.load(fills=Clashing())
 
 
 class SkipB(fills.CurrentFills):
     skip = True
+    unusable = False
 
     def entry(self, trade, priced):
         if self.skip and trade.event_id == "B":
             return fills.Skip("f_not_a_debit")
+        if self.unusable and trade.event_id == "B":
+            return None  # an unusable quote, not a Skip
         return super().entry(trade, priced)
 
 
@@ -205,11 +223,18 @@ def test_a_skip_reaches_the_score_events_row_and_leaves_no_stale_reason():
     again = model.score_events(chunk, events, sims, NAME, alpha=0.5)
     pd.testing.assert_frame_equal(again, default, check_exact=True)
 
+    fill.unusable = True  # a later call where B's quote is unusable: the earlier skip must not leak into its reason
+    later = model.score_events(chunk, events, sims, NAME, alpha=0.5)
+    assert later.loc[later["event_id"] == "B", "reason"].iloc[0] == "entry_quote_unusable"
+
 
 class Flagged(fills.CurrentFills):
     exit_flags = FLAGS
+    on = True
 
     def exit_value(self, trade, traded, alpha, mid=False):
+        if not self.on:
+            return super().exit_value(trade, traded, alpha, mid=mid)
         if trade.event_id == "A":
             return fills.Exit(super().exit_value(trade, traded, alpha, mid=mid), frozenset({"exit_fair_mid"}))
         if trade.event_id == "B":
@@ -218,10 +243,12 @@ class Flagged(fills.CurrentFills):
 
 
 def test_exit_flags_and_an_unquoted_exit_reach_the_score_rows():
-    chunk = chunk_of(("A", {}), ("B", {}), ("C", {}), ("R", {k: (1.1, 0.9, 3) for k in range(80, 121)}))
+    curved = {k: (1.0 + 0.01 * (k - 100) ** 2, 1.2 + 0.01 * (k - 100) ** 2, 1) for k in range(80, 121)}  # (bid, ask, rung)
+    chunk = chunk_of(("A", curved), ("B", curved), ("C", curved), ("R", {k: (1.1, 0.9, 3) for k in range(80, 121)}))
     events = events_for("A", "B", "C", "R")
     sims = _sims(["A", "B", "C", "R"])
-    model = seam.load(fills=Flagged())
+    flagged = Flagged()
+    model = seam.load(fills=flagged)
     scored = model.score_events(chunk, events, sims, NAME, alpha=0.5)
     taken = scored.loc[scored["status"] == "scored"].assign(status="taken")
     rows = model.score(chunk, events, taken, NAME, 0.5)
@@ -234,11 +261,26 @@ def test_exit_flags_and_an_unquoted_exit_reach_the_score_rows():
     assert not by.loc["R", list(FLAGS)].any() and not by.loc["C", list(FLAGS)].any()
     assert by.loc["R", "rung"] == EXIT_UNQUOTED
 
+    base = seam.load().score(chunk, events, taken, NAME, 0.5).set_index("event_id")
+    cols = ["exit_value", "pnl_per_share", "pnl_dollars", "rung"]
+    for eid in ("A", "C"):  # a flag does not change the value or the rung
+        for col in cols:
+            assert by.loc[eid, col] == base.loc[eid, col], (eid, col)
+    assert base.loc["A", "exit_value"] != 0.0
+    assert base.loc["B", "exit_value"] != 0.0 and base.loc["B", "rung"] != EXIT_UNQUOTED  # the zero comes from the unquoted Exit
+    assert not by.loc["B", "exit_fair_mid"] and by.loc["B", "exit_unpriceable"]
+
     dropped = model.score(chunk, events, taken, NAME, 0.5, drop_unquoted=True)
     assert list(dropped["event_id"]) == ["A", "C"] and list(dropped.index) == [0, 1]
     assert all(dropped[f].dtype == bool for f in FLAGS)
     empty = model.score(chunk, events, taken.iloc[0:0], NAME, 0.5)
     assert len(empty) == 0 and all(empty[f].dtype == bool for f in FLAGS)
+
+    flagged.on = False  # state resets between score calls on the same model
+    plain = model.score(chunk, events, taken, NAME, 0.5)
+    assert all(plain[f].dtype == bool and not plain[f].any() for f in FLAGS)
+    pd.testing.assert_frame_equal(plain.drop(columns=list(FLAGS)), seam.load().score(chunk, events, taken, NAME, 0.5),
+                                  check_exact=True)
 
 
 class Undeclared(fills.CurrentFills):
@@ -251,11 +293,17 @@ class UnquotedNonzero(fills.CurrentFills):
         return fills.Exit(0.5, unquoted=True)
 
 
-@pytest.mark.parametrize("bad", [Undeclared, UnquotedNonzero])
-def test_an_undeclared_flag_or_a_nonzero_unquoted_exit_is_refused(bad):
+@pytest.mark.parametrize(
+    "bad, message",
+    [
+        (Undeclared, "are not declared in exit_flags"),
+        (UnquotedNonzero, "an unquoted exit must have value 0.0"),
+    ],
+)
+def test_an_undeclared_flag_or_a_nonzero_unquoted_exit_is_refused(bad, message):
     chunk = chunk_of(("A", {}))
     events = events_for("A")
     scored = seam.load().score_events(chunk, events, _sims(["A"]), NAME, alpha=0.5)
     taken = scored.loc[scored["status"] == "scored"].assign(status="taken")
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=re.escape(message)):
         seam.load(fills=bad()).score(chunk, events, taken, NAME, 0.5)
