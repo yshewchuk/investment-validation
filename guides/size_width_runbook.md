@@ -124,7 +124,9 @@ additions. F is selected only by the `spec.yaml` `amendments` entry that carries
 
 1. **Wait to register** until W7a1 to W7b2, W7d and W7e are merged. Before W7d no code reads `fill_model`, and the guard
    checks only rows and hashes: a row registered early would let current marks run as primary under an F spec. From the
-   W7e merge until registration every stage refuses `planned_row_ambiguous`, including a rerun of the original.
+   W7e merge until registration every stage refuses `planned_row_ambiguous`, including a rerun of the original. Also
+   confirm that the merged stages write and receipt-bind every report input (design, "Report inputs" under A1.10);
+   otherwise the run waits for W7c2 and those writes.
 2. **Bindings, before registration, no outcome read.** `fill_model` must match:
    - `fvf_id`: `python3 -c "from experiments import fair_value_run as r; print(r.fvf_id())"`.
    - `reingest.manifest_sha256`: `sha256sum` of `manifest.json` under `reingest.path` (repo-relative).
