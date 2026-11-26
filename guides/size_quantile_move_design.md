@@ -261,8 +261,8 @@ Under section 9's single `spec.yaml`, slice SB0 adds this section's fixed rules 
 | Case | Result |
 | --- | --- |
 | R1 panel, folds, dictionary, M0 or M3 series do not bind | refuse `EXPERIMENT_IDENTITY_CONFLICT`; nothing rebuilt or imputed. A merely absent M3 year is B3 `not_testable` for that year |
-| A fit fails | that fold's arm is `fit_failed`, no retry. Q_raw's fits failing makes Stage A `not_testable`; a calibration failure affects Q only |
-| Burn-in, thin tail pool, non-finite output | unscored (an abstention, not "no"), counted; leaves the paired population |
+| A fit fails | that fold's arm is `fit_failed`, no retry (for Q's walk, the whole year, and the walk stops: below). Q_raw's fits failing makes Stage A `not_testable`; a calibration failure affects Q only |
+| Burn-in (except level-width, below), thin tail pool, non-finite output | unscored (an abstention, not "no"), counted; leaves the paired population |
 | B1 `pool_too_small`; B2 under 500 donors or invalid own `implied_move` | that baseline is unscored for the event, counted; its common-subset tables drop it (section 5) |
 | B2 donor with null, zero, negative or non-finite `implied_move` | dropped from the pool and counted |
 | Level-width burn-in or empty bin | no `L`, counted; leaves only the conditional tests (section 5, settlements 3 and 7) |
@@ -289,7 +289,7 @@ Progress logging follows AGENTS.md.
 
 One `spec.yaml` holds every fixed rule of **both parts**. Its PLANNED row, carrying the spec hash (supervisor registers), and a guard that cannot no-op come **before any fit on real data, and only after part 2 merges**, so no Stage B rule is chosen after seeing Stage A. Part 1 code slices may start earlier on fixtures. Stages: `fit` (receipts), `stage_a` (verdict receipt), `stage_b`. Contract lines land in the `ARCHITECTURE.md` files with the slices that change them.
 
-**Order.** Part 2 has merged, but the guard refuses `stage_b_pending` until SB0 writes section 6's rules into the spec. Then: SB0, PLANNED row, 50-ticker smoke (it fits real data), full run. **Owner's proposal for other real-data reads** (the user may change it until the PLANNED row)**:** before the row, a run may bind sealed records, count the panel and chains, print Y0 and check training-id parity (including the label reads these need), but may not fit a model on real data, or compute any arm's or baseline's score against realised moves (showing v14's stored metrics is allowed).
+**Order.** Part 2 has merged, but the spec still says `pending_part_2`, so the guard refuses `stage_b_pending` until SB0 writes section 6's rules into the spec and marks `stage_b` settled. Then: SB0, PLANNED row, 50-ticker smoke (it fits real data), full run. **Owner's proposal for other real-data reads** (the user may change it until the PLANNED row)**:** before the row, a run may bind sealed records, count the panel and chains, print Y0 and check training-id parity (including the label reads these need), but may not fit a model on real data, or compute any arm's or baseline's score against realised moves (showing v14's stored metrics is allowed).
 
 ## 10. Decisions (settled by the user, 2026-11-25)
 
@@ -343,7 +343,7 @@ Part 2 (`SB` ids; B0-B3 are section 5's baselines). **SB1-SB9b are written only 
 
 | Slice | Scope | Size | After |
 | --- | --- | --- | --- |
-| SB0 | Stage B rules in `spec.yaml`, with spec tests | ~40 / ~80 / 30 | this PR, Q1; before the PLANNED row |
+| SB0 | Stage B rules in `spec.yaml`, with spec tests | ~40 / ~80 / 30 | part 2's design PR, Q1; before the PLANNED row |
 | SB1 | F adapter: bound loads, leg tables, entry guard, exits, mid and harsh views (imports EXP-189's seam where it fits) | ~150 / ~170 / 40 | A passes, F4, F5 (F7 when 6.1 requires it) |
 | SB2 | Trade-everything pricing, causal exit reader, receipts | ~150 / ~170 / 40 | SB1 |
 | SB3 | `QuantilePool`, fast-path equivalence | ~110 / ~140 / 40 | A passes |
