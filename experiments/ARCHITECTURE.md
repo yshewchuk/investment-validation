@@ -979,12 +979,12 @@ EXP-190 (design `guides/size_quantile_move_design.md`; no production caller): `s
 
 ## Fill model F
 
-No production caller ([design](../guides/fair_value_fill_design.md)). `fair_value_pricer` prices; `fair_value_legs`/`fair_value_fills` clamp quotes/fill structures (uses `engine.fills.MIN_MEANINGFUL_COST`; [README](README.md)).
+No production caller ([design](../guides/fair_value_fill_design.md)). `fair_value_pricer` prices; `fair_value_legs` clamps; `fair_value_fills` fills structures (uses `engine.fills.MIN_MEANINGFUL_COST`; [README](README.md)).
 
 |Condition|Outcome|
 |-|-|
 |Null liquidity|thin=0.5|
-|`leg_invalid`|`FairValueRefusal`|
+|`leg_invalid`|`FairValueRefusal` (`EXPERIMENT_IDENTITY_CONFLICT`)|
 |Entry leg not `ok`|`undetermined`|
 |Guard `not_a_debit`/`fill_over_fair`/`spread_over_debit`|`skip`|
 |Exit leg `unpriceable`|`unpriceable`|

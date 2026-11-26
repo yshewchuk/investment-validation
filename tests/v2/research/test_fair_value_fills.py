@@ -333,6 +333,24 @@ def test_negative_proceeds_kept_and_return_below_minus_one():
     assert ff.return_on_debit(2.0, 1.6) == near(0.25)
 
 
+def test_zero_proceeds_are_not_flagged_negative():
+    # V = bid = 0, so the opening buy closes at a sell fill of exactly 0
+    ex = ff.structure_exit(legs_of(row(100, "C", 0.0, 0.2, spot=99.0), sides=["buy"], qtys=[1.0]))
+    assert ex.outcome == "ok" and ex.proceeds_F == 0.0 and ex.exit_negative is False
+
+
+def test_skip_reports_each_sensitivity_debit_separately():
+    # buy: V = bid, ask size unknown; sell: V = 9.52. All four debits differ and the base fills trip the guard.
+    res = ff.structure_entry(legs_of(row(100, "C", 9.9, 10.1, spot=109.9, asz=None),
+                                     row(101, "C", 9.4, 9.6, spot=110.52),
+                                     sides=["buy", "sell"], qtys=[1.0, 1.0]))
+    assert res.outcome == "skip" and res.skip_reason == "fill_over_fair"
+    assert res.debit_fair == near(0.38) and res.debit_F == near(0.4815263158, tol=1e-8)
+    assert res.sensitivity_debits["unknown0"] == near(0.4665263158, tol=1e-8)
+    assert res.sensitivity_debits["unknown1"] == near(0.4965263158, tol=1e-8)
+    assert res.sensitivity_debits["midfloor"] == near(0.5125263158, tol=1e-8)
+
+
 def test_exit_has_no_guard_for_a_wide_quote():
     ex = ff.structure_exit(legs_of(row(100, "C", 0.0, 2.0, spot=105.0), sides=["buy"], qtys=[1.0]))
     assert ex.outcome == "ok" and ex.proceeds_F == near(0.5)  # sell at 2 - 0.75 * 2
