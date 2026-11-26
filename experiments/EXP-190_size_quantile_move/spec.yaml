@@ -68,7 +68,7 @@ baselines:
 stage_a:
   min_scored_share: 0.80  # per period/arm; below: not_testable (scored_share_below_floor); always reported
   settlements:
-    status: "design section 5, settlements 1-9, apply (accepted by the user as proposed, 2026-11-25); compact copy below"
+    status: "design section 5, settlements 1-9, apply (accepted by the user as proposed, 2026-11-25; user confirmed 2026-11-26 that this covers the text as written, item 7's addition included); compact copy below"
     s1: "Spearman bootstrap: in a used cell of n events with rank residuals rW, re, each event gets n * rW * re / sqrt(sum(rW^2) * sum(re^2)), 0 in a zero-W cell (L alike); size_pnl_contrast ticker bootstrap on these and on the W minus L per-event difference; ranks and residuals fixed across resamples; seed a parameter, default 188"
     s2: "tercile difference within each cell (top minus bottom tercile mean e), weighted by cell event count; zero-residual cell counts 0; ordered by residual, ties by event id, np.array_split; pooled-event tercile table report only"
     s3: "level-width burn-in removes an event only from conditional tests (W, L, B0 comparison); it stays in accuracy and coverage"
@@ -103,20 +103,20 @@ stage_a:
   bootstrap: {resamples: 10000, interval_percentile: 90, seed: "fixed"}
   flags: "pooled pinball loss to B1, B2 or B3 is flagged in headline, not gated"
   verdict: "Stage A passes if Q or Q_raw passes. Each passing arm enters Stage B with own verdict. Two eligible arms give two tries, uncorrected. Otherwise Stage B not run."
-  selection_period_disclosure: "report states: grid for year Y uses earlier years; B3 identity, feature set, grid values used 2023-2024; Stage A gate uses 2023H2-2025. 2025 clean for model/parameter choices only, not a holdout (Stage B scores it after a pass that read 2025 outcomes; EXP-188's 2025 results shaped design). Only the forward period after data end is independent."
+  selection_period_disclosure: "report states: grid for year Y uses earlier years; B3 identity, feature set, grid values used 2023-2024; Stage A gate uses 2023H2-2025. No feature set, grid value, configuration or baseline identity was selected by scoring 2025. 2025 is not a clean test or holdout: the Stage A gate reads it (Stage B scores it after a pass that read 2025 outcomes), and 2025 results shaped the design, EXP-188's among them (D15 as revised by the user, 2026-11-26). Only the forward period after data end is independent."
 
 failure_semantics:
   R1: "panel, folds, dictionary, M0 or M3 series do not bind: refuse EXPERIMENT_IDENTITY_CONFLICT; nothing rebuilt or imputed. A merely absent M3 year is B3 not_testable."
-  fit_failed: "fold's arm is fit_failed, no retry. One failed fit (any level or configuration) fails the whole year. The Q walk runs years in order and stops at the first fit_failed year: later years are neither selected nor fitted, so no grid selection reads a failed year; none is skipped or substituted. Stage A is then not_testable, even for a year before the judged periods. Receipts are published whole or not at all; a rerun replays published ones, fit_failed included. Calibration failure affects Q only."
+  fit_failed: "fold's arm is fit_failed, no retry. One failed fit (any level or configuration) fails the whole year. The Q walk runs years in order and stops at the first fit_failed year: later years are neither selected nor fitted, so no grid selection reads a failed year; none is skipped or substituted. Stage A is then not_testable, even for a year before the judged periods. Receipts are published whole or not at all; a rerun replays published ones, fit_failed included. Calibration failure affects Q only. The stop and not_testable rule is a user decision (2026-11-26)."
   abstention: "burn-in (except level-width, see level_width), thin tail pool, non-finite output: unscored (an abstention, not 'no'), counted; leaves paired population"
   baseline_abstention: "B1 pool_too_small; B2 under 500 donors or invalid own implied_move: that baseline is unscored for the event, counted; its common-subset tables drop it. B2 donor with null, zero, negative or non-finite implied_move: dropped from the pool and counted"
   level_width: "burn-in or empty bin: no L, counted; only conditional tests"
-  R2: "quarter or year chunks. Memory limit (owner's proposal, the user may change it until the PLANNED row): the real-data entry point (not yet built, #3047) must wrap the whole one-process run in experiments.memory_guard.rss_watchdog(5 * 2**30): VmRSS sampled every 50 ms above 5 GiB raises MemoryError, refused RESOURCE_LIMIT_EXCEEDED; no stage report, complete fit receipts stay. bounded_run --heavy --max-rss-gb 5.5 is an untyped backstop. No wall-clock limit; receipt byte caps are separate."
+  R2: "quarter or year chunks. Memory limit (user decision, 2026-11-26; peak not yet measured): one heavy process on a 13 GiB box; the real-data entry point (not yet built, #3047) must wrap the whole run in experiments.memory_guard.rss_watchdog(8 * 2**30): the run's own VmRSS, sampled every 50 ms, above 8 GiB raises MemoryError, refused RESOURCE_LIMIT_EXCEEDED; no partial report, complete fit receipts stay. bounded_run --heavy --max-rss-gb 9 is the untyped backstop above it. No wall-clock limit; receipt byte caps are separate."
   R3_R4: "fixed seeds; receipts atomic, immutable, bound to inputs; changed input refuses"
   R5: "arm ids hash source, level set and configuration"
   R6: "causality: fits, selection, calibration, tail, level-width and baseline pools use data available before fold or month; month's predictions written before its labels are read"
 
-real_data_order: "SB0, then PLANNED row, then 50-ticker smoke (a real-data fit), then full run. Before the row (owner's proposal, the user may change it until the PLANNED row): sealed-record binding, panel and chain counts, Y0 report and training-id parity (with the label reads they need) are allowed; no model fit on real data and no computing of any arm's or baseline's score against realised moves (showing v14's stored metrics is allowed)"
+real_data_order: "SB0, then PLANNED row, then 50-ticker smoke (a real-data fit), then full run. Before the row (user decision, 2026-11-26): sealed-record binding, panel and chain counts, Y0 report and training-id parity (with the label reads they need) are allowed; no model fit on real data and no computing of any arm's or baseline's score against realised moves (showing v14's stored metrics is allowed)"
 
 stage_b:
   status: pending_part_2
