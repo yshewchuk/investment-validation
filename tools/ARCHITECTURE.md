@@ -13,15 +13,15 @@ Output root: `--out`, default `data/experiment/orats_smoothed_vol/`. Each table 
 | Output | Source, key and values |
 |---|---|
 | `quotes/` | `hist/strikes`. Key `(ticker, obs_date, expiry, strike)`, built as the chain normalizer builds it from `tradeDate` and `expirDate`; join to `option_chains` on these four (both sides of a strike share the row). Values `smvVol`, `callMidIv`, `putMidIv`, `stockPrice`, as vendor-reported: sentinels become NaN, zeros stay zero. |
-| `rates/` | `hist/cores`. Key `(ticker, obs_date)`. Values `iRate5wk`, `iRateLt`. |
-| `manifest.json` | Per-table entry, skip and row counts, `duplicates_dropped`, and `conflicting_keys` (duplicated keys whose values differ). Written last. |
+| `rates/` | `hist/cores`. Key `(ticker, obs_date)`. Values `iRate5wk`, `iRateLt` and the options-model inputs `borrow30`, `borrow2yr`, `annIdiv`, `annActDiv`, `divAmt`, `divDate`, `assetType` (vendor names; `borrow2yr` is ORATS's `borrow2y`). `divDate` is a date (what pandas parses with `%Y-%m-%d`, which tolerates unpadded month and day, within its nanosecond range; anything else: null), the rest are numbers, with sentinels NaN and zeros kept. |
+| `manifest.json` | Per-table entry, skip and row counts, `duplicates_dropped`, `conflicting_keys` (duplicated keys that differ: for `quotes/`, in the quote values; for `rates/`, in the two rates only), `conflicting_keys_all_columns` (differ in any written value) and `non_null` (per value field, over written rows). Top-level `units` names the unit of each `rates/` field. Written last. |
 
-Match coverage against `option_chains` is not reported yet. Dividends: none are ingested. `dividend_fields` in `manifest.json` counts non-null rows for each parsed `hist/cores` field whose name contains `div` (empty: none present); presence does not establish meaning.
+No unit is converted. `units` records `percent` for the rates and borrow fields (the `hist/cores` convention; ORATS's Summaries endpoint, not read here, uses decimals), `dollars_per_share` for `annIdiv`, `annActDiv` and `divAmt` (our reading, unconfirmed), `code` for `assetType` (0 ETB_NO_DIV, 1 HTB, 2 HTB_DIV_PAYING, 3 ETB_DIV_PAYING, 4 INDEX, 5 ETF) and `date` for `divDate`. The labels are fixed, not detected. Match coverage against `option_chains` is not reported yet. `dividend_fields` in `manifest.json` counts, for each raw `hist/cores` column whose name contains `div`, the non-null vendor values before any parsing, dedupe or skip rule, so it includes values the output writes as null or never writes; use `non_null` for written values. Presence does not establish meaning.
 
 | Condition | Outcome |
 |---|---|
 | Several rows share a key | The latest `fetched_at` wins (a missing or unparseable stamp sorts oldest), then the greatest cache key, then the later body row. The winner is kept whole, even where its values are NaN. |
-| A payload has no non-null `smvVol` (quotes) or no non-null rate (rates) | Skipped and counted, so it cannot override a pull that had them. |
+| A payload has no non-null `smvVol` (quotes) or no non-null rate (rates) | Skipped and counted, so it cannot override a pull that had them. The other `rates/` fields do not count: a payload with only those is skipped, and one without them can win a key, leaving them null. |
 | A row has an unusable key | Dropped and counted. |
 | A body is unreadable (over 256 MiB, either form) or its shape unrecognized | Counted and logged. Outputs and the manifest are still written; exit 1. Nothing is quarantined. |
 | A run stops after preflight | No manifest exists. The next run reuses `--work-dir` (default under `/tmp`) entries only if body, parsing code, marker and shards are unchanged; others are reparsed. A shard that changes before its merge fails the run. |

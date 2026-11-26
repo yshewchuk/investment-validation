@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import gzip
 import json
+import re
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -58,7 +61,9 @@ def _world(base: Path):
     _entry(raw, "hist/strikes", K_NO_SMV, _payload([_quote("SPY", 100.0)]),
            "2025-01-09T00:00:00+00:00")
     _entry(raw, "hist/cores", K_RATES, _payload([
-        {"ticker": "SPY", "tradeDate": "2025-01-02", "iRate5wk": 0.04, "iRateLt": 0.045, "annActDiv": 1.5},
+        {"ticker": "SPY", "tradeDate": "2025-01-02", "iRate5wk": 0.04, "iRateLt": 0.045,
+         "annActDiv": 1.5, "annIdiv": 1.2245, "borrow30": 5.3754, "borrow2yr": 4.6606,
+         "divAmt": 0.34, "divDate": "2025-04-03", "assetType": 3},
         {"ticker": "SPY", "tradeDate": "2025-01-03", "iRate5wk": 0.04, "iRateLt": 0.045, "annActDiv": None},
     ]), "2025-01-02T00:00:00+00:00")
     return raw
@@ -82,7 +87,10 @@ def test_end_to_end(tmp_path):
     quotes_m = manifest["tables"]["quotes"]
     assert quotes_m["duplicates_dropped"] == 1
     assert quotes_m["conflicting_keys"] == 1
+    assert quotes_m["conflicting_keys_all_columns"] == 1
+    assert quotes_m["rows_out"] == 2
     assert quotes_m["without_required_fields"] == 1
+    assert quotes_m["non_null"] == {"smvVol": 1, "callMidIv": 2, "putMidIv": 2, "stockPrice": 2}
 
     q = pd.read_parquet(out / "quotes" / "year=2025" / "month=01.parquet").set_index("strike")
     assert q.loc[100.0, "smvVol"] == 0.25        # later fetched_at wins, not key order
@@ -97,8 +105,27 @@ def test_end_to_end(tmp_path):
     assert r["iRateLt"].tolist() == [0.045, 0.045]
     assert r["obs_date"].dt.strftime("%Y-%m-%d").tolist() == ["2025-01-02", "2025-01-03"]
     assert r["iRate5wk"].notna().all()
+    assert list(r.columns) == ["ticker","obs_date","iRate5wk","iRateLt","borrow30","borrow2yr","annIdiv","annActDiv","divAmt","divDate","assetType"]
+    first, second = r.iloc[0], r.iloc[1]
+    assert (first["borrow30"], first["borrow2yr"], first["annIdiv"]) == (5.3754, 4.6606, 1.2245)
+    assert (first["annActDiv"], first["divAmt"]) == (1.5, 0.34)
+    assert first["divDate"] == pd.Timestamp("2025-04-03")
+    assert r["divDate"].dtype == "datetime64[ns]"
+    assert first["assetType"] == 3.0
+    assert second[tool.CARRY].isna().all()
+    assert manifest["tables"]["rates"]["non_null"] == {
+        "iRate5wk": 2, "iRateLt": 2, "borrow30": 1, "borrow2yr": 1, "annIdiv": 1,
+        "annActDiv": 1, "divAmt": 1, "divDate": 1, "assetType": 1}
+    assert manifest["tables"]["rates"]["conflicting_keys_all_columns"] == 0
+    assert manifest["tables"]["rates"]["rows_out"] == 2
+    assert manifest["tables"]["rates"]["duplicates_dropped"] == 0
+    assert manifest["tables"]["rates"]["conflicting_keys"] == 0
 
-    assert manifest["dividend_fields"] == {"annActDiv": 1}
+    assert manifest["version"] == "4"
+    assert manifest["units"] == {"iRate5wk": "percent", "iRateLt": "percent", "borrow30": "percent", "borrow2yr": "percent",
+                                 "annIdiv": "dollars_per_share", "annActDiv": "dollars_per_share", "divAmt": "dollars_per_share",
+                                 "divDate": "date", "assetType": "code"}
+    assert manifest["dividend_fields"] == {"annActDiv": 1, "annIdiv": 1, "divAmt": 1, "divDate": 1}
     assert _tree(raw) == before
 
 
@@ -422,3 +449,172 @@ def test_meta_size_cap_refuses_before_writing(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="exceeds cap"):
         tool.main(_args(raw, out, tmp_path / "work"))
     assert not out.exists()
+
+
+def test_rates_later_fetch_wins_whole_row(tmp_path):
+    raw = _world(tmp_path)
+    _entry(raw, "hist/cores", "7" * 64, _payload([
+        {"ticker": "SPY", "tradeDate": "2025-01-02", "iRate5wk": 0.04, "iRateLt": 0.045,
+         "borrow30": 6.0}]), "2025-01-06T00:00:00+00:00")
+    out = tmp_path / "out"
+    assert tool.main(_args(raw, out, tmp_path / "work")) == 0
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["tables"]["rates"]["conflicting_keys"] == 0
+    assert manifest["tables"]["rates"]["conflicting_keys_all_columns"] == 1
+    r = pd.read_parquet(out / "rates" / "year=2025" / "month=01.parquet")
+    first = r.iloc[0]
+    assert first["borrow30"] == 6.0
+    assert pd.isna(first["annActDiv"]) and pd.isna(first["divAmt"])
+    for col in ["borrow2yr", "annIdiv", "annActDiv", "divAmt", "divDate", "assetType"]:
+        assert pd.isna(first[col]), col
+    assert manifest["tables"]["rates"]["rows_out"] == 2
+    assert manifest["tables"]["rates"]["duplicates_dropped"] == 1
+    assert manifest["tables"]["rates"]["non_null"] == {
+        "iRate5wk": 2, "iRateLt": 2, "borrow30": 1,
+        "borrow2yr": 0, "annIdiv": 0, "annActDiv": 0, "divAmt": 0, "divDate": 0, "assetType": 0}
+    # counted before dedupe, so the losing row still counts
+    assert manifest["dividend_fields"] == {"annActDiv": 1, "annIdiv": 1, "divAmt": 1, "divDate": 1}
+
+
+def test_rates_without_required_fields_does_not_override(tmp_path):
+    raw = _world(tmp_path)
+    _entry(raw, "hist/cores", "8" * 64, _payload([
+        {"ticker": "SPY", "tradeDate": "2025-01-02", "borrow30": 9.9, "annIdiv": 9.9}]),
+        "2025-01-09T00:00:00+00:00")
+    out = tmp_path / "out"
+    assert tool.main(_args(raw, out, tmp_path / "work")) == 0
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["tables"]["rates"]["without_required_fields"] == 1
+    # the skipped payload's annIdiv is still counted
+    assert manifest["dividend_fields"] == {"annActDiv": 1, "annIdiv": 2, "divAmt": 1, "divDate": 1}
+    r = pd.read_parquet(out / "rates" / "year=2025" / "month=01.parquet")
+    first = r.iloc[0]
+    assert first["iRate5wk"] == 0.04
+    assert first["borrow30"] == 5.3754
+    assert first["annIdiv"] == 1.2245
+
+
+def test_carry_sentinel_bad_date_and_zero(tmp_path):
+    raw = tmp_path / "raw"
+    _entry(raw, "hist/strikes", K_EARLY_BIG, _payload([_quote("SPY", 100.0, 0.2)]),
+           "2025-01-01T00:00:00+00:00")
+    _entry(raw, "hist/cores", K_RATES, _payload([
+        {"ticker": "SPY", "tradeDate": "2025-01-02", "iRate5wk": 0.04, "iRateLt": 0.045,
+         "borrow30": 3.4e38, "divAmt": 0.0, "divDate": "not-a-date"},
+        {"ticker": "SPY", "tradeDate": "2025-01-03", "iRate5wk": 0.04, "iRateLt": 0.045,
+         "divDate": "9999-12-31"},
+        {"ticker": "SPY", "tradeDate": "2025-01-06", "iRate5wk": 0.04, "iRateLt": 0.045,
+         "divDate": "0001-01-01"},
+        {"ticker": "SPY", "tradeDate": "2025-01-07", "iRate5wk": 0.04, "iRateLt": 0.045,
+         "divDate": "2025-04-03T00:00:00Z"},
+        {"ticker": "SPY", "tradeDate": "2025-01-08", "iRate5wk": 0.04, "iRateLt": 0.045,
+         "divDate": "2025-04-03T00:00:00+09:00"},
+        {"ticker": "SPY", "tradeDate": "2025-01-09", "iRate5wk": 0.04, "iRateLt": 0.045,
+         "divDate": "2025-04-03 13:00:00"}]),
+        "2025-01-02T00:00:00+00:00")
+    out = tmp_path / "out"
+    assert tool.main(_args(raw, out, tmp_path / "work")) == 0
+    r = pd.read_parquet(out / "rates" / "year=2025" / "month=01.parquet")
+    assert r["borrow30"].isna().all()
+    assert r["divDate"].isna().all()
+    assert r.loc[0, "divAmt"] == 0.0
+    assert len(r) == 6
+    assert r["iRate5wk"].tolist() == [0.04] * 6
+
+
+def test_rates_conflicts_accumulate_across_months(tmp_path):
+    raw = tmp_path / "raw"
+    _entry(raw, "hist/strikes", K_EARLY_BIG, _payload([_quote("SPY", 100.0, 0.2)]),
+           "2025-01-01T00:00:00+00:00")
+    dates = ("2025-01-02", "2025-02-03")
+    _entry(raw, "hist/cores", K_RATES, _payload([
+        {"ticker": "SPY", "tradeDate": d, "iRate5wk": 0.04, "iRateLt": 0.045} for d in dates]),
+        "2025-01-02T00:00:00+00:00")
+    _entry(raw, "hist/cores", "9" * 64, _payload([
+        {"ticker": "SPY", "tradeDate": d, "iRate5wk": 0.05, "iRateLt": 0.045} for d in dates]),
+        "2025-01-06T00:00:00+00:00")
+    out = tmp_path / "out"
+    assert tool.main(_args(raw, out, tmp_path / "work")) == 0
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    rates_m = manifest["tables"]["rates"]
+    assert rates_m["conflicting_keys"] == 2
+    assert rates_m["conflicting_keys_all_columns"] == 2
+    assert rates_m["rows_out"] == 2
+    assert rates_m["duplicates_dropped"] == 2
+    assert rates_m["non_null"]["iRate5wk"] == 2
+    assert rates_m["non_null"]["iRateLt"] == 2
+    assert rates_m["non_null"]["borrow30"] == 0
+    for month in ("01", "02"):
+        rf = pd.read_parquet(out / "rates" / "year=2025" / f"month={month}.parquet")
+        assert rf["iRate5wk"].tolist() == [0.05]
+
+
+def test_merge_heartbeat(tmp_path, monkeypatch, caplog):
+    raw = _world(tmp_path)
+    out = tmp_path / "out"
+    monkeypatch.setattr(tool, "PROGRESS_S", 0.0)
+    caplog.set_level("INFO", logger="smvvol")
+    assert tool.main(_args(raw, out, tmp_path / "work")) == 0
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(re.match(r"^\[smvvol\] merge quotes 2025-01: shards 1/\d+, [\d.]+ shards/s, ETA \d+ s, peak rss \d+ MB$", m)
+               for m in messages)
+    assert any(re.match(r"^\[smvvol\] merge quotes 2025-01: dedupe \d+ rows, peak rss \d+ MB$", m) for m in messages)
+
+
+def test_month_heartbeat_logs_while_blocked(monkeypatch, caplog):
+    monkeypatch.setattr(tool, "PROGRESS_S", 0.01)
+    caplog.set_level("INFO", logger="smvvol")
+    before = threading.active_count()
+
+    def wait_for(text):
+        deadline = time.monotonic() + 5
+        while not any(text in r.getMessage() for r in caplog.records):
+            assert time.monotonic() < deadline, f"no record containing {text!r}"
+            time.sleep(0.01)
+
+    with tool._heartbeat("rates", "2025-01", 0, 3, time.monotonic(), 7):
+        wait_for("still merging")
+    assert any(re.match(r"^\[smvvol\] merge rates 2025-01: still merging 7 rows, 0/3 months done, "
+                        r"0\.00 months/s, \d+ s on this month, ETA unknown, peak rss \d+ MB$", r.getMessage())
+               for r in caplog.records)
+
+    with tool._heartbeat("rates", "2025-01", 1, 3, time.monotonic() - 100, 7):
+        wait_for("1/3 months done")
+    line = next(r.getMessage() for r in caplog.records if "1/3 months done" in r.getMessage())
+    m = re.match(r"^\[smvvol\] merge rates 2025-01: still merging 7 rows, 1/3 months done, ([\d.]+) months/s, "
+                 r"\d+ s on this month, ETA (\d+) s, peak rss \d+ MB$", line)
+    assert m, line
+    assert float(m.group(1)) == 0.01
+    assert 200 <= int(m.group(2)) <= 206
+    assert threading.active_count() == before
+
+
+def test_slow_month_merge_heartbeat_from_main(tmp_path, monkeypatch, caplog):
+    raw = _world(tmp_path)
+    out = tmp_path / "out"
+    monkeypatch.setattr(tool, "PROGRESS_S", 0.01)
+    caplog.set_level("INFO", logger="smvvol")
+    real_atomic = tool._atomic
+
+    def slow_atomic(path, write):
+        time.sleep(0.2)
+        return real_atomic(path, write)
+
+    monkeypatch.setattr(tool, "_atomic", slow_atomic)
+    assert tool.main(_args(raw, out, tmp_path / "work")) == 0
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("merge quotes 2025-01: still merging" in m for m in messages)
+
+
+def test_divdate_unpadded_is_parsed(tmp_path):
+    raw = tmp_path / "raw"
+    _entry(raw, "hist/strikes", K_EARLY_BIG, _payload([_quote("SPY", 100.0, 0.2)]),
+           "2025-01-01T00:00:00+00:00")
+    _entry(raw, "hist/cores", K_RATES, _payload([
+        {"ticker": "SPY", "tradeDate": "2025-01-02", "iRate5wk": 0.04, "iRateLt": 0.045,
+         "divDate": "2025-4-3"}]),
+        "2025-01-02T00:00:00+00:00")
+    out = tmp_path / "out"
+    assert tool.main(_args(raw, out, tmp_path / "work")) == 0
+    r = pd.read_parquet(out / "rates" / "year=2025" / "month=01.parquet")
+    assert r.loc[0, "divDate"] == pd.Timestamp("2025-04-03")
