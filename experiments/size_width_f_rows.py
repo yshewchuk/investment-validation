@@ -10,6 +10,11 @@ An F taken row carries the sweep's ``_TAKEN`` columns, then ``F_COLS``:
 - ``rung``, ``exit_fair_mid``, ``exit_negative``: F primary's rung and flags (``exit_fair_mid``: a usable quote with no
   fair value or rate, marked at V = mid; ``exit_negative``: proceeds kept below zero).
 - ``entry_cost_mid``: the mid debit; it pairs with ``exit_value_mid`` and ``pnl_dollars_mid``.
+- ``exit_value_at_v``: the positive legs closed at V, no concession; NaN on excluded rows. A1.3's mean exit concession is
+  (exit_value_at_v - proceeds_F) / debit_F over rows with neither excluded flag.
+- ``proceeds_F``: F's exit proceeds, NaN on excluded rows (unlike ``exit_value``, 0.0 there); ``debit_F``: F's entry debit.
+- ``excluded_rung3``: the ladder rung is 3 (``exit_unquoted_worst_case`` in the mid view).
+- ``excluded_unpriceable``: F primary is unquoted at exit but the ladder did not rung 3.
 - ``rung_ladder``: the ladder rung of the mid and harsh views (taken from the mid frame).
 - ``entry_cost_harsh``, ``exit_value_harsh``, ``pnl_dollars_harsh``: the harsh view (buy at ask, sell at bid at entry,
   the reverse at exit), a CurrentFills copy at alpha 0.
@@ -37,7 +42,8 @@ from experiments.size_width_fills import Trade
 ALPHA = 0.5  # the sweep's ALPHA; not imported from size_width_sweep, which imports this module
 F_COLS = ["rung", "exit_fair_mid", "exit_negative", "entry_cost_mid", "rung_ladder", "entry_cost_harsh",
           "exit_value_harsh", "pnl_dollars_harsh",
-          *(f"{p}_{v}" for v in VARIANTS for p in ("entry_cost", "exit_value", "pnl_dollars"))]
+          *(f"{p}_{v}" for v in VARIANTS for p in ("entry_cost", "exit_value", "pnl_dollars")),
+          "exit_value_at_v", "proceeds_F", "debit_F", "excluded_rung3", "excluded_unpriceable"]
 
 
 def is_f(pricing):
@@ -69,10 +75,14 @@ def views(pricing, chunk, ev, mine, name, primary):
         entry = pricing.fills.entry_result(trade)
         exit_res = None if row["rung"] == EXIT_UNQUOTED else pricing.fills.exit_result(trade)
         m, h = mids.loc[eid], harsh.loc[eid]
+        rung3 = bool(m["rung"] == EXIT_UNQUOTED)
         got = {"event_id": eid, "rung": row["rung"], "exit_fair_mid": row["exit_fair_mid"],
                "exit_negative": row["exit_negative"], "entry_cost_mid": m["entry_cost"], "rung_ladder": m["rung"],
                "entry_cost_harsh": h["entry_cost"], "exit_value_harsh": h["exit_value"],
-               "pnl_dollars_harsh": h["pnl_dollars"]}
+               "pnl_dollars_harsh": h["pnl_dollars"], "debit_F": entry.debit_F,
+               "exit_value_at_v": float("nan") if exit_res is None else pricing.fills.exit_value_at_v(trade),
+               "proceeds_F": float("nan") if exit_res is None else exit_res.proceeds_F,
+               "excluded_rung3": rung3, "excluded_unpriceable": bool(row["rung"] == EXIT_UNQUOTED) and not rung3}
         for v in VARIANTS:
             debit = entry.sensitivity_debits[v]
             exit_v = 0.0 if exit_res is None else exit_res.sensitivity_proceeds[v]
