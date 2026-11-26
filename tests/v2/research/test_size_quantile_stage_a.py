@@ -12,6 +12,7 @@ import pandas as pd
 import pytest
 import yaml
 
+from engine.pnl_sim import MIN_POOL
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import OpsError
 from experiments import lib
@@ -522,3 +523,60 @@ def test_memory_error_in_calibration_refuses_resource_limit(monkeypatch, tmp_pat
         _run(world, out, guard)
     assert exc.value.problem.code == "RESOURCE_LIMIT_EXCEEDED"
     assert not (out / REPORT).exists()
+
+
+B0_COLS = [f"b0_q{round(a * 100)}" for a in LEVELS]
+
+
+def _b0_oracle(world):
+    """B0's quantiles and bucket for each event, from the design rule in plain numpy (no ResidualPool, build_pool or
+    pool_quantiles; only the MIN_POOL constant is taken from engine.pnl_sim).
+    Donors: every fixture event dated strictly before the event, by event date, as the native pool is. Label
+    availability is not a B0 filter (the open question in issue #3047). err_move = donor abs_move - donor pred_move.
+    Bucket edges are the earlier donors' pred_move quantiles on production's grid, np.linspace(0, 1, 11)[1:-1]
+    (the same float values, not a re-derived 0.1..0.9 grid, which can differ by an ulp and move a donor sitting exactly
+    on an edge into another bucket). Membership rule, as in ResidualPool.draw: a value v belongs to bucket
+    searchsorted(edges, v, side="right"), so an edge value falls in the bucket ABOVE it, for donors and for the event's
+    forecast alike. The event's bucket uses its fixture pred_move (with the +3 drift from 2023-07-01). The draw is the
+    donors in that bucket, or every earlier donor when the bucket holds fewer than MIN_POOL."""
+    events = world["events"]
+    ids = [e["id"] for e in events]
+    dates = np.array([e["date"] for e in events])  # ISO dates compare correctly as strings
+    pred = world["frame"].loc[ids, "pred_move"].to_numpy(float)
+    err = np.array([world["y"][i] for i in ids], dtype=float) - pred
+    position = {i: k for k, i in enumerate(ids)}
+    grid = np.linspace(0, 1, 11)[1:-1]  # production's bucket grid (buckets=10), bit-for-bit
+
+    def oracle(event_id):
+        k = position[event_id]
+        earlier = dates < dates[k]
+        donor_pred, donor_err = pred[earlier], err[earlier]
+        edges = np.quantile(donor_pred, grid)
+        f = pred[k]
+        bucket = int(np.searchsorted(edges, f, side="right"))
+        in_bucket = np.searchsorted(edges, donor_pred, side="right") == bucket
+        draw = donor_err[in_bucket] if in_bucket.sum() >= MIN_POOL else donor_err
+        return np.quantile(np.maximum(f + draw, 0.0), LEVELS), float(bucket)
+
+    return oracle
+
+
+def test_b0_rows_match_an_independent_design_rule_oracle(full_run):
+    world, doc = full_run["world"], full_run["doc"]
+    oracle = _b0_oracle(world)
+    rows = pd.DataFrame(doc["arms"]["Q_raw"]["conditional"]["rows"])
+    checked = rows[rows["quarter"].isin(["2023Q3", "2025Q4"])]
+    assert len(checked) >= 60
+    want = [oracle(event_id) for event_id in checked["event_id"]]
+    np.testing.assert_allclose(checked["bucket"].to_numpy(float), [bucket for _, bucket in want], rtol=1e-9)
+    np.testing.assert_allclose(checked[B0_COLS].to_numpy(float), np.array([q for q, _ in want]), rtol=1e-9)
+
+    quarter = [e for e in world["events"] if "2025-10-01" <= e["date"] <= "2025-12-31"]
+    table = next(t for t in doc["arms"]["Q_raw"]["tables"] if t["slice"] == "quarter" and t["label"] == "2025Q4")
+    assert table["n"] == len(quarter)
+    q = np.array([oracle(e["id"])[0] for e in quarter])
+    y = np.array([world["y"][e["id"]] for e in quarter], dtype=float)
+    levels = np.array(LEVELS)
+    miss = y[:, None] - q
+    pinball = np.maximum(levels * miss, (levels - 1) * miss)
+    assert table["b0_mean_pinball"] == pytest.approx(pinball.mean(), rel=1e-9)
