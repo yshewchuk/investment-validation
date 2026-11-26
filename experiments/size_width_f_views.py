@@ -25,7 +25,8 @@ def _entry_ok(entry, names):
     if not _real(entry["total_return"]): return False
     for name in names:
         cell = entry["views"][name]
-        if cell["wanted"] != trades or not _real(cell["total_return"]): return False
+        wanted = cell["wanted"]
+        if isinstance(wanted, bool) or not isinstance(wanted, int) or wanted != trades or not _real(cell["total_return"]): return False
         mean = cell["mean_ret"]
         if (mean is None) != (trades == 0): return False
         if mean is not None and not _real(mean): return False

@@ -314,6 +314,23 @@ def test_f_views_in_a_non_f_run_refuse(tmp_path, where):
     _refused(tmp_path, "tuning_receipt_changed")
 
 
+@pytest.mark.parametrize("where", ["account", "structure"])
+def test_f_views_in_a_non_f_outer_summary_refuse(tmp_path, where):
+    _write(tmp_path, passing=("A",))
+    if where == "account":
+        view = {"F": {"total_return": 0.02, "mean_ret": 0.02, "wanted": 400}}
+        _mutate(tmp_path, "outer_summary.json", lambda b: _acct(b, "2025").update(views=view))
+    else:
+        view = {"F": {"total_return": 0.02, "mean_ret": 0.02, "wanted": 50}}
+        _mutate(tmp_path, "outer_summary.json", lambda b: _struct(b, "2025").update(views=view))
+    _refused(tmp_path, "tuning_receipt_changed")
+
+
+def test_fill_model_that_is_not_a_mapping_refuses(tmp_path):
+    _f_run(tmp_path, fill="F")
+    _refused(tmp_path, "tuning_receipt_changed")
+
+
 def _direct(views=True):
     """In-memory results for label A in 2024, the account and every structure; beside-F views added when ``views``."""
     results = {"A": {"2024": {"account": {"total_return": 0.021, "trades": 400},
@@ -365,6 +382,24 @@ def test_admit_refuses_a_mean_ret_number_with_no_trades(where):
     results = _zero_results()
     _entry(results, where)["views"]["F"]["mean_ret"] = 0.001
     assert not f_views.admit(results, ["A"], ["2024"])
+
+
+@pytest.mark.parametrize("wanted", [True, 1.0])
+def test_admit_refuses_a_wanted_that_is_not_a_non_bool_int(wanted):
+    results = _direct()
+    _entry(results, "account")["trades"] = 1
+    for v in f_views.VIEWS:
+        _entry(results, "account")["views"][v]["wanted"] = 1
+    _entry(results, "account")["views"]["mid"]["wanted"] = wanted
+    assert not f_views.admit(results, ["A"], ["2024"])
+
+
+def test_admit_accepts_a_wanted_int_equal_to_one_trade():
+    results = _direct()
+    _entry(results, "account")["trades"] = 1
+    for v in f_views.VIEWS:
+        _entry(results, "account")["views"][v]["wanted"] = 1
+    assert f_views.admit(results, ["A"], ["2024"])
 
 
 def test_admit_refuses_a_missing_label_or_malformed_input():
