@@ -946,14 +946,14 @@ Each invocation revalidates bindings/evidence, without cross-call admission cach
 | Malformed/duplicate-key JSON, nonobject metadata, invalid typed reference, or nonregular/symlink/oversized metadata file | `INVALID_EXPERIMENT_SPEC` before dispatch; no partial result. Metadata reads are capped at 16 MiB per file. |
 | Run/collect with missing or incompatible journal migrations | Driver admission refuses `INTEGRITY_FAILED` before search-plan/evidence access; no implicit migration. |
 | Missing/different driver seal or changed installed source/plan binding | `EXPERIMENT_IDENTITY_CONFLICT`; no fitting or binding replacement. An unbound started journal cannot acquire a driver seal. |
-| First seal, exact seal replay or concurrent phase publication | Seal uses the existing journal migrations and immutable append; phase absence is checked in the association transaction. Exact replay is read-only; a lost absence race refuses without a driver association. |
+| First seal, exact seal replay or concurrent phase publication | Seal uses existing journal migrations and immutable append; phase absence is checked in the association transaction. Exact replay is read-only; a lost absence race refuses without a driver association. |
 | Unfinished/orphan inner or outer claim, or selection before fresh inner work | `EXPERIMENT_IDENTITY_CONFLICT` before fresh fits; no claim reset or fit retry. |
 | Durable inner result or completed outer terminal | Verify/reconcile all claimed inner results and replay completed outer folds before fresh fits; finish only missing inner publication, never refit or replace evidence. |
 | Candidate scoring refusal; shared/resource failure; no eligible candidate | Continue only after public reconciliation verifies the durable refused terminal; other failures stop. No eligible candidate refuses `EXPERIMENT_VARIANT_FAILED` before new outer work. |
-| Journal publication/transaction fails | Existing journal policy applies: failed transactions roll back their association, earlier evidence and unreferenced complete objects remain; no whole-run rollback or automatic retry. |
+| Journal publication/transaction fails | Failed transactions roll back their association, earlier evidence and unreferenced complete objects remain; no whole-run rollback or automatic retry. |
 | CLI typed `OpsError`/`DataError`; unexpected builtin failure | Preserve the complete typed `Problem` in one refusal document, exit 2; unexpected builtin errors propagate. An opened connection closes in either case. |
-| Output exceeds the byte budget or output staging fails with an artifact, filesystem or SQLite error | Report bytes are discarded; only the refusal document reaches stdout, emitting `RESOURCE_LIMIT_EXCEEDED` or sanitized `RESOURCE_UNAVAILABLE`. Other staging errors are unexpected builtin failures and propagate. Prior journal commits remain. |
-| Stdout write or flush failure | The original stream error propagates with no retry and no second document; downstream may have received a prefix, and stdout remains caller-owned. |
+| Output exceeds the byte budget or output staging fails with an artifact, filesystem or SQLite error | Report bytes are discarded; only the refusal document reaches stdout, emitting `RESOURCE_LIMIT_EXCEEDED` or sanitized `RESOURCE_UNAVAILABLE`. Other staging errors propagate. Prior journal commits remain. |
+| Stdout write or flush failure | The original stream error propagates; no retry or second document; downstream may have received a prefix, and stdout remains caller-owned. |
 
 ### `size_quantile_metrics`
 
@@ -978,10 +978,11 @@ EXP-188: `size_pnl_{inputs,outer_inputs}` bind v14 and 2025 forecasts; `size_pnl
 EXP-190 (`guides/size_quantile_move_design.md`; uncalled): `size_quantile_prereg` never writes ledger; refuses `stage_b_pending` pre-settlement (`planned_row_*`, `spec_*`, `preregistered*`, `experiment_id_conflict`, `ledger_malformed`, `run_log_malformed`). `size_quantile_binding.{bind_grid,bind_b3}` check unverified v14: `v14_{grid,selection,report}_mismatch`, `m3_unbound`, `b3_unbound`.
 `size_quantile_sources.load_sealed_panel`: content-hash v14 reads; admission precedes rows (`registration_schema_unknown`, `panel_binding_mismatch`, `dictionary_mismatch`, `panel_mismatch`, `admission_empty`, `sealed_malformed`; `size_pnl_sources`/resource errors propagate). `training_labels`: admitted ids only (`HOLDOUT_ACCESS_DENIED`, `event_ids_invalid`), before-cutoff.
 `size_quantile_folds.annual_folds`: sealed parity (`fold_parity_mismatch`, `sealed_malformed`, `years_invalid`, `POPULATION_COLLAPSED`).
-`size_quantile_baselines.pool_quantiles` (B0): unscored `forecast_missing`/`refused_draw`/`non_finite_output`; bad input `ValueError`.
+`size_quantile_baselines.{pool,band,implied}_quantiles` (B0-B2): unscored `forecast_missing`/`refused_draw`/`non_finite_output`/`pool_too_small`/`implied_move_invalid`; bad input `ValueError`.
 `size_quantile_fits`: `panel_*`, `feature_*`, `selection_*`, `fixed_parameters_mismatch`, `training_label_invalid`, `fold_inputs_invalid`, `grid_invalid`, `RESOURCE_LIMIT_EXCEEDED`.
 `size_quantile_walk.fit_walk_forward` write-once `fit_<year>.json`: gap→`years_not_contiguous`; changed/invalid receipt→`fit_receipt_{changed,unreadable}`; memory/oversize-publish→`RESOURCE_LIMIT_EXCEEDED`; fit `ValueError`→`fit_failed`, stops.
 `size_quantile_calibration` (uncalled) calibrates/tails Q, Q_raw: unscored `non_finite_output`/`calibration_burn_in`/`tail_pool_thin`; bad input `ValueError`; memory `RESOURCE_LIMIT_EXCEEDED`.
+`size_quantile_arm_s.fit_arm_s` write-once `arm_s_fit_<year>.json`: `raw_receipt_mismatch`, walk receipt refusals, `RESOURCE_LIMIT_EXCEEDED`; `fit_failed` year continues; `scale_burn_in`.
 
 ## Fill model F
 

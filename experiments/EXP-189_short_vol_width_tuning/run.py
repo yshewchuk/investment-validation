@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 
 from engine.v2.data.errors import DataError  # noqa: E402
 from engine.v2.ops.errors import OpsError, fail  # noqa: E402
-from experiments import size_pnl_shortvol, size_width_prereg  # noqa: E402
+from experiments import fair_value_inputs, fair_value_legs, size_pnl_shortvol, size_width_f_select, size_width_prereg  # noqa: E402
 Refusal = size_pnl_shortvol.Refusal
 
 _INVALID, _CONFLICT, _INPUT_LIMIT = "INVALID_EXPERIMENT_SPEC", "EXPERIMENT_IDENTITY_CONFLICT", 1 << 20
@@ -62,6 +62,7 @@ def main(argv: list[str] | None = None) -> int:
         with contextlib.redirect_stdout(sys.stderr):  # library prints go to stderr; stdout is one JSON document
             receipt = size_width_prereg.require_preregistration()  # refuses first, with or without --no-ledger
             print(json.dumps(receipt), file=sys.stderr)
+            size_width_f_select.open_run(receipt.get("fill_model"))  # an F spec refuses every stage before inputs or --sources
             if args.stage != "report" and os.environ.get("BOUNDED_RUN_NESTED") != "1":  # refuse before reading inputs or importing --sources
                 raise fail("RESOURCE_UNAVAILABLE", "run under tools/bounded_run.py --heavy", details={"reason": "not_bounded"})
             args.expected_identities = _read_json(args.expected)
@@ -87,8 +88,8 @@ def main(argv: list[str] | None = None) -> int:
                 if sources.expected != args.expected_identities:
                     raise fail(_CONFLICT, "--expected differs from the sources' expected identities", details={"reason": "expected_mismatch"})
                 summary = size_width_driver.run(sources, args.stage, args.out_dir, event_ids=event_ids, prereg=lambda: receipt)
-    except (OpsError, Refusal, DataError) as exc:
-        details = exc.details if isinstance(exc, Refusal) else exc.problem.details
+    except (OpsError, Refusal, DataError, fair_value_inputs.FairValueRefusal, fair_value_legs.FairValueRefusal) as exc:
+        details = exc.problem.details if isinstance(exc, (OpsError, DataError)) else exc.details
         print(json.dumps({"refused": exc.code, "message": re.sub(r"(?<![\w.])/[^\s:'\"]+", "<path>", str(exc)), "reason": details.get("reason")}))
         return 2
     print(json.dumps(summary))

@@ -104,8 +104,8 @@ def require_preregistration(spec_path=SPEC_PATH, ledger_path=None, run_log_path=
 
     Right after the spec loads, ``check_id_free(experiments_dir)`` refuses a second EXP-189 directory or
     spec, before the ledger is read. The ledger must hold exactly one PLANNED row for EXP-189 plus one per
-    declared amendment (none are declared), equal to the spec hash. ``lib.LEDGER_PATH`` is read at call
-    time, so tests can monkeypatch it.
+    declared amendment, equal to the spec hash. A spec selecting F adds the validated ``fill_model`` to the
+    receipt. ``lib.LEDGER_PATH`` is read at call time, so tests can monkeypatch it.
     """
     spec_path = Path(spec_path)
     ledger = lib.LEDGER_PATH if ledger_path is None else ledger_path
@@ -125,12 +125,18 @@ def require_preregistration(spec_path=SPEC_PATH, ledger_path=None, run_log_path=
         raise _refuse("spec_hash_mismatch", "spec differs from its PLANNED row")
 
     prereg, first_ts = _chronology(spec, spec_path, run_log)
+    from experiments import fair_value_inputs, size_width_f_select  # imported here: this module stays light
+    try:
+        fill = size_width_f_select.fill_model(spec)
+    except fair_value_inputs.FairValueRefusal as exc:
+        raise _refuse(exc.details["reason"], "the spec's fill_model selection is refused") from None
 
     return {
         "spec_hash": digest,
         "spec_hash_checked": True,
         "preregistered_at": str(prereg),
         "first_run_ts": None if first_ts is None else str(first_ts),
+        **({} if fill is None else {"fill_model": fill}),
     }
 
 

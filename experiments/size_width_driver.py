@@ -22,7 +22,7 @@ from experiments import size_width_deviation as deviation
 from experiments import size_width_errmodel as errmodel
 from experiments import size_width_fake as fake
 from experiments import size_width_flex as flex
-from experiments import size_width_prereg
+from experiments import size_width_f_select, size_width_prereg
 from experiments import size_width_tuning as tuning
 from experiments.size_pnl_pool import build_pool
 from experiments.size_pnl_shortvol import NAMES, Refusal
@@ -257,6 +257,7 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_width_prereg.require
     started = time.monotonic()
     _log(f"stage={stage} start rss={base._rss_mb():.0f}MB")
     receipt = prereg()
+    size_width_f_select.open_run(receipt.get("fill_model"))  # refuses an F spec before sources, inputs or writes
     base.check_sources(src)
     if os.environ.get("BOUNDED_RUN_NESTED") != "1":
         raise fail("RESOURCE_UNAVAILABLE", "run under tools/bounded_run.py --heavy", details={"reason": "not_bounded"})
