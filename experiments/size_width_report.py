@@ -258,11 +258,10 @@ def assemble(out_dir, *, expected=None, w5_tables=None):
     merged = {label: {**inner["results"][label], **outer["results"][label]} for label in labels}
     stats = {label: {**inner["stats"][label], **outer["stats"][label]} for label in labels}
     if f_run:
-        fv_in, fv_out = inner.get("f_views"), outer.get("f_views")
-        if not (f_views.admit(fv_in, inner["results"], labels, ("2023H2", "2024")) and f_views.admit(fv_out, outer["results"], labels, ("2025",))): raise _conflict("f_views is missing, malformed or differs from the primary results")
-        block = {label: {**fv_in[label], **fv_out[label]} for label in labels}
-    elif "f_views" in inner or "f_views" in outer:
-        raise _conflict("f_views in a run that does not bind F")
+        if not (f_views.admit(inner["results"], labels, ("2023H2", "2024")) and f_views.admit(outer["results"], labels, ("2025",))):
+            raise _conflict("the F views in results are missing, malformed or differ from the deciding values")
+    elif f_views.has_views(inner["results"]) or f_views.has_views(outer["results"]):
+        raise _conflict("F views in a run that does not bind F")
     body_E = bodies["E"]
     breakevens = {label: {p: stats[label].get(p, {}).get("x") for p in PERIODS} for label in labels}
     table = success.success_table(merged["production"], {label: merged[label] for label in labels if label != "production"},
@@ -277,8 +276,8 @@ def assemble(out_dir, *, expected=None, w5_tables=None):
         rule = success.board_rule(rec, None, {}, {})
     if f_run: rule["label"] = f_views.LABEL
     head = "\n\n".join([TITLE, NOT_BLIND, *([SMOKE] if inner["smoke"] else []), *([F_HEAD] if f_run else [])])
-    t5 = f_views.t5_markdown(labels, PERIODS, block, stats) if f_run else _t5(labels, merged, stats)
-    t6 = _t6(labels, merged) + (f"\n\n{f_views.t6_markdown(labels, block)}" if f_run else "")
+    t5 = f_views.t5_markdown(labels, PERIODS, merged, stats) if f_run else _t5(labels, merged, stats)
+    t6 = _t6(labels, merged) + (f"\n\n{f_views.t6_markdown(labels, merged)}" if f_run else "")
     flat_note = [_flat_note(bodies, rec)] if rec in TUNED else []
     rule_text = "\n\n".join([success.render_rule(rule), *flat_note, EVIDENCE])
     w5 = w5_tables if w5_tables is not None else flex.render(inner, outer) if has_flex else PLACEHOLDER

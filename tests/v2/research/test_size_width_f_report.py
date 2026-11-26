@@ -1,28 +1,105 @@
 """EXP-189 Amendment 1, slice W7c1: F-run report labels, beside-F views and refusals (synthetic receipts only, no market data)."""
 import json
 
-import pandas as pd
 import pytest
 
 from engine.v2.foundation import content_hash
 from experiments import size_pnl_receipts as receipts
 from experiments import size_width_f_views as f_views
 from experiments import size_width_report as report
-from experiments import size_width_tuning as tuning
 from experiments.size_pnl_shortvol import NAMES, Refusal
-from experiments.size_width_account import simulate_account
 from test_size_width_report import _write
 
 CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
 FILL = {"fill_model_id": "F", "quotes": "synthetic"}
-LABELS = ("production", "A", "B", "C", "D", "E")
 HALVES = ("2023H2", "2024")
+ACCOUNT_VIEWS = ("F", "mid", "harsh")
+ALL_VIEWS = (*ACCOUNT_VIEWS, "unknown0", "unknown1", "midfloor")
 SHIFT = {"2023H2": 0.0, "2024": 0.001, "2025": 0.002}
 STEP = {"F": 0.0, "mid": 0.001, "harsh": 0.002, "unknown0": 0.003, "unknown1": 0.004, "midfloor": 0.005}
-BASE25 = {"production": 0.012, "A": 0.022, "B": 0.007, "C": 0.007, "D": 0.007, "E": 0.007}
 BOUND = {"inputs_inner.json": ("inner_summary.json", "inputs_inner"), "inputs_outer.json": ("outer_summary.json", "inputs_outer")}
-WINDOW = (pd.Timestamp("2024-01-01"), pd.Timestamp("2025-01-01"))
-BY = {n: 1.0 for n in NAMES}
+
+# Literal expectations, derived by hand from _write(passing=("A",)): production account 0.01 and breakeven 0.45;
+# A 0.02 and 0.40; B, C, D, E 0.005 and 0.60; trades 400; structures at the account return; stats alpha0 = ret - 0.03.
+EXPECTED_T5 = """### T5 production versus arms ($200,000 account at marks_mid; 2025 NOT blind for widths)
+
+| arm | period | trades | account return % | return per trade % | breakeven alpha | harsh alpha-0 return per trade % |
+|---|---|---|---|---|---|---|
+| production | 2025 | 400 | 1.00 | 1.00 | 0.450 | -2.00 |
+| production | 2023H2 | 400 | 1.00 | 1.00 | 0.450 | -2.00 |
+| production | 2024 | 400 | 1.00 | 1.00 | 0.450 | -2.00 |
+| A | 2025 | 400 | 2.00 | 2.00 | 0.400 | -1.00 |
+| A | 2023H2 | 400 | 2.00 | 2.00 | 0.400 | -1.00 |
+| A | 2024 | 400 | 2.00 | 2.00 | 0.400 | -1.00 |
+| B | 2025 | 400 | 0.50 | 0.50 | 0.600 | -2.50 |
+| B | 2023H2 | 400 | 0.50 | 0.50 | 0.600 | -2.50 |
+| B | 2024 | 400 | 0.50 | 0.50 | 0.600 | -2.50 |
+| C | 2025 | 400 | 0.50 | 0.50 | 0.600 | -2.50 |
+| C | 2023H2 | 400 | 0.50 | 0.50 | 0.600 | -2.50 |
+| C | 2024 | 400 | 0.50 | 0.50 | 0.600 | -2.50 |
+| D | 2025 | 400 | 0.50 | 0.50 | 0.600 | -2.50 |
+| D | 2023H2 | 400 | 0.50 | 0.50 | 0.600 | -2.50 |
+| D | 2024 | 400 | 0.50 | 0.50 | 0.600 | -2.50 |
+| E | 2025 | 400 | 0.50 | 0.50 | 0.600 | -2.50 |
+| E | 2023H2 | 400 | 0.50 | 0.50 | 0.600 | -2.50 |
+| E | 2024 | 400 | 0.50 | 0.50 | 0.600 | -2.50 |"""
+
+EXPECTED_T6 = """### T6 per-structure stand-alone accounts (2025, return % at marks_mid; 2025 NOT blind for widths)
+
+| structure | production | A | B | C | D | E |
+|---|---|---|---|---|---|---|
+| BFLY-P | 1.00 | 2.00 | 0.50 | 0.50 | 0.50 | 0.50 |
+| BFLY-P5 | 1.00 | 2.00 | 0.50 | 0.50 | 0.50 | 0.50 |
+| CND-PS | 1.00 | 2.00 | 0.50 | 0.50 | 0.50 | 0.50 |
+| CTR5 | 1.00 | 2.00 | 0.50 | 0.50 | 0.50 | 0.50 |
+| RAMP7 | 1.00 | 2.00 | 0.50 | 0.50 | 0.50 | 0.50 |
+| TWIN-P | 1.00 | 2.00 | 0.50 | 0.50 | 0.50 | 0.50 |
+| TWIN-P5 | 1.00 | 2.00 | 0.50 | 0.50 | 0.50 | 0.50 |"""
+
+EXPECTED_HEADINGS = [
+    "# EXP-189 report: production short-vol width tuning (M0)",
+    "### T1 error model (M0, 2023-24 inner)",
+    "### T2 chosen factors (2023-24 tuning)",
+    "### T2b arm E: share of candidate events at each k",
+    "### T3 curves per structure (2023-24, account return % at marks_mid; 2025 NOT blind for widths)",
+    "#### BFLY-P", "#### BFLY-P5", "#### CND-PS", "#### CTR5", "#### RAMP7", "#### TWIN-P", "#### TWIN-P5",
+    "### T4 anchor (perfect forecast, 2023-24, descriptive only)",
+    "### T5 production versus arms ($200,000 account at marks_mid; 2025 NOT blind for widths)",
+    "### T6 per-structure stand-alone accounts (2025, return % at marks_mid; 2025 NOT blind for widths)",
+    "### T7 success table (2025 NOT blind for widths)",
+    "### Proposed board width rule (arm A)",
+    "### T8-T9 tolerance bands and fallback",
+]
+
+EXPECTED_RULE = {"recommendation": "A", "rows": [
+    {"structure": "BFLY-P", "k": 0.75, "divisor": "divisor / 0.75", "flatness_se": 0.0, "declined_share": 0.1},
+    {"structure": "BFLY-P5", "k": 0.75, "divisor": "divisor / 0.75", "flatness_se": 0.0, "declined_share": 0.1},
+    {"structure": "CND-PS", "k": 0.75, "divisor": "divisor / 0.75", "flatness_se": 0.0, "declined_share": 0.1},
+    {"structure": "CTR5", "k": 0.75, "divisor": "divisor / 0.75", "flatness_se": 0.0, "declined_share": 0.1},
+    {"structure": "RAMP7", "k": 0.75, "divisor": "divisor / 0.75", "flatness_se": 0.0, "declined_share": 0.1},
+    {"structure": "TWIN-P", "k": 0.75, "divisor": "divisor / 0.75", "flatness_se": 0.0, "declined_share": 0.1},
+    {"structure": "TWIN-P5", "k": 0.75, "divisor": "divisor / 0.75", "flatness_se": 0.0, "declined_share": 0.1},
+]}
+
+# F-run T6 at mid and harsh, 2025: production 0.012, A 0.022, B..E 0.007 at the account; structure i adds 0.0001 * i; then the view step.
+T6_MID = [
+    "| BFLY-P | 1.30 | 2.30 | 0.80 | 0.80 | 0.80 | 0.80 |",
+    "| BFLY-P5 | 1.31 | 2.31 | 0.81 | 0.81 | 0.81 | 0.81 |",
+    "| CND-PS | 1.32 | 2.32 | 0.82 | 0.82 | 0.82 | 0.82 |",
+    "| CTR5 | 1.33 | 2.33 | 0.83 | 0.83 | 0.83 | 0.83 |",
+    "| RAMP7 | 1.34 | 2.34 | 0.84 | 0.84 | 0.84 | 0.84 |",
+    "| TWIN-P | 1.35 | 2.35 | 0.85 | 0.85 | 0.85 | 0.85 |",
+    "| TWIN-P5 | 1.36 | 2.36 | 0.86 | 0.86 | 0.86 | 0.86 |",
+]
+T6_HARSH = [
+    "| BFLY-P | 1.40 | 2.40 | 0.90 | 0.90 | 0.90 | 0.90 |",
+    "| BFLY-P5 | 1.41 | 2.41 | 0.91 | 0.91 | 0.91 | 0.91 |",
+    "| CND-PS | 1.42 | 2.42 | 0.92 | 0.92 | 0.92 | 0.92 |",
+    "| CTR5 | 1.43 | 2.43 | 0.93 | 0.93 | 0.93 | 0.93 |",
+    "| RAMP7 | 1.44 | 2.44 | 0.94 | 0.94 | 0.94 | 0.94 |",
+    "| TWIN-P | 1.45 | 2.45 | 0.95 | 0.95 | 0.95 | 0.95 |",
+    "| TWIN-P5 | 1.46 | 2.46 | 0.96 | 0.96 | 0.96 | 0.96 |",
+]
 
 
 def _body(path):
@@ -56,31 +133,26 @@ def _edit(name, fn):
 
 def _retune(results, periods):
     """Each label's primary return shifted by its period; each structure sits 0.0001 * index above it, so the rows are distinct."""
-    for label in LABELS:
+    for by in results.values():
         for p in periods:
-            res = results[label][p]
+            res = by[p]
             ret = res["account"]["total_return"] + SHIFT[p]
             res["account"]["total_return"] = ret
             for i, n in enumerate(NAMES):
                 res["structures"][n]["total_return"] = ret + 0.0001 * i
 
 
-def _block(results, periods):
-    """Beside-F views of every label: F equal to the primary results, every other view F plus its step."""
-    out = {}
-    for label in LABELS:
-        out[label] = {}
+def _add_views(results, periods):
+    """Beside-F views in place: F equal to the deciding total_return, every other view F plus its STEP, mean_ret one 0.001 below."""
+    def cell(entry, view):
+        total = entry["total_return"] + STEP[view]
+        return {"total_return": total, "mean_ret": total - 0.001, "wanted": entry["trades"]}
+    for by in results.values():
         for p in periods:
-            res = results[label][p]
-            cells = {}
-            for v in f_views.VIEWS:
-                acc = res["account"]["total_return"] + STEP[v]
-                cell = {"trades": res["account"]["trades"], "return_per_trade": acc - 0.001, "account_return": acc}
-                if v in f_views.ACCOUNT_VIEWS:
-                    cell["structures"] = {n: res["structures"][n]["total_return"] + STEP[v] for n in NAMES}
-                cells[v] = cell
-            out[label][p] = cells
-    return out
+            res = by[p]
+            res["account"]["views"] = {v: cell(res["account"], v) for v in ALL_VIEWS}
+            for n in NAMES:
+                res["structures"][n]["views"] = {v: cell(res["structures"][n], v) for v in ACCOUNT_VIEWS}
 
 
 def _f_run(out, fill=FILL):
@@ -88,8 +160,8 @@ def _f_run(out, fill=FILL):
     _write(out, passing=("A",))
     for name in ("inputs_inner.json", "inputs_outer.json"):
         _mutate(out, name, lambda b: b.update(fill_model=fill))
-    _mutate(out, "inner_summary.json", lambda b: (_retune(b["results"], HALVES), b.update(f_views=_block(b["results"], HALVES))))
-    _mutate(out, "outer_summary.json", lambda b: (_retune(b["results"], ("2025",)), b.update(f_views=_block(b["results"], ("2025",)))))
+    _mutate(out, "inner_summary.json", lambda b: (_retune(b["results"], HALVES), _add_views(b["results"], HALVES)))
+    _mutate(out, "outer_summary.json", lambda b: (_retune(b["results"], ("2025",)), _add_views(b["results"], ("2025",))))
 
 
 def _text(out):
@@ -101,6 +173,11 @@ def _section(text, start):
     return text.split(start, 1)[1].split("\n### ")[0]
 
 
+def _block(text, heading):
+    """``heading`` and its section up to the next heading, trailing whitespace removed."""
+    return (heading + text.split(heading, 1)[1].split("\n### ")[0]).rstrip()
+
+
 def _refused(out, reason):
     """assemble refuses as an identity conflict under ``reason`` and writes neither REPORT.md nor proposed_rule.json."""
     with pytest.raises(Refusal) as caught:
@@ -110,17 +187,14 @@ def _refused(out, reason):
     assert not (out / "REPORT.md").exists() and not (out / "proposed_rule.json").exists()
 
 
-def _f_cell(b):
-    return b["f_views"]["A"]["2024"]["F"]
+def _acct(b, period="2024"):
+    """Label A's account entry for ``period`` in a summary body."""
+    return b["results"]["A"][period]["account"]
 
 
-def _nan_view(out):
-    """An inner summary whose mid account return is NaN: receipts cannot carry NaN, so the file is unreadable."""
-    path = out / "receipts" / "inner_summary.json"
-    body = _body(path)
-    body["f_views"]["A"]["2024"]["mid"]["account_return"] = float("nan")
-    path.unlink()
-    path.write_text(json.dumps({**body, "content_hash": "0" * 64}, allow_nan=True), encoding="utf-8")
+def _struct(b, period="2024"):
+    """Label A's first structure entry for ``period`` in a summary body."""
+    return b["results"]["A"][period]["structures"][NAMES[0]]
 
 
 def test_f_run_labels_headings_and_tables(tmp_path):
@@ -129,10 +203,10 @@ def test_f_run_labels_headings_and_tables(tmp_path):
     text = _text(tmp_path)
     assert "POST-HOC (Amendment 1, F fills): chosen after the full run under mid fills had been seen" in text
     headings = [line for line in text.splitlines() if line.startswith("#")]
-    assert headings and all(line.endswith(f"[{f_views.LABEL}]") for line in headings)
+    assert headings and all(line.endswith("[POST-HOC (Amendment 1, F fills)]") for line in headings)
     assert "at marks_mid" not in text
     assert "### T3 curves per structure (2023-24, account return % at F fills; 2025 NOT blind for widths)" in text
-    assert json.loads((tmp_path / "proposed_rule.json").read_text(encoding="utf-8"))["label"] == f_views.LABEL
+    assert json.loads((tmp_path / "proposed_rule.json").read_text(encoding="utf-8"))["label"] == "POST-HOC (Amendment 1, F fills)"
 
     t5 = _section(text, "### T5 production versus arms")
     assert "### T5 production versus arms ($200,000 account at F fills; 2025 NOT blind for widths)" in text
@@ -147,37 +221,69 @@ def test_f_run_labels_headings_and_tables(tmp_path):
     assert "| A | 2024 | 2.00 | 2.10 | 2.20 | 2.30 | 2.40 | 2.50 |" in per
     assert "| production | 2025 | 1.10 | 1.20 | 1.30 | 1.40 | 1.50 | 1.60 |" in per
 
-    for view, step in (("mid", STEP["mid"]), ("harsh", STEP["harsh"])):
+    for view, rows in (("mid", T6_MID), ("harsh", T6_HARSH)):
         section = _section(text, f"### T6 beside F: per-structure stand-alone accounts at {view} ")
         assert (f"### T6 beside F: per-structure stand-alone accounts at {view} (2025, return %; reported, never deciding; "
-                f"2025 NOT blind for widths) [{f_views.LABEL}]") in text
+                f"2025 NOT blind for widths) [POST-HOC (Amendment 1, F fills)]") in text
         assert "| structure | production | A | B | C | D | E |" in section
-        for i, n in enumerate(NAMES):
-            row = f"| {n} | " + " | ".join(f"{100 * (BASE25[label] + step + 0.0001 * i):.2f}" for label in LABELS) + " |"
+        for row in rows:
             assert row in section
 
 
 def test_non_f_run_is_unlabelled(tmp_path):
     _write(tmp_path, passing=("A",))
     report.assemble(tmp_path)
-    assert "POST-HOC" not in _text(tmp_path)
-    assert "at marks_mid" in _text(tmp_path)
+    text = _text(tmp_path)
+    assert "POST-HOC" not in text
+    assert "### T3 curves per structure (2023-24, account return % at marks_mid; 2025 NOT blind for widths)" in text
+    assert _block(text, "### T5 production versus arms") == EXPECTED_T5
+    assert _block(text, "### T6 per-structure") == EXPECTED_T6
+    headings = [line for line in text.splitlines() if line.startswith("#")]
+    assert headings == EXPECTED_HEADINGS
     rule = json.loads((tmp_path / "proposed_rule.json").read_text(encoding="utf-8"))
+    assert rule == EXPECTED_RULE
     assert "label" not in rule and "POST-HOC" not in json.dumps(rule)
 
 
 CASES = [
-    ("f_views missing in inner", _edit("inner_summary.json", lambda b: b.pop("f_views")), "tuning_receipt_changed"),
-    ("f_views missing in outer", _edit("outer_summary.json", lambda b: b.pop("f_views")), "tuning_receipt_changed"),
-    ("a missing view", _edit("inner_summary.json", lambda b: b["f_views"]["A"]["2024"].pop("midfloor")), "tuning_receipt_changed"),
-    ("non-finite account_return", _nan_view, "tuning_receipt_unreadable"),
-    ("unequal trades across views", _edit("inner_summary.json", lambda b: b["f_views"]["A"]["2024"]["mid"].update(trades=399)),
+    ("account views missing", _edit("inner_summary.json", lambda b: _acct(b).pop("views")), "tuning_receipt_changed"),
+    ("structure views missing", _edit("inner_summary.json", lambda b: _struct(b).pop("views")), "tuning_receipt_changed"),
+    ("account a view missing", _edit("inner_summary.json", lambda b: _acct(b)["views"].pop("midfloor")), "tuning_receipt_changed"),
+    ("structure a view missing", _edit("inner_summary.json", lambda b: _struct(b)["views"].pop("harsh")), "tuning_receipt_changed"),
+    ("account an extra view", _edit("inner_summary.json",
+                                    lambda b: _acct(b)["views"].update(extra={"total_return": 0.02, "mean_ret": 0.02, "wanted": 400})),
      "tuning_receipt_changed"),
-    ("F account_return differing from results",
-     _edit("inner_summary.json", lambda b: _f_cell(b).update(account_return=_f_cell(b)["account_return"] + 0.001)), "tuning_receipt_changed"),
-    ("F structure return differing from results",
-     _edit("inner_summary.json", lambda b: _f_cell(b)["structures"].update({NAMES[0]: _f_cell(b)["structures"][NAMES[0]] + 0.001})),
+    ("structure an extra view", _edit("inner_summary.json",
+                                      lambda b: _struct(b)["views"].update(extra={"total_return": 0.02, "mean_ret": 0.02, "wanted": 50})),
      "tuning_receipt_changed"),
+    ("account wanted differing from trades", _edit("inner_summary.json", lambda b: _acct(b)["views"]["mid"].update(wanted=399)),
+     "tuning_receipt_changed"),
+    ("structure wanted differing from trades", _edit("inner_summary.json", lambda b: _struct(b)["views"]["mid"].update(wanted=49)),
+     "tuning_receipt_changed"),
+    ("account trades a bool", _edit("inner_summary.json", lambda b: _acct(b).update(trades=True)), "tuning_receipt_changed"),
+    ("structure trades a bool", _edit("inner_summary.json", lambda b: _struct(b).update(trades=True)), "tuning_receipt_changed"),
+    ("account trades negative", _edit("inner_summary.json", lambda b: _acct(b).update(trades=-400)), "tuning_receipt_changed"),
+    ("structure trades negative", _edit("inner_summary.json", lambda b: _struct(b).update(trades=-50)), "tuning_receipt_changed"),
+    ("account total_return a string", _edit("inner_summary.json", lambda b: _acct(b).update(total_return="0.02")), "tuning_receipt_changed"),
+    ("account view total_return a string", _edit("inner_summary.json", lambda b: _acct(b)["views"]["mid"].update(total_return="0.02")),
+     "tuning_receipt_changed"),
+    ("structure view total_return a string", _edit("inner_summary.json", lambda b: _struct(b)["views"]["mid"].update(total_return="0.02")),
+     "tuning_receipt_changed"),
+    ("account view total_return a bool", _edit("inner_summary.json", lambda b: _acct(b)["views"]["mid"].update(total_return=True)),
+     "tuning_receipt_changed"),
+    ("structure view total_return a bool", _edit("inner_summary.json", lambda b: _struct(b)["views"]["mid"].update(total_return=True)),
+     "tuning_receipt_changed"),
+    ("account mean_ret None with trades", _edit("inner_summary.json", lambda b: _acct(b)["views"]["F"].update(mean_ret=None)),
+     "tuning_receipt_changed"),
+    ("structure mean_ret None with trades", _edit("inner_summary.json", lambda b: _struct(b)["views"]["F"].update(mean_ret=None)),
+     "tuning_receipt_changed"),
+    ("account F total_return differing from the deciding value",
+     _edit("inner_summary.json", lambda b: _acct(b)["views"]["F"].update(total_return=_acct(b)["views"]["F"]["total_return"] + 0.001)),
+     "tuning_receipt_changed"),
+    ("structure F total_return differing from the deciding value",
+     _edit("inner_summary.json", lambda b: _struct(b)["views"]["F"].update(total_return=_struct(b)["views"]["F"]["total_return"] + 0.001)),
+     "tuning_receipt_changed"),
+    ("F views missing in the outer summary", _edit("outer_summary.json", lambda b: _acct(b, "2025").pop("views")), "tuning_receipt_changed"),
     ("fill_model only on inputs_inner", _edit("inputs_outer.json", lambda b: b.pop("fill_model")), "tuning_receipt_changed"),
     ("fill_model differing between inner and outer",
      _edit("inputs_outer.json", lambda b: b.update(fill_model={"fill_model_id": "F", "quotes": "other"})), "tuning_receipt_changed"),
@@ -196,109 +302,76 @@ def test_fill_model_that_does_not_bind_f_refuses(tmp_path):
     _refused(tmp_path, "tuning_receipt_changed")
 
 
-def test_f_views_in_a_non_f_run_refuse(tmp_path):
+@pytest.mark.parametrize("where", ["account", "structure"])
+def test_f_views_in_a_non_f_run_refuse(tmp_path, where):
     _write(tmp_path, passing=("A",))
-    _mutate(tmp_path, "inner_summary.json", lambda b: b.update(f_views={}))
+    if where == "account":
+        view = {"F": {"total_return": 0.02, "mean_ret": 0.02, "wanted": 400}}
+        _mutate(tmp_path, "inner_summary.json", lambda b: _acct(b).update(views=view))
+    else:
+        view = {"F": {"total_return": 0.02, "mean_ret": 0.02, "wanted": 50}}
+        _mutate(tmp_path, "inner_summary.json", lambda b: _struct(b).update(views=view))
     _refused(tmp_path, "tuning_receipt_changed")
 
 
-class FakeSweep:
-    """An F sweep stand-in: ``f`` and ``rows(pairs, window)`` over taken frames keyed by (structure, arm)."""
-
-    def __init__(self, taken, f=True):
-        self.taken, self.f = taken, f
-
-    def rows(self, pairs, window):
-        frames = [self.taken[(n, arm)] for n, arm in pairs if (n, arm) in self.taken]
-        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=COLS)
+def _direct(views=True):
+    """In-memory results for label A in 2024, the account and every structure; beside-F views added when ``views``."""
+    results = {"A": {"2024": {"account": {"total_return": 0.021, "trades": 400},
+                              "structures": {n: {"total_return": 0.021, "trades": 50} for n in NAMES}}}}
+    if views:
+        _add_views(results, ("2024",))
+    return results
 
 
-# view -> (debits, exits) for two trades in 2024; every view's debit and exit differ from every other view's
-PAIRS = {"F": ([1.00, 2.00], [1.20, 2.20]), "mid": ([1.10, 1.90], [1.25, 2.09]), "harsh": ([1.30, 2.20], [1.04, 2.42]),
-         "unknown0": ([0.90, 1.00], [1.00, 0.80]), "unknown1": ([1.50, 2.50], [1.80, 2.70]), "midfloor": ([2.00, 1.20], [2.40, 1.14])}
-ENTRY, EXIT = ["2024-03-01", "2024-04-01"], ["2024-03-10", "2024-04-15"]
-EXPECTED_PER_TRADE = {"F": (0.20 + 0.10) / 2, "mid": (0.15 / 1.10 + 0.19 / 1.90) / 2, "harsh": (-0.26 / 1.30 + 0.22 / 2.20) / 2,
-                      "unknown0": (0.10 / 0.90 - 0.20) / 2, "unknown1": (0.20 + 0.08) / 2, "midfloor": (0.20 - 0.05) / 2}
+def _zero(views):
+    """An entry that takes no rows: every view walks none, so wanted is 0 and mean_ret is None."""
+    return {"total_return": 0.0, "trades": 0, "views": {v: {"total_return": 0.0, "mean_ret": None, "wanted": 0} for v in views}}
 
 
-def _taken(mid_as_f=False):
-    """The two taken F trades: every view's own debit and exit; ``mid_as_f`` sets the mid exit to the F exit (for evaluate's mid walk)."""
-    frame = pd.DataFrame({"entry_date": pd.to_datetime(ENTRY), "exit_date": pd.to_datetime(EXIT), "secured_per_contract": [5000.0, 5000.0]})
-    for v, (debit, exit_) in PAIRS.items():
-        cost_col, exit_col = ("entry_cost", "exit_value") if v == "F" else (f"entry_cost_{v}", f"exit_value_{v}")
-        frame[cost_col], frame[exit_col] = debit, exit_
-    if mid_as_f:
-        frame["exit_value_mid"] = frame["exit_value"]
-    return frame
+def _zero_results():
+    return {"A": {"2024": {"account": _zero(ALL_VIEWS), "structures": {n: _zero(ACCOUNT_VIEWS) for n in NAMES}}}}
 
 
-COLS = list(_taken().columns)
+def _entry(results, where):
+    """The account or the first structure of label A in 2024, from in-memory results."""
+    res = results["A"]["2024"]
+    return res["account"] if where == "account" else res["structures"][NAMES[0]]
 
 
-def _expected_frame(view):
-    debit, exit_ = PAIRS[view]
-    return pd.DataFrame({"entry_date": pd.to_datetime(ENTRY), "exit_date": pd.to_datetime(EXIT), "secured_per_contract": [5000.0, 5000.0],
-                         "entry_cost": debit, "exit_value": exit_})
+def test_direct_admit_accepts_views_built_in_memory():
+    assert f_views.admit(_direct(), ["A"], ["2024"])
 
 
-def _views(sweep):
-    return f_views.view_tables(sweep, {"A": BY}, {"2024": WINDOW})
+def test_admit_accepts_a_zero_trades_entry():
+    assert f_views.admit(_zero_results(), ["A"], ["2024"])
 
 
-def _results():
-    """The primary results a round trip compares with: evaluate on the sweep whose mid exit is the F exit."""
-    return {"A": {"2024": tuning.evaluate(FakeSweep({(NAMES[0], 1.0): _taken(mid_as_f=True)}), BY, WINDOW)}}
+@pytest.mark.parametrize("where", ["account", "structure"])
+def test_admit_refuses_a_huge_int_total_return(where):
+    results = _direct()
+    _entry(results, where)["views"]["mid"]["total_return"] = 10**400
+    assert not f_views.admit(results, ["A"], ["2024"])
 
 
-def test_each_view_uses_its_own_debit_and_exit():
-    got = _views(FakeSweep({(NAMES[0], 1.0): _taken()}))["A"]["2024"]
-    for v in f_views.VIEWS:
-        assert got[v]["trades"] == 2
-        assert got[v]["return_per_trade"] == pytest.approx(EXPECTED_PER_TRADE[v])
-        assert got[v]["account_return"] == pytest.approx(simulate_account(_expected_frame(v), "primary")["total_return"])
-    assert set(got["F"]["structures"]) == set(NAMES)
-    assert got["F"]["structures"][NAMES[0]] == pytest.approx(got["F"]["account_return"])
-    assert all(got["F"]["structures"][n] == 0.0 for n in NAMES[1:])
-    assert "structures" not in got["unknown0"]
+@pytest.mark.parametrize("where", ["account", "structure"])
+def test_admit_refuses_a_nan_total_return(where):
+    results = _direct()
+    _entry(results, where)["views"]["mid"]["total_return"] = float("nan")
+    assert not f_views.admit(results, ["A"], ["2024"])
 
 
-def test_no_trades_gives_no_per_trade_and_a_zero_account():
-    got = _views(FakeSweep({}))["A"]["2024"]
-    for v in f_views.VIEWS:
-        assert got[v]["trades"] == 0 and got[v]["return_per_trade"] is None and got[v]["account_return"] == 0.0
+@pytest.mark.parametrize("where", ["account", "structure"])
+def test_admit_refuses_a_mean_ret_number_with_no_trades(where):
+    results = _zero_results()
+    _entry(results, where)["views"]["F"]["mean_ret"] = 0.001
+    assert not f_views.admit(results, ["A"], ["2024"])
 
 
-@pytest.mark.parametrize("column, value", [("entry_cost_harsh", 0.0), ("entry_cost_unknown1", float("nan")), ("entry_cost", -1.0),
-                                           ("entry_cost_midfloor", float("inf"))])
-def test_a_view_debit_that_is_not_finite_and_positive_refuses(column, value):
-    taken = _taken()
-    taken.loc[0, column] = value
-    with pytest.raises(ValueError):
-        _views(FakeSweep({(NAMES[0], 1.0): taken}))
+def test_admit_refuses_a_missing_label_or_malformed_input():
+    assert not f_views.admit(_direct(), ["A", "B"], ["2024"])
+    assert not f_views.admit("x", ["A"], ["2024"]) and not f_views.admit(None, ["A"], ["2024"])
 
 
-def test_a_non_f_sweep_refuses():
-    with pytest.raises(ValueError):
-        _views(FakeSweep({(NAMES[0], 1.0): _taken()}, f=False))
-
-
-def test_round_trip_admits_views_built_from_evaluate():
-    block = _views(FakeSweep({(NAMES[0], 1.0): _taken()}))
-    assert f_views.admit(block, _results(), ["A"], ["2024"])
-
-
-def test_admit_refuses_disagreeing_malformed_and_non_finite_blocks():
-    block = _views(FakeSweep({(NAMES[0], 1.0): _taken()}))
-    res = _results()
-    res["A"]["2024"]["account"]["total_return"] += 0.001
-    assert not f_views.admit(block, res, ["A"], ["2024"])
-    res = _results()
-    res["A"]["2024"]["structures"][NAMES[0]]["total_return"] += 0.001
-    assert not f_views.admit(block, res, ["A"], ["2024"])
-    block["A"]["2024"]["mid"]["trades"] = 1
-    assert not f_views.admit(block, _results(), ["A"], ["2024"])
-    block = _views(FakeSweep({(NAMES[0], 1.0): _taken()}))
-    block["A"]["2024"]["mid"]["account_return"] = float("nan")
-    assert not f_views.admit(block, _results(), ["A"], ["2024"])
-    assert not f_views.admit(_views(FakeSweep({(NAMES[0], 1.0): _taken()})), _results(), ["A", "B"], ["2024"])
-    assert not f_views.admit("x", _results(), ["A"], ["2024"]) and not f_views.admit(None, {}, ["A"], ["2024"])
+def test_has_views_is_false_on_the_plain_shape_and_true_with_views():
+    assert not f_views.has_views(_direct(views=False))
+    assert f_views.has_views(_direct())
