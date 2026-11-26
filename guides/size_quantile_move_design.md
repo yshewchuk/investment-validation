@@ -42,7 +42,7 @@ Neither imports a new module; `engine/fills.py` and `engine/structures.py` do no
 
 **Data and features** [D2]. The sealed v14 SIZE panel, with the **full v14 feature set**: the `HMOSXLP` dictionary (the largest: `HMOSX`, its quote indicator, and the derived `log1p` and product columns from `engine.v2.research.derived_features`, imported unchanged). The dictionary hash binds to the sealed v14 plan. Row masks are v14's; missing feature values stay NaN, handled natively as in v14's HGB cells. Sealed records are read by content hash (EXP-188 design §13), never through `read_search_plan`, `prepare_plan` or `verify_installation`. A training row needs its label **available before the fold's cutoff** (data dates, never `computed_at`). Nothing is rebuilt.
 
-**Walk-forward range.** Annual folds, refit once per year (each level and configuration) [D4]. Part 2's selection models need earlier out-of-sample quantiles, so the walk-forward runs from **Y0 through 2025**. Y0 is the earliest year such that in every year Y0..2025 at least 50% of admitted panel events have stored entry and exit option chains, and the panel holds at least 3 earlier calendar years of training rows (both thresholds my judgement). **No range is claimed here:** the supervisor is checking chain coverage, and Q2 prints per-year counts and Y0 before any fit. Sealed v14 folds serve 2023-2025; this experiment builds earlier annual folds from sealed panel rows, and Q2 refuses unless its rule reproduces the sealed 2023-2025 training ids. The feature set and grid were chosen using 2023-2024, so earlier years have causal fits but non-blind design choices.
+**Walk-forward range.** Annual folds, refit once per year (each level and configuration) [D4]. Part 2's selection models need earlier out-of-sample quantiles, so the walk-forward runs from **Y0 through 2025**. Y0 is the earliest year such that in every year Y0..2025 at least 50% of admitted panel events have stored entry and exit option chains, and the panel holds at least 3 earlier calendar years of training rows (both thresholds my judgement). **No range is claimed here:** the supervisor is checking chain coverage, and Q2 prints per-year counts and Y0 before any fit. Sealed v14 folds serve 2023-2025; this experiment builds earlier annual folds from sealed panel rows, and Q2 refuses unless its rule reproduces the sealed 2023-2025 training ids. The feature set and the grid values used 2023-2024 (section 5, periods used for selection), so folds through 2024 have causal fits but non-blind design choices; no period is blind (section 1).
 
 **Primary arms** [D3, D7]: one `HistGradientBoostingRegressor(loss="quantile", quantile=q)` per level and fold. **Q** (causally calibrated) and **Q_raw** (uncalibrated) are **both eligible** in Stage A and both carry into Stage B.
 
@@ -62,6 +62,8 @@ Neither imports a new module; `engine/fills.py` and `engine/structures.py` do no
 The event's own widths are `s_hi = max(q90 - q50, 0.5)` and `s_lo = max(q50 - q10, 0.5)`. Under 50 donors in a tail, the **whole event** is unscored for that arm (`tail_pool_thin`). The 0.5-point floor is a **user decision** (2026-11-26: "keep 0.5 floor and report"): the report **MUST** print, per arm and year, the share of events where the 0.5 floor binds, for the event width and for the donor normalisation; for arm S it also prints the scale-floor share above.
 
 **Zero median.** Quantiles flooring to 0 are valid output, but a ratio over `q50` (`W / q50`; part 2's band ratios) is **undetermined** when `q50 <= 1e-9`: counted `zero_median`, never 0/0.
+
+**Constants.** The 500-event minima (calibration, S's `z_q`, `L`, B2's donors), the 50-donor tail minimum and `L`'s `min(20, n // 100)` bins are **pre-registered judgement values**: no derivation or study supports them, and they were fixed before any quantile-model run.
 
 **Tool check.** scikit-learn and numpy suffice; no conformal library. `size_pnl_contrast` bootstraps are reused.
 
@@ -104,7 +106,7 @@ No magnitude cutoff; quarter counts are mine. B1-B3 and S get the same tables; a
 
 **Periods used for selection** (the report repeats this) [D15]: the grid choice for year Y uses years before Y; B3's identity, the feature set and the grid values used 2023-2024; **the Stage A gate, which decides whether Stage B runs, uses 2023H2, 2024 and 2025.** **2025 is the clean test for those model choices only:** no feature set, grid value, configuration or baseline identity is chosen on it (its monthly calibration, tail and L pools use earlier 2025 labels, causally). It is **not a clean holdout**: Stage B scores 2025 only after a pass that read 2025 outcomes, which can flatter its 2025 result, and EXP-188's 2025 results shaped the design. Only the forward period after the data end is independent.
 
-**Settlements (supervisor-recommended 2026-11-25, for the user's review on PR #2896, Q5a).** These are not user decisions, except item 4. Q5a implements items 2, 6, 7, 9, the CRPS function of item 8 and the `L` reasons used by item 3; the rest lands in Q5b.
+**Settlements 1-9** (supervisor-recommended on PR #2896, Q5a; **the user accepted them as proposed on 2026-11-25**; item 4 also records the user's two scored-share decisions). The acceptance is of the items as written here.
 
 1. **Spearman bootstrap.** In a used cell with `n` events and rank residuals `rW`, `re`, each event gets `n * rW * re / sqrt(sum(rW^2) * sum(re^2))` (0 in a zero-`W` cell; `L` alike). Their mean is the event-weighted cell correlation. The `size_pnl_contrast` ticker bootstrap runs on them, and on their per-event difference for `W` minus `L`; ranks and residuals stay fixed across resamples. The seed is a parameter, default 188.
 2. **Tercile difference** is taken inside each cell (top minus bottom tercile mean `e`) and weighted by cell event count; a zero-residual cell counts as 0. Events are ordered by residual, ties by event id, and split with `np.array_split`. The pooled-event tercile table is report only.
@@ -112,7 +114,7 @@ No magnitude cutoff; quarter counts are mine. B1-B3 and S get the same tables; a
 4. **Minimum scored share: settled by the user 2026-11-25** (closes that point of #2879). `min_scored_share = 0.80` (the default), applied per period and per arm. **Denominator, settled by the user 2026-11-25** (option A of #2919): the share is measured against **all admitted events in the period** (shared population admission). The numerator counts admitted events scored by **both the arm and B0**, so gaps from either side count against it. Below the floor the arm is `not_testable`, reason `scored_share_below_floor`; the share is always reported. User's reason: known input discrepancies may leave some events unscored, and 80% is still solid. Q5b implements it.
 5. **Missing data.** A period with no paired event or no usable cell, or a bootstrap with fewer than two groups, makes that arm `not_testable`. A missing quarter does not count towards a quarter requirement, which stays "of 10".
 6. **Zero `e` residual.** A cell where `e` varies but its residual is all zero (the correlation would be 0/0) is skipped for both `W` and `L`, under its own count.
-7. **`L` bins with tied `q50`.** Edges are numpy linear-method quantiles with duplicates removed; a value on an edge goes to the lower bin, for earlier and current events alike. **Added by the Q5a owner, beyond the accepted recommendations:** if ties leave the event's bin with no earlier `y`, the event has no `L` (`level_width_empty_bin`) and is treated as in item 3.
+7. **`L` bins with tied `q50`.** Edges are numpy linear-method quantiles with duplicates removed; a value on an edge goes to the lower bin, for earlier and current events alike. **Added by the Q5a owner to the supervisor's recommendations, and part of the accepted item:** if ties leave the event's bin with no earlier `y`, the event has no `L` (`level_width_empty_bin`) and is treated as in item 3.
 8. **CRPS** uses the section 4 tail rule for every arm. Tails are built upstream: the metric takes each event's piecewise-linear quantile function as `(u, x)` points and integrates it exactly.
 9. **Crossing rate** is the share of events where any neighbouring pair of raw quantiles is strictly out of order.
 
@@ -237,7 +239,7 @@ Planned requirements; no Stage B code exists yet.
 | Exit unusable after entry | never a non-trade: 6.1's flagged conservative or `exit_fair_mid` exit |
 | A selection fit fails | that year, family and source: N1 and N2 `fit_failed`, no retry; verdict `not_testable`; other arms run |
 | `G_PROD` artifacts absent | `not_available`; no verdict depends on it |
-| R2 cost | one heavy job, `bounded_run`, quarter chunks; each quote row priced once per chunk; over limit refuses `RESOURCE_LIMIT_EXCEEDED`, no partial report |
+| R2 cost | one heavy job, `bounded_run`, quarter chunks; each quote row priced once per chunk; over section 7's memory limit refuses `RESOURCE_LIMIT_EXCEEDED`, no partial report |
 | R3 | fixed seeds and orders; results do not depend on which arm asked first |
 | R4 | `trade_all`, `selection`, `tau` and decision receipts: atomic, immutable, bound to inputs and `fvf_id`; replay is read-only; a changed input refuses |
 | R5 | arm ids hash arm, source, family, configuration, spec and `fvf_id` |
@@ -259,16 +261,20 @@ Under section 9's single `spec.yaml`, slice SB0 adds this section's fixed rules 
 | Case | Result |
 | --- | --- |
 | R1 panel, folds, dictionary, M0 or M3 series do not bind | refuse `EXPERIMENT_IDENTITY_CONFLICT`; nothing rebuilt or imputed. A merely absent M3 year is B3 `not_testable` for that year |
-| A fit fails | that fold's arm is `fit_failed`, no retry. Q_raw's fits failing makes Stage A `not_testable`; a calibration failure affects Q only |
-| Burn-in, thin tail pool, non-finite output | unscored (an abstention, not "no"), counted; leaves the paired population |
+| A fit fails | that fold's arm is `fit_failed`, no retry (for Q's walk, the whole year, and the walk stops: below). Q_raw's fits failing makes Stage A `not_testable`; a calibration failure affects Q only |
+| Burn-in (except level-width, below), thin tail pool, non-finite output | unscored (an abstention, not "no"), counted; leaves the paired population |
 | B1 `pool_too_small`; B2 under 500 donors or invalid own `implied_move` | that baseline is unscored for the event, counted; its common-subset tables drop it (section 5) |
 | B2 donor with null, zero, negative or non-finite `implied_move` | dropped from the pool and counted |
 | Level-width burn-in or empty bin | no `L`, counted; leaves only the conditional tests (section 5, settlements 3 and 7) |
 | `zero_median` | ratio undetermined, counted; quantiles stay valid |
-| R2 cost | quarter or year chunks; over-limit refuses `RESOURCE_LIMIT_EXCEEDED`, no partial report |
+| R2 cost | quarter or year chunks; over the memory limit below refuses `RESOURCE_LIMIT_EXCEEDED`, no partial report |
 | R3, R4 | fixed seeds; receipts atomic, immutable, bound to inputs; a changed input refuses |
 | R5 | arm ids hash the source, level set and configuration |
 | R6 causality | fits, selection, calibration, tail, level-width and baseline pools use data available before the fold or month; a month's predictions are written before its labels are read |
+
+**Memory limit** (owner's proposal, a judgement value, not yet measured; the user may change it until the PLANNED row). The one run process must be wrapped whole in `experiments.memory_guard.rss_watchdog(5 * 2**30)`: its VmRSS, sampled every 50 ms, above **5 GiB** raises `MemoryError`, which becomes `RESOURCE_LIMIT_EXCEEDED`. No Stage A report is published; complete fit receipts stay (R4). The outer `bounded_run --heavy --max-rss-gb 5.5` is a backstop whose kill gives no typed refusal, and sampling can overshoot. Nothing installs the watchdog yet: the real-data entry point (#3047, not built) must; the library driver does not. There is no wall-clock limit. Receipt byte caps are separate. Raising the limit after registration needs an amendment.
+
+**A failed quantile-fit year** (Q and Q_raw; arm S, whose failed year does not stop later ones, and Stage B's selection fits, 6.10, differ). One failed fit (any level or configuration) marks the whole year `fit_failed`. The Q walk runs years in order and **stops at the first such year**: later years are neither selected nor fitted, so no grid selection reads a failed year, and none is skipped or substituted. Stage A is then `not_testable`, even if that year precedes the judged periods. Each receipt is published whole or not at all; a rerun replays published ones, `fit_failed` included.
 
 Progress logging follows AGENTS.md.
 
@@ -283,9 +289,13 @@ Progress logging follows AGENTS.md.
 
 One `spec.yaml` holds every fixed rule of **both parts**. Its PLANNED row, carrying the spec hash (supervisor registers), and a guard that cannot no-op come **before any fit on real data, and only after part 2 merges**, so no Stage B rule is chosen after seeing Stage A. Part 1 code slices may start earlier on fixtures. Stages: `fit` (receipts), `stage_a` (verdict receipt), `stage_b`. Contract lines land in the `ARCHITECTURE.md` files with the slices that change them.
 
+**Order.** Part 2 has merged, but the spec still says `pending_part_2`, so the guard refuses `stage_b_pending` until SB0 writes section 6's rules into the spec and marks `stage_b` settled. Then: SB0, PLANNED row, 50-ticker smoke (it fits real data), full run. **Owner's proposal for other real-data reads** (the user may change it until the PLANNED row)**:** before the row, a run may bind sealed records, count the panel and chains, print Y0 and check training-id parity (including the label reads these need), but may not fit a model on real data, or compute any arm's or baseline's score against realised moves (showing v14's stored metrics is allowed).
+
 ## 10. Decisions (settled by the user, 2026-11-25)
 
 "Default" is the rule proposed in #2869. Parameters marked "mine" in either part are judgement calls inside these decisions.
+
+Rows record the decisions as taken. Section 6 defines their Stage B terms (F: 6.1; D11-D13, arm E and the twin filter TF: 6.3; D14: 6.4; N1-N3: 6.5) and gives the operative rule: N1's quantiles are its source's (Q_raw's are uncalibrated), and N3's "per arm" P&L is per geometry.
 
 | # | Settled |
 | --- | --- |
@@ -333,7 +343,7 @@ Part 2 (`SB` ids; B0-B3 are section 5's baselines). **SB1-SB9b are written only 
 
 | Slice | Scope | Size | After |
 | --- | --- | --- | --- |
-| SB0 | Stage B rules in `spec.yaml`, with spec tests | ~40 / ~80 / 30 | this PR, Q1; before the PLANNED row |
+| SB0 | Stage B rules in `spec.yaml`, with spec tests | ~40 / ~80 / 30 | part 2's design PR, Q1; before the PLANNED row |
 | SB1 | F adapter: bound loads, leg tables, entry guard, exits, mid and harsh views (imports EXP-189's seam where it fits) | ~150 / ~170 / 40 | A passes, F4, F5 (F7 when 6.1 requires it) |
 | SB2 | Trade-everything pricing, causal exit reader, receipts | ~150 / ~170 / 40 | SB1 |
 | SB3 | `QuantilePool`, fast-path equivalence | ~110 / ~140 / 40 | A passes |
