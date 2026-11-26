@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from engine.pnl_sim import ResidualPool
 from experiments.size_pnl_pool import build_pool
 from experiments.size_quantile_baselines import pool_quantiles
 from experiments.size_quantile_metrics import Rules
@@ -252,3 +253,61 @@ def test_sampled_rows_lie_in_oracle_members():
     move, _ = pool.draw(pd.Timestamp(EVENT_DATE), f, 20000, np.random.default_rng(1))
     assert len(np.unique(move)) > 1
     assert np.isin(move, err[members]).all()
+
+
+def _draw_evidence(table, labels, f, date=EVENT_DATE):
+    ev = {}
+    build_pool(table, labels, floor=None).draw(pd.Timestamp(date), f, 0, np.random.default_rng(0), evidence=ev)
+    return ev
+
+
+@pytest.mark.parametrize("kind", ["bucket", "fallback"])
+def test_labels_match_draw_own_evidence(kind):
+    if kind == "bucket":
+        dates, pred, abs_move = bucket_donors()
+        edges = np.quantile(pred, np.linspace(0, 1, 11)[1:-1])
+        forecasts = [4.2, edges[3], 0.0, 100.0]
+    else:
+        dates, pred, abs_move = donors(600)
+        forecasts = [2.0, 0.0, 100.0]
+    table, labels = frames(dates, pred, abs_move)
+    ids = [f"f{i}" for i in range(len(forecasts))]
+    out = pool_quantiles(table, labels, events_frame(ids, [EVENT_DATE] * len(ids), forecasts))
+    for eid, f in zip(ids, forecasts):
+        ev = _draw_evidence(table, labels, f)
+        row = out.loc[eid]
+        assert row.bucket == ev["bucket_index"]
+        assert row.fallback == ev["fallback_used"]
+        want = len(ev["fallback_indices"]) if ev["fallback_used"] else len(ev["eligible_indices"])
+        assert row.n_rows == want
+
+
+def test_pool_quantiles_never_requests_evidence(monkeypatch):
+    calls = []
+    original = ResidualPool.draw
+
+    def recording(self, cutoff, prediction, n, rng, *, evidence=None):
+        calls.append(evidence)
+        return original(self, cutoff, prediction, n, rng, evidence=evidence)
+
+    monkeypatch.setattr(ResidualPool, "draw", recording)
+    dates, pred, abs_move = bucket_donors()
+    table, labels = frames(dates, pred, abs_move)
+    events = events_frame(["a", "b", "c"], [EVENT_DATE] * 3, [4.2, 0.0, np.nan])
+    pool_quantiles(table, labels, events)
+    assert len(calls) == 2
+    assert all(ev is None for ev in calls)
+
+
+def test_guard_raises_when_draw_disagrees(monkeypatch):
+    original = ResidualPool.draw
+
+    def one_short(self, cutoff, prediction, n, rng, *, evidence=None):
+        move, crush = original(self, cutoff, prediction, n, rng, evidence=evidence)
+        return move[:-1], crush[:-1]
+
+    monkeypatch.setattr(ResidualPool, "draw", one_short)
+    dates, pred, abs_move = donors(600)
+    table, labels = frames(dates, pred, abs_move)
+    with pytest.raises(RuntimeError):
+        score(table, labels, 2.0)
