@@ -3,6 +3,7 @@
 Synthetic chains only: the quote adapter's fixtures feed a real FQuotes and a ladder chunk. Expected values are computed
 here from the rules, never from the module under test.
 """
+import math
 import types
 
 import numpy as np
@@ -552,3 +553,85 @@ def test_a_changed_stored_entry_bid_is_refused_by_score_events(tmp_path):
         model.score_events(chunk, EVENTS, SIMS, NAME, alpha=0.5)
     assert exc.value.details["reason"] == "f_quote_mismatch"
     assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+def test_exit_value_at_v_is_the_positive_legs_at_v_signed_by_side(tmp_path):
+    fq, chunk = _setup(tmp_path, _frames(), DEFAULT_PLAN)
+    trade = _pair(chunk)  # buy the 100 put, sell the 95 put, one each: no concession, so V - V
+    frame = fq.legs(chunk, 0, list(trade.legs), exit=True)
+    want = float(frame["V"].iloc[0] - frame["V"].iloc[1])
+    assert ff.FFills(fq).exit_value_at_v(trade) == pytest.approx(want, abs=1e-12)
+
+
+def test_exit_value_at_v_weights_a_fallback_leg_at_its_effective_mid_not_v(tmp_path):
+    fq, chunk = _setup(tmp_path, _frames(), DEFAULT_PLAN)
+    pair = _pair(chunk)
+    trade = pair._replace(legs=({**pair.legs[0], "qty": 2.0}, pair.legs[1]))  # long 2 (fallback), short 1
+    frame = fq.legs(chunk, 0, list(trade.legs), exit=True)
+    mid = (frame["eff_bid"].iloc[0] + frame["eff_ask"].iloc[0]) / 2
+    got = ff.FFills(StubQuotes(fq, _exit_status("rate_unknown"))).exit_value_at_v(trade)
+    assert got == pytest.approx(2 * mid - frame["V"].iloc[1], abs=1e-12)
+    assert abs(got - (2 * frame["V"].iloc[0] - frame["V"].iloc[1])) > 1e-9  # the fallback is exercised, not a no-op
+
+
+def test_exit_value_at_v_weights_a_short_fallback_leg_at_its_effective_mid_not_v(tmp_path):
+    fq, chunk = _setup(tmp_path, _frames(), DEFAULT_PLAN)
+    pair = _pair(chunk)
+    trade = pair._replace(legs=(pair.legs[0], {**pair.legs[1], "qty": 2.0}))  # long 1 (V), short 2 (fallback)
+    frame = fq.legs(chunk, 0, list(trade.legs), exit=True)
+    v_long, v_short = float(frame["V"].iloc[0]), float(frame["V"].iloc[1])
+    mid_short = float(frame["eff_bid"].iloc[1] + frame["eff_ask"].iloc[1]) / 2
+    got = ff.FFills(StubQuotes(fq, _exit_status("ok", "rate_unknown"))).exit_value_at_v(trade)
+    assert got == pytest.approx(v_long - 2 * mid_short, abs=1e-12)
+    assert abs(got - (v_long - 2 * v_short)) > 1e-9  # the short's V is not its effective mid, so using V would differ
+
+
+def test_exit_value_at_v_never_reads_a_zero_quantity_reference_leg(tmp_path):
+    fq, chunk = _setup(tmp_path, _frames(), DEFAULT_PLAN)
+    trade, _ = _trade(chunk, 0)
+    traded = [leg for leg in trade.legs if leg["qty"] > 0]
+    assert len(traded) < len(trade.legs)
+    stub = StubQuotes(fq)
+    got = ff.FFills(stub).exit_value_at_v(trade)
+    positive = [leg["idx"] for leg in traded]
+    assert stub.calls and all(call == (0, True, positive) for call in stub.calls)
+    frame = fq.legs(chunk, 0, traded, exit=True)
+    want = sum(leg["qty"] * (1.0 if leg["side"] == "buy" else -1.0) * frame["V"].iloc[pos] for pos, leg in enumerate(traded))
+    assert got == pytest.approx(float(want), abs=1e-9)
+
+
+def test_exit_value_at_v_is_nan_when_a_leg_is_unpriceable(tmp_path):
+    fq, chunk = _setup(tmp_path, _frames(), DEFAULT_PLAN)
+    got = ff.FFills(StubQuotes(fq, _exit_status("unpriceable"))).exit_value_at_v(_pair(chunk))
+    assert math.isnan(got)
+
+
+def _invalid_side_trade(chunk):
+    """_pair with the positive buy leg's side set to "hold": not a side F can close."""
+    pair = _pair(chunk)
+    return pair._replace(legs=({**pair.legs[0], "side": "hold"}, pair.legs[1]))
+
+
+def _zero_qty_trade(chunk):
+    """_pair with every leg at quantity 0: no positive-quantity leg is traded."""
+    pair = _pair(chunk)
+    return pair._replace(legs=tuple({**leg, "qty": 0.0} for leg in pair.legs))
+
+
+def _empty_legs_trade(chunk):
+    return _pair(chunk)._replace(legs=())
+
+
+@pytest.mark.parametrize("build", [_invalid_side_trade, _zero_qty_trade, _empty_legs_trade],
+                         ids=["invalid_side", "zero_qty", "empty_legs"])
+def test_exit_result_and_exit_value_at_v_refuse_alike(tmp_path, build):
+    fq, chunk = _setup(tmp_path, _frames(), DEFAULT_PLAN)
+    trade = build(chunk)
+    with pytest.raises(fvf.FairValueRefusal) as via_result:
+        ff.FFills(fq).exit_result(trade)
+    with pytest.raises(fvf.FairValueRefusal) as via_value:
+        ff.FFills(fq).exit_value_at_v(trade)
+    assert type(via_value.value) is type(via_result.value)
+    assert via_value.value.code == via_result.value.code
+    assert via_value.value.details["reason"] == via_result.value.details["reason"] == "leg_invalid"
+    assert str(via_value.value) == str(via_result.value)
