@@ -170,3 +170,12 @@ def test_tree_probability_outside_unit_interval_is_nan(carry):
 def test_non_finite_carry_gives_nan_on_live_rows(is_put):
     assert np.isnan(float(fvc.value(100.0, 100.0, 1.0, 0.2, 0.03, np.nan, 0.0, 0.0, is_put)))
     assert np.isnan(float(fvc.value(100.0, 100.0, 1.0, 0.2, 0.03, np.inf, 0.0, 0.0, is_put)))
+
+
+def test_no_dividend_call_on_tree_is_strictly_above_same_lattice_european():
+    """b far below r, no dividend: the call takes the tree, and early exercise pays on a deep ITM call."""
+    S, K, T, v, r, b = 100.0, 50.0, 1.0, 0.2, 0.05, -0.5
+    american = float(fvc.value(S, K, T, v, r, b, 0.0, 0.0, False))
+    european = float(fvc._tree(_arr(S), _arr(K), _arr(T), _arr(v), _arr(r), _arr(b), _arr(0.0), _arr(0.0),
+                               _arr(1.0), early=False)[0])
+    assert american > european + 1e-3

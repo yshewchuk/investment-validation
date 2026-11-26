@@ -5,6 +5,8 @@ Synthetic inputs only (guides/fair_value_fill_design.md, sections 3, 4, 7, 10).
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -286,17 +288,20 @@ def test_expired_rows_are_intrinsic_without_vol_or_rate():
         (95.0, "C", 6.0, 7.0, np.nan, SPOT, False, np.nan),   # intrinsic 5, clamps to bid 6
         (95.0, "P", 0.0, 0.5, np.nan, SPOT, False, np.nan),   # intrinsic 0, inside
         (100.0, "C", 0.0, 1.0, np.nan, 0.0, False, np.nan),   # bad spot
+        (110.0, "C", 0.0, 1.0, np.nan, SPOT, False, np.nan),  # out of the money call: intrinsic 0, exactly 0
+        (90.0, "P", 0.0, 1.0, np.nan, SPOT, False, np.nan),   # out of the money put: intrinsic 0, exactly 0
     ]
     out = legs.leg_values(quotes_frame(rows, expiry=OBS), vols_frame(expiry=OBS))
     assert set(out.source) == {"intrinsic"}
-    assert out.status.tolist() == ["ok", "ok", "ok", "ok", "no_fair_value"]
+    assert out.status.tolist() == ["ok", "ok", "ok", "ok", "no_fair_value", "ok", "ok"]
     np.testing.assert_array_equal(out.V.to_numpy()[:4], [10.0, 6.0, 6.0, 0.0])
-    assert out.clamp_side.tolist() == ["none", "ask", "bid", "none", None]
+    np.testing.assert_array_equal(out.V.to_numpy()[5:], [0.0, 0.0])
+    assert out.clamp_side.tolist() == ["none", "ask", "bid", "none", None, "none", "none"]
     for c in ("status", "source", "clamp_side"):
         assert out[c].dtype == object
-    assert out.clamp_side.iloc[-1] is None
+    assert out.clamp_side.iloc[4] is None
     assert out.vol.isna().all() and out.rate.isna().all()
-    assert_unavailable(out.iloc[[-1]])
+    assert_unavailable(out.iloc[[4]])
 
 
 def test_nat_expiry_has_no_source_and_no_fair_value():
@@ -550,10 +555,107 @@ def test_unpriced_and_expiring_rows_have_no_b_or_flags():
 
 
 def test_dividend_changes_value_but_not_smile_vol():
+    # Force the fallback smile: strike 95 (in the fit set) has no smvVol, so every row takes the smile.
+    strikes = [K for K in BASE if K != 95.0]
+    vols = vols_frame(strikes, [smv_of(K) for K in strikes])
     base_q = quotes_frame(smile_rows(BASE, iv_curve, bid=0.0, ask=1000.0))
-    base = legs.leg_values(base_q, vols_frame())
-    out = legs.leg_values(base_q.assign(divAmt=3.0, divDate=OBS + pd.Timedelta(days=15)), vols_frame())
+    base = legs.leg_values(base_q, vols)
+    # Ex-date 15 days out: S - PV(D) is about 97.0, across the 100 strike, so the fit set would change if it used it.
+    out = legs.leg_values(base_q.assign(divAmt=3.0, divDate=OBS + pd.Timedelta(days=15)), vols)
+    assert set(out.source) == {"smile"} and set(out.status) == {"ok"}
     assert out.dividend_applied.all()
     np.testing.assert_array_equal(out.vol.to_numpy(), base.vol.to_numpy())  # fit and k keep the unadjusted spot
+    # Expected smile: fit_smile on the UNADJUSTED spot, fit set = puts K <= SPOT and calls K > SPOT.
+    strike, right = base_q["strike"].to_numpy(), base_q["right"].to_numpy()
+    bid, ask, iv = (base_q[name].to_numpy(dtype=float) for name in ("bid", "ask", "iv"))
+    k = np.log(strike / SPOT) / np.sqrt(T)
+    fit = ((right == "P") & (strike <= SPOT)) | ((right == "C") & (strike > SPOT))
+    fitted = legs.fit_smile(strike[fit], k[fit], iv[fit], ((ask - bid) / ((bid + ask) / 2.0))[fit])
+    assert fitted is not None
+    np.testing.assert_allclose(out.vol.to_numpy(), legs.smile_vol(fitted, k), rtol=0, atol=1e-9)
+    assert np.ptp(out.vol.to_numpy()) > 0.01  # non-flat smile across strikes
     calls = (out.right == "C").to_numpy()
     assert (out.V.to_numpy()[calls] != base.V.to_numpy()[calls]).all()
+
+
+def _N(x):
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _euro_call_carry(S, K, T, v, r, b):
+    """Closed form for a European call with carry b and no dividend (math.erf; not fair_value_carry)."""
+    d1 = (math.log(S / K) + (b + 0.5 * v * v) * T) / (v * math.sqrt(T))
+    d2 = d1 - v * math.sqrt(T)
+    return S * math.exp((b - r) * T) * _N(d1) - K * math.exp(-r * T) * _N(d2)
+
+
+def _reference_escrowed(S, K, T, v, r, b, D, tD, is_put):
+    """Copy of the independent escrowed American CRR reference in test_fair_value_carry.py, pure python."""
+    n = fvp.TREE_STEPS
+    dt = T / n
+    v = max(v, fvp.PUT_VOL_FLOOR)
+    u = math.exp(v * math.sqrt(dt))
+    d = 1.0 / u
+    p = (math.exp(b * dt) - d) / (u - d)
+    disc = math.exp(-r * dt)
+    root = S - D * math.exp(-r * tD)
+    sign = -1.0 if is_put else 1.0
+
+    def payoff(i, j):
+        t_i = T * (i / n)
+        stock = root * u ** (2 * j - i) + (D * math.exp(-r * (tD - t_i)) if t_i < tD else 0.0)
+        return max(sign * (stock - K), 0.0)
+
+    vals = [payoff(n, j) for j in range(n + 1)]
+    for i in range(n - 1, -1, -1):
+        vals = [max(disc * (p * vals[j + 1] + (1.0 - p) * vals[j]), payoff(i, j)) for j in range(i + 1)]
+    return vals[0]
+
+
+# (days to expiry, borrow30, borrow2yr, strike, right, divAmt, days to ex-date, oracle). Vol is smv_of(strike).
+# Expiry 100: b = 0.02 + (100 - 30)/700 * 0.04 = 0.024 < r = 0.04: tree. Expiry 400: b = 0.02 + (370/700) * 0.08 = 0.0623 > r.
+CARRY_ROWS = [
+    (100, 0.02, 0.06, 105.0, "P", 2.0, 40, "tree"),    # put, applied dividend
+    (100, 0.02, 0.06, 95.0, "C", 2.0, 40, "tree"),     # tree call (b < r), applied dividend
+    (100, 0.02, 0.06, 95.0, "P", None, None, "tree"),  # put, no dividend
+    (100, 0.02, 0.06, 105.0, "C", None, None, "tree"), # tree call (b < r), no dividend
+    (400, 0.02, 0.10, 105.0, "C", None, None, "euro"), # European call (b > r >= 0), no dividend
+    (400, 0.02, 0.10, 110.0, "C", None, None, "euro"), # European call, no dividend
+    (400, 0.02, 0.10, 95.0, "P", 3.0, 200, "tree"),    # put, applied dividend, ex-date 200 != expiry 400
+    (400, 0.02, 0.10, 105.0, "P", None, None, "tree"), # put, no dividend, b > r still a tree
+]
+
+
+def _carry_oracle(days, b30, b2, K, right, amt, dd, oracle, vol):
+    """(b, V) by hand: b is linear in days from 30 to 730; V from the escrowed reference or the closed form."""
+    T = days / 365.0
+    b = b30 + (days - 30.0) / 700.0 * (b2 - b30)
+    if oracle == "euro":
+        assert right == "C" and dd is None and b > RATE >= 0
+        return b, _euro_call_carry(SPOT, K, T, vol, RATE, b)
+    D, tD = (0.0, 0.0) if dd is None else (amt, dd / 365.0)
+    return b, _reference_escrowed(SPOT, K, T, vol, RATE, b, D, tD, right == "P")
+
+
+def test_leg_values_carry_and_dividend_match_independent_oracle():
+    frames, b_expected, v_expected = [], [], []
+    for days, b30, b2, K, right, amt, dd, oracle in CARRY_ROWS:
+        q = quotes_frame([(K, right, 0.0, 1000.0, 0.25, SPOT, False, RATE)], expiry=OBS + pd.Timedelta(days=days))
+        q["borrow30"], q["borrow2yr"] = b30, b2
+        if dd is not None:
+            q["divAmt"], q["divDate"] = amt, OBS + pd.Timedelta(days=dd)
+        frames.append(q)
+        b, value = _carry_oracle(days, b30, b2, K, right, amt, dd, oracle, smv_of(K))
+        b_expected.append(b)
+        v_expected.append(value)
+    q = pd.concat(frames, ignore_index=True)
+    strikes = [95.0, 105.0, 110.0]
+    vols = pd.concat([vols_frame(strikes, [smv_of(K) for K in strikes], expiry=OBS + pd.Timedelta(days=d))
+                      for d in (100, 400)], ignore_index=True)
+    out = legs.leg_values(q, vols)
+    assert set(out.source) == {"smvvol"} and set(out.status) == {"ok"}
+    assert out.clamp_side.tolist() == ["none"] * len(CARRY_ROWS)
+    np.testing.assert_allclose(out.vol.to_numpy(), [smv_of(K) for K in out.strike], rtol=1e-12, atol=0)
+    np.testing.assert_allclose(out.b.to_numpy(), b_expected, rtol=0, atol=1e-12)
+    assert out.dividend_applied.tolist() == [row[6] is not None for row in CARRY_ROWS]
+    np.testing.assert_allclose(out.V.to_numpy(), v_expected, rtol=1e-9, atol=0)
