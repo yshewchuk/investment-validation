@@ -63,5 +63,41 @@ tolerance_bands:
 fallback:
   rho_step: 0.05
   min_recovered_trades: 100
-amendments: []
+amendments:
+  - id: "A1"
+    title: "Amendment 1 (2026-11-25): fair-value fills (model F); post-hoc revision by the user, guides/size_width_tuning_design.md, section 'Amendment 1'"
+    post_hoc: true
+    post_hoc_note: "Chosen by the user on 2026-11-25 after the full mid-fill run (its 2023-24 tuning and 2025 results) had been seen. Not a pre-registered test; nothing in it is blind. The original fields above, PLANNED row, receipts, report and ledger rows stay as the only pre-registered result."
+    label: "POST-HOC (Amendment 1, F fills)"
+    supersedes:
+      constraints: "'Marks only from engine.fills.' is superseded for model F only; engine/fills.py is unchanged and produces the reported views."
+      objective: "F replaces marks_mid wherever it decides: the stand-alone cash-secured $200,000 account funded at debit_F with exits at proceeds_F, with F's conservative exits (design A1.2, A1.5). Selection scores use exp_pnl_sim with entry cost debit_F; the simulated exit has no F concession or fair value (A1.3)."
+      success_rule: "Condition (a), the 2-of-7 guard, the tolerance bands, phi and fallback adoption read F P&L. Condition (b) and the 12.4 margin keep breakeven alpha and +0.05, on the arm's F-selected taken set, all five alphas priced by a separate CurrentFills instance with repriced=True (A1.6)."
+    reported_never_deciding: ["mid", "harsh", "unknown0", "unknown1", "midfloor"]
+    fill_model:
+      id: "F"
+      design: "guides/fair_value_fill_design.md"
+      fvf_id: "735f3e6cb2fa65c303599152cfa6fead2d7950e9bcb367117d50ed25faffc0b7"
+      carry_dividend_mode: "f7_orats_borrow_discrete_dividend"
+      rate_rules:
+        rate_out_of_range: "missing"
+        rate_empty_row: "rate_unknown"
+      vol_scale: 1.0
+      rate_scale: 0.01
+      reingest:
+        path: "data/experiment/orats_smoothed_vol_v4"
+        tool_version: "4"
+        manifest_sha256: "17ecc75e84d2e261900eccc3ad79a1cbd065af2d58eabdfebfd49dd75001f75d"
+        manifest_units:
+          iRate5wk: "percent"
+          iRateLt: "percent"
+          borrow30: "percent"
+          borrow2yr: "percent"
+          divAmt: "dollars_per_share"
+          annIdiv: "dollars_per_share"
+          annActDiv: "dollars_per_share"
+          divDate: "date"
+          assetType: "code"
+      quote_snapshot: "the snapshot the sealed inputs pin (design A1.3): the sources config's snapshot_id; no substitute"
+      receipt_bindings: ["fill_model_id", "fvf_id", "reingest_manifest_sha256", "every_table_file_sha256", "quote_snapshot_id", "units", "rate_out_of_range", "rate_empty_row", "carry_dividend_mode"]
 label_2025: "2025 NOT blind for widths"

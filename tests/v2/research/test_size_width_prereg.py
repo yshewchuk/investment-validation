@@ -6,14 +6,16 @@ from pathlib import Path
 import yaml
 
 from engine.v2.ops.errors import OpsError
+from experiments import fair_value_inputs as fvi
 from experiments import lib, size_width_account, size_width_prereg, size_width_sizing
 
 REAL_SPEC = size_width_prereg.SPEC_PATH
 
 
 def _write_real_spec(case, **changes):
-    """Re-dump the real EXP-189 spec.yaml into ``case`` with optional top-level changes."""
+    """Re-dump the real EXP-189 spec.yaml into ``case``: amendments are emptied unless passed in ``changes``."""
     spec = yaml.safe_load(REAL_SPEC.read_text())
+    spec["amendments"] = []
     spec.update(changes)
     path = case / "spec.yaml"
     path.write_text(yaml.safe_dump(spec, sort_keys=False))
@@ -184,6 +186,57 @@ def test_real_spec_is_exp_189_with_the_design_grid_and_account_equity():
     assert digest == lib.spec_hash(lib.load_spec(REAL_SPEC))
     assert list(spec["grid"]["k"]) == list(size_width_sizing.GRID)
     assert spec["account"]["start_equity"] == size_width_account.START_EQUITY
+
+
+# The hash of the original pre-registered spec: the ledger's first EXP-189 PLANNED row.
+ORIGINAL_HASH = "60773dc627e4b18040d02de0d0e79e29b0b5964749ecb5d52737c17f4958b41a"
+
+
+def _real_amendment():
+    spec, _ = size_width_prereg.load_spec()
+    (amendment,) = spec["amendments"]
+    return spec, amendment
+
+
+def test_amendment_1_leaves_the_original_fields_untouched():
+    spec, _ = _real_amendment()
+    assert lib.spec_hash({**spec, "amendments": []}) == ORIGINAL_HASH
+    assert spec["preregistered_at"] == "2026-11-23T12:00:00+00:00"
+
+
+def test_amendment_1_selects_f_with_loadable_bindings():
+    _, amendment = _real_amendment()
+    assert amendment["post_hoc"] is True
+    assert amendment["label"] == "POST-HOC (Amendment 1, F fills)"
+    fill = amendment["fill_model"]
+    assert fill["id"] == "F"
+    assert fill["fvf_id"] == "735f3e6cb2fa65c303599152cfa6fead2d7950e9bcb367117d50ed25faffc0b7"
+    assert fill["rate_rules"] == {"rate_out_of_range": "missing", "rate_empty_row": "rate_unknown"}
+    for name, value in fill["rate_rules"].items():
+        assert value in fvi.RATE_RULE_VALUES[name]
+    assert (fill["vol_scale"], fill["rate_scale"]) == (1.0, 0.01)
+    reingest = fill["reingest"]
+    assert reingest["manifest_sha256"] == "17ecc75e84d2e261900eccc3ad79a1cbd065af2d58eabdfebfd49dd75001f75d"
+    # F's own manifest check accepts the bound unit labels (it refuses input_unit otherwise).
+    unread = {"unreadable": 0, "unrecognized": 0}
+    fvi._check_manifest(json.dumps({"tables": {"quotes": unread, "rates": unread},
+                                    "units": reingest["manifest_units"]}).encode())
+
+
+def test_amended_spec_needs_the_original_row_and_a_new_one_last(tmp_path):
+    _, digest = size_width_prereg.load_spec()
+    exps = _own_experiments(tmp_path)
+
+    def check(name, rows):
+        return size_width_prereg.require_preregistration(
+            spec_path=REAL_SPEC, ledger_path=_write_ledger(tmp_path / name, rows),
+            run_log_path=_run_log_path(tmp_path), experiments_dir=exps)
+
+    original, new = _planned_row(ORIGINAL_HASH), _planned_row(digest)
+    assert refusal(lambda: check("only_original.csv", [original])) == "planned_row_ambiguous"
+    assert refusal(lambda: check("wrong_order.csv", [new, original])) == "spec_hash_mismatch"
+    receipt = check("registered.csv", [original, new])
+    assert receipt["spec_hash"] == digest and receipt["spec_hash_checked"] is True
 
 
 # --------------------------------------------------------------------------

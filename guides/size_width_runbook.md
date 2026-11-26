@@ -115,3 +115,38 @@ entry mark), and `exit_value(chunk, traded, alpha, mid)` the exit mark. The defa
 `size_pnl_shortvol`'s functions. Strike resolution, the rung-3 zero floor and the simulation's Black-Scholes exit
 repricing are not marks and stay outside the seam. No command selects another model; receipts do not record one, so a
 change that does must bind its identity in the inputs receipt.
+
+## Amendment 1 run (fair-value fills, model F)
+
+Design: Amendment 1 (A1.9; re-split note under A1.10). Outputs are post-hoc. The steps above apply, with these
+additions. F is selected only by the `spec.yaml` `amendments` entry that carries `fill_model` (`fill_model.id: "F"`).
+
+1. **Wait to register** until W7a1 to W7b2, W7d and W7e are merged. Before W7d no code reads `fill_model`, and the guard
+   checks only rows and hashes: a row registered early would let current marks run as primary under an F spec. From the
+   W7e merge until registration every stage refuses `planned_row_ambiguous`, including a rerun of the original.
+2. **Bindings, before registration, no outcome read.** `fill_model` must match:
+   - `fvf_id`: `python3 -c "from experiments import fair_value_run as r; print(r.fvf_id())"`.
+   - `reingest.manifest_sha256`: `sha256sum` of `manifest.json` under `reingest.path` (repo-relative).
+   - `vol_scale`: the manifest names no `smvVol` unit; 1.0 (decimal) is assumed. F's load refuses `vol_unit` when the
+     scaled median is outside (0.05, 5).
+   - Quote snapshot: the sources config's `snapshot_id`.
+
+   A mismatch stops the run. Changing a binding or rule needs a new amendment, hash and PLANNED row.
+3. **Pins.** The spec cannot hold table hashes (the manifest lists none). Before the smoke, write one JSON file,
+   `manifest_sha256` plus `files` (path relative to `reingest.path` to SHA-256), covering every quote and rate month the
+   run reads. Keep it unchanged for the full run: the inputs receipts bind every hash. The pins do not prove that the
+   tables and manifest came from one re-ingest run. W7d documents in `experiments/README.md` how the F inputs reach
+   `run.py`.
+4. **Register** (supervisor only): a second EXP-189 PLANNED row with the new hash
+   (`python3 -c "from experiments import size_width_prereg as p; print(p.load_spec()[1])"`); the original row stays and
+   the new one is last. Then `python3 -m experiments.size_width_prereg --check`. No agent writes
+   `experiments/LEDGER.csv`.
+5. **Smoke, 50 tickers:** all three stages, with the smoke commands above (`--no-ledger`, fresh `/tmp` out-dir). The ids
+   are all admitted events of the 50 plan tickers with the smallest `sha256("<ticker>|exp189-a1")` (W7d supplies them;
+   no outcome is used). Before the full run, record per stage: wall time, peak RSS, F load and pricing time, quote rows
+   priced and their rate, entry coverage, and a full-run estimate. Entry status, vol-source and liquidity coverage must
+   print before any outcome is read. No smoke result tunes F or a rule.
+6. **Full rerun** of inner, outer and report in a fresh out-dir, one heavy job at a time. Reuse and delete no earlier
+   receipt, month file or tuning. F's refusals (A1.7) leave no partial report.
+7. **Report again once W7c2 lands**, on the same out-dir. An earlier `REPORT.md` may lack A1.1's labels and F's tables
+   and diagnostics, so it is not the Amendment 1 report.
