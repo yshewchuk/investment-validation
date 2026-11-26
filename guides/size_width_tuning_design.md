@@ -182,16 +182,16 @@ Status, vol-source and liquidity coverage on entry rows is printed **before any 
 
 ### A1.8 Borrow and dividends
 
-PR #2910 (open) amends the F design to use ORATS borrow and dividend inputs, consumed by its slice F7, and orders F5 after F7. **If #2910 is merged before the run**, the spec binds an `fvf_id` that includes F7 and a re-ingest carrying those fields, and the run waits for F7's code (the merged document alone prices nothing). **If not**, F runs as built: **risk-free carry and zero dividends**, which spec and report state. The limit: every EXP-189 leg is a put, a missed dividend makes F under-value puts, and the clamp does not bound the error. The choice is fixed when the amended spec is registered; changing it needs a new amendment, hash and PLANNED row.
+PR #2910 (open) amends the F design to use ORATS borrow and dividend inputs, consumed by its slice F7, and orders F5 after F7. **If #2910 is merged before the run**, the spec binds an `fvf_id` that includes F7 and a re-ingest carrying those fields, and the run waits for F7's code (the merged document alone prices nothing). **If not**, F runs as built: **risk-free carry and zero dividends**, which spec and report state. The limit: every EXP-189 leg is a put, a missed dividend makes F under-value puts, and the clamp does not bound the error. The choice is fixed when the amended spec is registered; changing it needs a new amendment, hash and PLANNED row. The Amendment 1 spec entry takes the first branch (F7, #2957, is merged).
 
 ### A1.9 Registration and run
 
-1. Slice W7e adds one `amendments` entry to `spec.yaml` (this section; post-hoc flag and label; fill model F as primary and what it supersedes in `constraints`, `objective` and `success_rule`; the A1.7 R4 bindings, units taken from the re-ingest using no outcome). `preregistered_at` and the original fields stay. The hash changes. The entry is not written until F design section 13 item 3 (the two rate rules, pending the user's review) is settled. **F is selected only by this entry**; without it the code prices as before.
+1. Slice W7e adds one `amendments` entry to `spec.yaml` (this section; post-hoc flag and label; fill model F as primary and what it supersedes in `constraints`, `objective` and `success_rule`; the A1.7 R4 bindings, units taken from the re-ingest using no outcome). `preregistered_at` and the original fields stay. The hash changes. The entry is not written until F design section 13 item 3 (the two rate rules) is settled (user, 2026-11-26: the defaults). **F is selected only by this entry**; without it the code prices as before.
 2. The **supervisor registers a new PLANNED row** with the new hash (the guard then expects two EXP-189 PLANNED rows, the new one last). No agent writes `experiments/LEDGER.csv`. Until then every stage refuses.
 3. **Smoke, 50 tickers, with F timing** (`--no-ledger`, fresh `/tmp` out-dir): all admitted events of the 50 plan tickers with the smallest `sha256("<ticker>|exp189-a1")` (mine; no outcome used), all three stages. Record per stage wall time, peak RSS, F load and pricing time, quote rows priced and their rate, entry coverage, and a full-run estimate, before the full run. No smoke result tunes F or a rule; a rule change needs a new amendment.
 4. **Full rerun of all stages** (inner, outer, report) in a fresh out-dir. No earlier receipt, month file or tuning is reused or deleted.
 
-### A1.10 Split list (code slices; none starts until this section and F4 and F5 are merged, plus F7 when A1.8 requires it)
+### A1.10 Split list (code slices; no W7a1-W7d slice starts until this section and F4 and F5 are merged, plus F7 when A1.8 requires it)
 
 W7a1-W7d are code slices sized to skip CodeRabbit: 1-149 **changed** production lines (additions plus deletions in `.py` outside `tests/`); every other file is a test under `tests/` or an `ARCHITECTURE.md`/`README.md` outside `guides/` (at most 40 changed lines in total); no path contains "design" or "spec"; no renames. All `spec.yaml` and `guides/` changes are in W7e, which needs CodeRabbit. Code edits are in `size_width_*` and EXP-189's tests. No EXP-188 file, F module (F's own slices own those) or v14-closure file changes. Sizes: changed production lines / test lines / doc words.
 
@@ -202,9 +202,13 @@ W7a1-W7d are code slices sized to skip CodeRabbit: 1-149 **changed** production 
 | W7a3 | F fills object: entry statuses and guard reasons, exit marks and flags | ~110 / ~140 / 30 | W7a1, W7a2 |
 | W7b1 | F-primary rows with mid, harsh and sensitivity columns | ~100 / ~120 / 20 | W7a3 |
 | W7b2 | Accounts, objective, fallback, T8 and T9 inputs read F; A1.4 counts; ladder breakeven and non-positive-debit counts | ~110 / ~140 / 30 | W7b1 |
-| W7c1 | Report: labels, F-primary tables beside mid, harsh and sensitivities | ~110 / ~110 / 30 | W7b2 |
-| W7c2 | Report: coverage, counts, concession and F diagnostics | ~110 / ~110 / 30 | W7c1 |
-| W7d | Spec-driven F selection code, receipt bindings, driver F timing, smoke ticker ids | ~110 / ~130 / 40 | W7c2 |
-| W7e | `spec.yaml` amendment and runbook (`guides/`); no production `.py` | 0 / ~50 / 150 | W7d |
+| W7c1 | Report: labels, F-primary tables beside mid, harsh and sensitivities | ~110 / ~110 / 30 | W7b1 |
+| W7c2 | Report: coverage, counts, concession and F diagnostics | ~110 / ~110 / 30 | W7b2 |
+| W7d | Spec-driven F selection code, receipt bindings, driver F timing, smoke ticker ids | ~110 / ~130 / 40 | W7a3 |
+| W7e | `spec.yaml` amendment and runbook (`guides/`); no production `.py` | 0 / ~50 / 150 | none (re-split) |
 
 W7a1-W7d are tested with F selected by injection or a fixture spec on synthetic data; only W7e's `spec.yaml` entry lets a real run select it. A slice that would exceed 149 changed production lines or 40 doc lines is split again.
+
+Re-split (supervisor, user 2026-11-26): W7e (spec and runbook) starts at once, in parallel with W7a1/W7a2, because it is the only CodeRabbit slice; W7d runs in parallel with W7b1 after W7a3; W7c1 in parallel with W7b2 after W7b1; W7c2 after W7b2. The run starts after W7b2, W7d and W7e; the report stage is re-run once W7c2 lands. A merged spec selects nothing before the supervisor registers the PLANNED row.
+
+**Report inputs.** The report stage reads no sources. So before the run starts, the run stages must write, and bind by hash in a stage receipt, every input of every W7c1 and W7c2 table and diagnostic (this amendment and F design section 8). For A1.3's exit concession that includes, per taken trade, the exit value at `V`, `proceeds_F`, `debit_F` and the rung-3 and `unpriceable` exclusion flags. W7c1 and W7c2 read only stored, receipt-bound outputs. If any input is not so stored, the run waits until W7c2 has landed and the run stages write it.
