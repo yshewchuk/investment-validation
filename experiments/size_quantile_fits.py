@@ -1,6 +1,6 @@
 """EXP-190 Q3a (design sections 4, 7): one fold's quantile fits, walk-forward configuration selection, the
-non-crossing sort and arm ids. No file I/O; the caller supplies labels. The yearly loop, label reads, `bind_grid`
-and fit receipts are in `size_quantile_walk`, its only caller (nothing calls the walk yet); real-data fits also need
+non-crossing sort and arm ids. No file I/O; the caller supplies labels. The yearly loop, its `bind_grid` call, label
+reads and fit receipts are in `size_quantile_walk`, its only caller (nothing calls the walk yet); real-data fits need
 `size_quantile_prereg.require_preregistration` first. Uses v14's fit path (`fit_regression_predictions`: signed
 domain so raw outputs are not clipped, native NaN, all-empty training columns zeroed, one thread). Row masks are
 v14's: every training pair the caller passes, no feature filter. A `ValueError` from the fit itself propagates: the
@@ -117,7 +117,7 @@ def select_configuration(spec, sealed, outputs, labels):
     return winner, losses
 
 
-def fit_fold(spec, sealed, training, evaluation_ids):
+def fit_fold(spec, sealed, training, evaluation_ids, *, validate_only=False):
     """`training`: [(event_id, y)] label-qualified before the fold cutoff by the caller."""
     raw = {}
     try:
@@ -134,6 +134,8 @@ def fit_fold(spec, sealed, training, evaluation_ids):
         eval_x = _matrix(by_id, evaluation_ids, columns)
         configs = configurations(spec)
         recipes = _recipes(spec, sealed)
+        if validate_only:
+            return None
         progress = Progress("quantile fits", len(configs) * len(levels))
         with stage("quantile fold fits"):
             for c in configs:

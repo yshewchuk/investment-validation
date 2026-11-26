@@ -116,6 +116,7 @@ def _walk(sealed, spec, years, out_dir):
                      "configuration": list(configuration), "selection_losses": losses,
                      "arm_id": arm_id(spec, sealed, SOURCE, configuration),
                      "event_ids": list(fold["evaluation_event_ids"])}
+            fit_fold(spec, sealed, train, fold["evaluation_event_ids"], validate_only=True)
             if path.exists():
                 receipt = _load(path, fixed, keys)
                 decision("quantile walk", f"year={year} replay, no refit")
@@ -136,7 +137,7 @@ def _walk(sealed, spec, years, out_dir):
 
 
 def fit_walk_forward(sealed, spec, years, out_dir):
-    """Return ``{year: receipt}`` for consecutive ``years``, replaying or writing each ``fit_<year>.json``."""
+    """Return {year: receipt} for consecutive years through the first fit_failed year; replay/write fit_<year>.json."""
     try:
         return _walk(sealed, spec, years, out_dir)
     except MemoryError:

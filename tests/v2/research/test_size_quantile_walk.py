@@ -496,3 +496,39 @@ def test_fit_path_refusal_propagates_and_writes_no_receipt(monkeypatch, tmp_path
         walk.fit_walk_forward(_sealed(drop_row="e23a"), SPEC, YEARS, out)
     assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "panel_row_missing")
     assert not (out / "fit_2023.json").exists()
+
+
+DEFECTS = {
+    "row_missing": (lambda rows, row: rows.remove(row), "panel_row_missing"),
+    "duplicate_row": (lambda rows, row: rows.append(dict(row)), "panel_row_duplicate"),
+    "column_missing": (lambda rows, row: row.pop("f_b"), "panel_column_missing"),
+    "feature_infinite": (lambda rows, row: row.update(f_a=float("inf")), "feature_infinite"),
+    "feature_non_numeric": (lambda rows, row: row.update(f_a="x"), "feature_invalid"),
+}
+
+
+def _broken(defect, event):
+    sealed = _sealed()
+    DEFECTS[defect][0](sealed["rows"], next(r for r in sealed["rows"] if r["event_id"] == event))
+    return sealed
+
+
+@pytest.mark.parametrize("event", ["e20a", "e23a"])
+@pytest.mark.parametrize("defect", list(DEFECTS))
+def test_replay_refuses_a_defective_mapping_as_a_fresh_fit_does(monkeypatch, tmp_path, defect, event):
+    out, fresh = tmp_path / "walk", tmp_path / "fresh"
+    _install(monkeypatch, out)
+    walk.fit_walk_forward(_sealed(), SPEC, YEARS, out)
+    before = _snapshot(out)
+    calls = _install(monkeypatch, fresh)
+    with pytest.raises(OpsError) as fresh_exc:
+        walk.fit_walk_forward(_broken(defect, event), SPEC, YEARS, fresh)
+    assert _refusal(fresh_exc) == ("EXPERIMENT_IDENTITY_CONFLICT", DEFECTS[defect][1])
+    assert calls["fits"] == []
+    assert not (fresh / "fit_2023.json").exists()
+    calls = _install(monkeypatch, out)
+    with pytest.raises(OpsError) as exc:
+        walk.fit_walk_forward(_broken(defect, event), SPEC, YEARS, out)
+    assert _refusal(exc) == _refusal(fresh_exc)
+    assert calls["fits"] == []
+    assert _snapshot(out) == before
