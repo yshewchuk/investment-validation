@@ -90,7 +90,8 @@ def _load(conn, store, spec, plan_ref, max_object_bytes):
 
 
 def load_sealed_panel(conn, store, spec, plan_ref, *, max_object_bytes=MAX_OBJECT_BYTES):
-    """Return the sealed panel for one plan: admitted events, lead-1 rows and the HMOSXLP binding."""
+    """Return the sealed panel for one plan: admitted events, lead-1 rows and the HMOSXLP binding, plus the
+    fold inputs `context`, `fold_events` and `evaluation_labels_before`."""
     started = time.monotonic()
     try:
         sealed = _load(conn, store, spec, plan_ref, max_object_bytes)

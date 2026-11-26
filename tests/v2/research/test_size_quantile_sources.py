@@ -35,6 +35,7 @@ TARGETS = [
 ]
 CONN, STORE, SPEC, PLAN_REF = object(), object(), object(), object()
 CUTOFF = "2025-01-01"
+EVAL_LABELS_BEFORE = "2025-02-14"  # distinct from CUTOFF, the holdout month and every other fixture date
 
 
 def _refusal(exc):
@@ -70,8 +71,8 @@ def world(monkeypatch):
         document={"schema_version": SCHEMA, "snapshot": SNAP, "holdouts": {"holdout_as_of_month": "2025-01-01"},
                   "size_panel": {"context": {"context_id": "ctx-1", "target_events": copy.deepcopy(TARGETS)},
                                  "feature_snapshot": FEAT},
-                  "magnitude_plan": {"events": copy.deepcopy(TARGETS)},
-                  "magnitude_execution": {"evaluation_labels_before": CUTOFF}})
+                  "magnitude_plan": {"events": [{**e, "fold_marker": "plan"} for e in TARGETS]},
+                  "magnitude_execution": {"evaluation_labels_before": EVAL_LABELS_BEFORE}})
 
     def registration(conn, store, spec):
         st.calls.append("registration")
@@ -144,9 +145,15 @@ def test_admission_runs_before_the_panel_read(world):
 
 def test_returns_context_fold_events_and_evaluation_cutoff(world):
     sealed = _load()
-    assert sealed["context"] == world.document["size_panel"]["context"]
-    assert sealed["fold_events"] == world.document["magnitude_plan"]["events"]
-    assert sealed["evaluation_labels_before"] == CUTOFF
+    source_context = world.document["size_panel"]["context"]
+    source_fold_events = world.document["magnitude_plan"]["events"]
+    source_cutoff = world.document["magnitude_execution"]["evaluation_labels_before"]
+    # The fixture must keep the three sources distinguishable, or equality below proves nothing.
+    assert source_fold_events != source_context["target_events"]
+    assert source_cutoff not in (CUTOFF, "2025-01-01", source_context["target_events"][0]["event_date"])
+    assert sealed["context"] == source_context
+    assert sealed["fold_events"] == source_fold_events
+    assert sealed["evaluation_labels_before"] == EVAL_LABELS_BEFORE == source_cutoff
 
 
 @pytest.mark.parametrize("section", ["magnitude_plan", "magnitude_execution"])

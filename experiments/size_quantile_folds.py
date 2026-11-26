@@ -88,7 +88,8 @@ def _folds(sealed, years):
 
 
 def annual_folds(sealed, years):
-    """Annual outer folds for the requested years, after the sealed plan's outer folds are proven identical."""
+    """Annual outer folds for the requested years, returned only after the rule reproduces the sealed 2023-2025
+    outer TRAINING id lists exactly (ids and order). Evaluation ids are not compared."""
     _check_years(years)
     with stage("quantile folds"):
         try:

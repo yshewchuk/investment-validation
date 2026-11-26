@@ -111,6 +111,25 @@ def test_evaluation_drops_a_label_not_available_before_evaluation_labels_before(
     assert out["2024"]["evaluation_event_ids"] == ["e24a"]
 
 
+def test_evaluation_next_day_boundary_drops_at_label_end_plus_one_and_keeps_at_plus_two():
+    # e24c has label_end 2024-12-11 (L); available_before needs label_end + 1 day < cutoff.
+    dropped = annual_folds(_sealed(evaluation_labels_before="2024-12-12"), ["2024"])
+    kept = annual_folds(_sealed(evaluation_labels_before="2024-12-13"), ["2024"])
+    assert dropped["2024"]["evaluation_event_ids"] == ["e24a", "e24b"]
+    assert kept["2024"]["evaluation_event_ids"] == ["e24a", "e24b", "e24c"]
+
+
+def test_stderr_year_line_reports_nonzero_drops(capsys):
+    # e23a (a 2024 training candidate) and e24c (a 2024 evaluation event) are not admitted.
+    admitted = [i for i in ALL_IDS if i not in ("e23a", "e24c")]
+    out = annual_folds(_sealed(admitted=admitted), ["2024"])
+    assert out["2024"]["training_event_ids"] == [i for i in T24 if i != "e23a"]
+    assert out["2024"]["evaluation_event_ids"] == ["e24a", "e24b"]
+    err = capsys.readouterr().err
+    assert ("[quantile_folds] year=2024 cutoff=2024-01-01 training=8 evaluation=2 "
+            "dropped_training=1 dropped_evaluation=1") in err
+
+
 def test_admission_removes_the_event_but_it_still_counts_for_the_cutoff():
     rows = _edit(ROWS, "e24b", ceiling="2023-12-15")
     admitted = [i for i in ALL_IDS if i != "e24b"]
