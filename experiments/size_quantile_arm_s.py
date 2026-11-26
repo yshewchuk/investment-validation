@@ -13,7 +13,8 @@ from engine.v2.ops.errors import fail
 from engine.v2.research.progress import Progress, decision, stage
 from experiments import lib
 from experiments.label_availability import label_cutoff_reason
-from experiments.size_quantile_fits import _label_array, _matrix, arm_id, q_raw
+from experiments.size_quantile_binding import bind_grid
+from experiments.size_quantile_fits import _label_array, _matrix, arm_id, fit_fold, q_raw
 from experiments.size_quantile_folds import annual_folds
 from experiments.size_quantile_sources import training_labels
 from experiments.size_quantile_walk import _labels, _load, _publish
@@ -23,12 +24,14 @@ COLUMNS = ["median", "scale"]
 
 
 def _admit(sealed, spec, raw_receipts):
+    bind_grid(spec, sealed["plan"])
     years, digest = list(raw_receipts), lib.spec_hash(spec)
     consecutive = bool(years) and all(int(b) - int(a) == 1 for a, b in zip(years, years[1:]))
     folds = annual_folds(sealed, years) if consecutive else {}
     if not consecutive or any(
             r["inputs"]["year"] != y or r["inputs"]["sealed_binding"] != sealed["binding"]
             or r["inputs"]["spec_hash"] != digest or list(r["event_ids"]) != folds[y]["evaluation_event_ids"]
+            or content_hash({k: v for k, v in r.items() if k != "content_hash"}) != r.get("content_hash")
             for y, r in raw_receipts.items()):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "raw_receipt_mismatch", details={"reason": "raw_receipt_mismatch"})
     return folds
@@ -36,11 +39,10 @@ def _admit(sealed, spec, raw_receipts):
 
 def _fit(spec, sealed, config, ids, x, y, eval_x, targets):
     fixed, cols = spec["grid"]["fixed"], sealed["model_columns"]
-    recipe = regression_recipe(target_domain="signed", model="history_hgb", columns=cols,
+    recipe = regression_recipe(target_domain="signed", model="history_hgb", loss="absolute_error", columns=cols,
                                feature_dictionary_hash=sealed["dictionary_hash"], max_leaf_nodes=config[0],
                                min_samples_leaf=config[1], learning_rate=fixed["learning_rate"],
-                               l2_regularization=fixed["l2_regularization"], max_iter=fixed["max_iter"],
-                               loss="absolute_error")
+                               l2_regularization=fixed["l2_regularization"], max_iter=fixed["max_iter"])
 
     def predict(tx, ty, rows):
         return np.asarray(fit_regression_predictions(recipe, tx, ty, rows, columns=cols)["predictions"], float)
@@ -59,9 +61,8 @@ def _fit(spec, sealed, config, ids, x, y, eval_x, targets):
             decision("arm S", f"skipped inner year {year}: no label available before {year}-01-01")
     if not held_rows:
         raise ValueError("no out-of-fold residual")
-    rows = np.asarray(held_rows)
-    decision("arm S", f"out-of-fold rows={len(rows)}")
-    scale = predict(x[rows], np.abs(y[rows] - np.asarray(oof)), eval_x)
+    decision("arm S", f"out-of-fold rows={len(held_rows)}")
+    scale = predict(x[held_rows], np.abs(y[held_rows] - np.asarray(oof)), eval_x)
     return predict(x, y, eval_x), scale
 
 
@@ -96,8 +97,9 @@ def _year(sealed, spec, raw_receipts, fold, year, first, state):
     config, cols = tuple(raw_receipts[year]["configuration"]), sealed["model_columns"]
     train = _labels(training_labels(sealed, fold["training_event_ids"], fold["training_labels_before"]))
     evaluation, ids = fold["evaluation_event_ids"], [e for e, _ in train]
+    fit_fold(spec, sealed, train, evaluation, validate_only=True)
     x, eval_x = _matrix(state["by_id"], ids, cols), _matrix(state["by_id"], evaluation, cols)
-    y = _label_array([v for _, v in train], "training_label_invalid")
+    y = np.asarray([v for _, v in train], float)
     decision("arm S", f"year={year} cfg={config[0]}x{config[1]} train={len(train)} eval={len(evaluation)}")
     inputs = {"sealed_binding": sealed["binding"], "spec_hash": lib.spec_hash(spec), "year": year,
               "sklearn_version": sklearn.__version__, "training_labels_before": fold["training_labels_before"],
@@ -123,11 +125,10 @@ def _year(sealed, spec, raw_receipts, fold, year, first, state):
     scored, unscored, used, burned = (_months(sealed, spec, evaluation, first, state)
                                       if receipt["status"] == "ok" else ({}, {}, set(), 0))
     predicted = state["predicted"]
-    bound = [e for e in scored if predicted[e][1] < SCALE_FLOOR]
-    donor_bound = [d for d in used if predicted[d][1] < SCALE_FLOOR]
-    floor = {"events": len(scored), "events_bound": len(bound), "donors": len(used), "donors_bound": len(donor_bound)}
-    decision("arm S", f"year={year} months burned in={burned} floor_bound events={len(bound)}/{len(scored)} "
-             f"donors={len(donor_bound)}/{len(used)} scored={len(scored)} unscored={len(unscored)}")
+    floor = {"events": len(scored), "events_bound": sum(predicted[e][1] < SCALE_FLOOR for e in scored),
+             "donors": len(used), "donors_bound": sum(predicted[d][1] < SCALE_FLOOR for d in used)}
+    decision("arm S", f"year={year} months burned in={burned} floor_bound events={floor['events_bound']}/"
+             f"{len(scored)} donors={floor['donors_bound']}/{len(used)} scored={len(scored)} unscored={len(unscored)}")
     return {"status": receipt["status"], "receipt": receipt, "arm_id": receipt["arm_id"], "scored": scored,
             "unscored": unscored, "floor": floor}
 
@@ -136,9 +137,8 @@ def fit_arm_s(sealed, spec, raw_receipts, out_dir):
     """Return {year: outcome} for arm S; each year's fit receipt is replayed or written as arm_s_fit_<year>.json."""
     try:
         folds, years = _admit(sealed, spec, raw_receipts), list(raw_receipts)
-        state = {"directory": Path(out_dir), "predicted": {},
-                 "targets": {e["event_id"]: e for e in sealed["context"]["target_events"]},
-                 "by_id": {r["event_id"]: r for r in sealed["rows"]}}
+        state = {"directory": Path(out_dir), "predicted": {}, "by_id": {r["event_id"]: r for r in sealed["rows"]},
+                 "targets": {e["event_id"]: e for e in sealed["context"]["target_events"]}}
         results, progress = {}, Progress("arm S years", len(years))
         for year in years:
             with stage(f"arm S {year}"):

@@ -15,6 +15,7 @@ from experiments.label_availability import available_before
 from experiments.size_quantile_prereg import load_spec
 
 SPEC, _ = load_spec()
+FIXED = SPEC["grid"]["fixed"]
 YEARS = ["2023", "2024", "2025"]
 DICT = "sha256:" + "a" * 64
 BINDING = "sha256:" + "b" * 64
@@ -51,6 +52,14 @@ def _outer_folds():
             for y, ids in (("2023", T23), ("2024", T24), ("2025", T25))]
 
 
+def _candidates():
+    return [{"candidate_id": f"h{leaves}_{leaf}", "feature_recipe": {"subset": "HMOSXLP"},
+             "recipe": {"schema_version": "magnitude_ridge_hgb_recipe.v1", "model": "history_hgb",
+                        "estimator": {"params": {**FIXED, "max_leaf_nodes": leaves, "min_samples_leaf": leaf,
+                                                 "loss": "quantile", "quantile": 0.5}}}}
+            for leaves in (7, 15) for leaf in (300, 1000)]
+
+
 def _sealed(binding=BINDING, dates=None, ends=None):
     dates, ends = dates or {}, ends or {}
     events = [(e, t, dates.get(e, d), ends.get(e, end)) for e, t, d, end in EVENTS]
@@ -62,7 +71,7 @@ def _sealed(binding=BINDING, dates=None, ends=None):
                         for e, t, d, _ in events],
         "events": [{"event_id": e} for e in IDS],
         "evaluation_labels_before": "2026-01-01",
-        "plan": {"plan_id": "P1", "folds": _outer_folds()},
+        "plan": {"plan_id": "P1", "candidates": _candidates(), "folds": _outer_folds()},
         "rows": [{"event_id": e, "f_a": float(i), "f_b": i / 10, "f_empty": None} for i, e in enumerate(IDS)],
         "model_columns": ["f_a", "f_b", "f_empty"],
         "dictionary_hash": DICT,
@@ -70,10 +79,15 @@ def _sealed(binding=BINDING, dates=None, ends=None):
     }
 
 
+def _sign(receipt):
+    """Set the content hash over every other field, as the walk's receipts carry it."""
+    receipt["content_hash"] = content_hash({k: v for k, v in receipt.items() if k != "content_hash"})
+    return receipt
+
+
 def _receipt(year, spec, event_ids=None, configuration=None):
-    return {"inputs": {"year": year, "sealed_binding": BINDING, "spec_hash": lib.spec_hash(spec)},
-            "event_ids": list(event_ids or EVAL[year]), "configuration": list(configuration or CONFIG[year]),
-            "content_hash": content_hash({"year": year})}
+    return _sign({"inputs": {"year": year, "sealed_binding": BINDING, "spec_hash": lib.spec_hash(spec)},
+                  "event_ids": list(event_ids or EVAL[year]), "configuration": list(configuration or CONFIG[year])})
 
 
 def _run(sealed, spec, years, out):
@@ -311,15 +325,77 @@ def test_admission_refuses_mismatched_raw_receipts_before_any_read_or_fit(monkey
         del receipts["2024"]
     elif case == "binding":
         receipts["2024"]["inputs"]["sealed_binding"] = OTHER
+        _sign(receipts["2024"])
     elif case == "spec_hash":
         receipts["2024"]["inputs"]["spec_hash"] = OTHER
+        _sign(receipts["2024"])
     else:
         receipts["2024"]["event_ids"] = list(reversed(E24))
+        _sign(receipts["2024"])
     calls = _install(monkeypatch, out)
     with pytest.raises(OpsError) as exc:
         arm_s.fit_arm_s(_sealed(), spec, receipts, out)
     assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "raw_receipt_mismatch")
     assert calls == {"labels": [], "fits": []} and not out.exists()
+
+
+@pytest.mark.parametrize("edit", ["configuration", "added_key"])
+def test_receipt_edited_after_hashing_is_a_mismatch_before_any_read_or_fit(monkeypatch, tmp_path, edit):
+    out, spec = tmp_path / "arm", _spec(min_events=1)
+    receipts = {y: _receipt(y, spec) for y in YEARS}
+    if edit == "configuration":
+        receipts["2024"]["configuration"] = [7, 300]
+    else:
+        receipts["2024"]["note"] = "added after hashing"
+    calls = _install(monkeypatch, out)
+    with pytest.raises(OpsError) as exc:
+        arm_s.fit_arm_s(_sealed(), spec, receipts, out)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "raw_receipt_mismatch")
+    assert calls == {"labels": [], "fits": []} and not out.exists()
+
+
+def test_receipts_round_tripped_through_json_are_admitted(monkeypatch, tmp_path):
+    spec, out = _spec(min_events=1), tmp_path / "arm"
+    _install(monkeypatch, out)
+    receipts = json.loads(json.dumps({y: _receipt(y, spec) for y in YEARS}))
+    results = arm_s.fit_arm_s(_sealed(), spec, receipts, out)
+    assert [results[y]["status"] for y in YEARS] == ["ok"] * len(YEARS)
+
+
+def test_plan_grid_mismatch_refuses_before_any_label_read_or_fit(monkeypatch, tmp_path):
+    out, sealed = tmp_path / "arm", _sealed()
+    sealed["plan"]["candidates"] = [c for c in sealed["plan"]["candidates"] if c["candidate_id"] != "h15_1000"]
+    calls = _install(monkeypatch, out)
+    with pytest.raises(OpsError) as exc:
+        _run(sealed, _spec(min_events=1), YEARS, out)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "v14_grid_mismatch")
+    assert calls == {"labels": [], "fits": []} and not out.exists()
+
+
+def _duplicated(sealed):
+    sealed["rows"].append(dict(sealed["rows"][0]))
+    return sealed
+
+
+def test_duplicate_lead_one_row_refuses_on_a_fresh_run_with_no_fit(monkeypatch, tmp_path):
+    out = tmp_path / "arm"
+    calls = _install(monkeypatch, out)
+    with pytest.raises(OpsError) as exc:
+        _run(_duplicated(_sealed()), _spec(min_events=1), ["2023"], out)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "panel_row_duplicate")
+    assert calls["fits"] == [] and not out.exists()
+
+
+def test_duplicate_lead_one_row_refuses_on_a_replay_with_no_fit_and_no_write(monkeypatch, tmp_path):
+    out = tmp_path / "arm"
+    _install(monkeypatch, out)
+    _run(_sealed(), _spec(min_events=1), ["2023"], out)
+    before = _snapshot(out)
+    calls = _install(monkeypatch, out)
+    with pytest.raises(OpsError) as exc:
+        _run(_duplicated(_sealed()), _spec(min_events=1), ["2023"], out)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "panel_row_duplicate")
+    assert calls["fits"] == [] and _snapshot(out) == before
 
 
 def test_infinite_feature_refuses_before_any_fit_and_writes_nothing(monkeypatch, tmp_path):
@@ -352,7 +428,7 @@ def test_real_fit_end_to_end_on_a_synthetic_panel_gives_finite_outputs(monkeypat
             rows.append({"event_id": event_id, "f_a": float(rng.normal()), "f_b": b, "f_empty": None})
             labels[event_id] = 1.0 + abs(b) + 0.5 * float(rng.random())
     sealed = {"context": {"target_events": events}, "rows": rows, "model_columns": ["f_a", "f_b", "f_empty"],
-              "dictionary_hash": DICT, "binding": BINDING}
+              "dictionary_hash": DICT, "binding": BINDING, "plan": {"plan_id": "P1", "candidates": _candidates()}}
     ids = {y: [e["event_id"] for e in events if e["event_date"][:4] == y] for y in ("2022", "2023")}
 
     def folds(_sealed, years):
