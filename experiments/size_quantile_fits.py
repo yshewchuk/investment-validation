@@ -37,9 +37,8 @@ def q_raw(raw):
 
 
 def arm_id(spec, sealed, source, configuration):
-    recipe_for(spec, sealed, configuration, spec["levels"][0])  # admission: refuses unless the fixed grid is bound
-    fixed = spec["grid"]["fixed"]
-    cfg = {"max_leaf_nodes": configuration[0], "min_samples_leaf": configuration[1], **fixed}
+    params = recipe_for(spec, sealed, configuration, spec["levels"][0])["estimator"]["params"]  # admits the recipe
+    cfg = {k: params[k] for k in ("max_leaf_nodes", "min_samples_leaf", *spec["grid"]["fixed"])}
     return content_hash({"source": source, "levels": list(spec["levels"]), "configuration": cfg})
 
 
@@ -85,10 +84,16 @@ def select_configuration(spec, outputs, labels):
     if not pairs:
         raise fail("INVALID_EXPERIMENT_SPEC", "no earlier out-of-sample event has a label",
                    details={"reason": "selection_labels_empty"})
+    try:
+        y = np.asarray([v for _, _, v in pairs], dtype=float)
+    except (TypeError, ValueError):
+        raise _refuse("selection_label_invalid", "a selection label is not a finite number") from None
+    if y.ndim != 1 or not np.isfinite(y).all():
+        raise _refuse("selection_label_invalid", "a selection label is not a finite number")
     losses = {}
     for c in configs:
         rows = np.asarray([out["raw"][_key(c)][i] for out, i, _ in pairs], float).reshape(len(pairs), len(levels))
-        losses[_key(c)] = float(pinball([y for _, _, y in pairs], np.sort(rows, axis=1), levels).mean())
+        losses[_key(c)] = float(pinball(y, np.sort(rows, axis=1), levels).mean())
     winner = min(configs, key=lambda c: (losses[_key(c)], c[0], -c[1]))
     decision("quantile selection", f"configuration={_key(winner)} selection_labels={len(pairs)}")
     return winner, losses

@@ -80,6 +80,15 @@ def test_arm_id_is_hash_of_fitted_payload_and_differs_by_configuration_and_sourc
     assert arm != fits.arm_id(SPEC, sealed, "Q", (7, 300))
 
 
+def test_arm_id_uses_effective_recipe_parameters():
+    sealed = _fit_sealed()
+    fixed = {**SPEC["grid"]["fixed"], "random_state": 0.0, "l2_regularization": 10}
+    spec = {**SPEC, "grid": {**SPEC["grid"], "fixed": fixed}}
+    assert fits.arm_id(spec, sealed, "Q_raw", (7, 300)) == fits.arm_id(SPEC, sealed, "Q_raw", (7, 300))
+    assert fits.recipe_for(spec, sealed, (7, 300), 0.1)["estimator"]["params"] == \
+        fits.recipe_for(SPEC, sealed, (7, 300), 0.1)["estimator"]["params"]
+
+
 AMENDED_FIXED = [
     {"random_state": 1}, {"validation_fraction": 0.2}, {"n_iter_no_change": 5}, {"tol": 1e-3},
     {"early_stopping": False}, {"early_stopping": 1}, {"max_bins": 127}, {"nope": 1},
@@ -157,6 +166,20 @@ def test_selection_ignores_events_without_a_label():
                        "15x300": [[0.0] * 7, [-50.0] * 7], "15x1000": [[0.0] * 7, [-50.0] * 7]}}
     _, losses = fits.select_configuration(SPEC, [receipt], {"e1": 0.0})
     assert losses == pytest.approx({k: 0.0 for k in KEYS})
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), None, "x"])
+def test_non_finite_selection_label_refuses(bad):
+    receipt = _receipt(["e1", "e2"], {k: [1.0, 1.0] for k in KEYS})
+    with pytest.raises(OpsError) as exc:
+        fits.select_configuration(SPEC, [receipt], {"e1": 0.0, "e2": bad})
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "selection_label_invalid")
+
+
+def test_non_finite_label_outside_earlier_outputs_is_ignored():
+    receipt = _receipt(["e1"], {k: [1.0] for k in KEYS})
+    _, losses = fits.select_configuration(SPEC, [receipt], {"e1": 0.0, "zz": float("nan")})
+    assert losses == pytest.approx({k: 0.5 for k in KEYS})
 
 
 def test_fit_fold_real_sklearn_shapes_and_determinism():
