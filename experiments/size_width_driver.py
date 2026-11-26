@@ -255,7 +255,7 @@ def _outer(src, out, loaded):
 
 
 def run(src, stage, out_dir, *, event_ids=None, prereg=size_width_prereg.require_preregistration, f_inputs=None):
-    """Run one stage and write its receipts under ``out_dir``; returns a JSON-safe summary. ``event_ids`` is an optional smoke set; ``f_inputs`` is the F spec's pins."""
+    """Run one stage and write its receipts under ``out_dir``; returns a JSON-safe summary. ``event_ids`` is an optional smoke set; ``f_inputs`` (``size_width_f_select.FInputs``: pins, quote reader, snapshot id) is required iff the spec selects F."""
     started = time.monotonic()
     _log(f"stage={stage} start rss={base._rss_mb():.0f}MB")
     receipt = prereg()
