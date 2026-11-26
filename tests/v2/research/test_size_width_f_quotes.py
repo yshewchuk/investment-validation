@@ -1,19 +1,19 @@
-"""Tests for the F quote adapter (experiments/size_width_f_quotes.py): ladder rows, leg tables, refusals, reader.
+"""Tests for the F quote adapter (experiments/size_width_f_quotes.py): ladder rows, leg tables, admission and refusals.
 
 Synthetic chains feed both the ladder chunk (through a fake index) and F's snapshot; tables are pinned parquet.
 """
 import hashlib
 import json
-from types import SimpleNamespace
+import logging
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from engine.fills import FillModel
-from engine.v2.research import _snapshot
 from experiments import fair_value_fills as fvf
 from experiments import fair_value_inputs as fvi
+from experiments import fair_value_run as fvr
 from experiments import size_pnl_ladder as lad
 from experiments import size_pnl_shortvol as sv
 from experiments import size_width_f_quotes as wf
@@ -190,6 +190,7 @@ def _legs_frame(fq, chunk, legs, *, i=0, at_exit=False):
 
 def _refused(exc, reason):
     assert exc.value.details["reason"] == reason
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 def _rows(spec):
@@ -268,11 +269,24 @@ def test_legs_keep_leg_order_and_feed_structure_entry_and_exit(tmp_path):
     assert any(leg["qty"] == 0 for leg in legs)
     entry = _legs_frame(fq, chunk, legs)
     assert entry["strike"].tolist() == [float(chunk["strike"][leg["idx"]]) for leg in legs]
-    assert fvf.structure_entry(entry[entry["qty"] > 0]).outcome in {"enter", "skip", "undetermined"}
+    res = fvf.structure_entry(entry[entry["qty"] > 0])
+    assert res.outcome == "skip"
+    assert res.skip_reason == "fill_over_fair"
+    assert res.debit_mid == pytest.approx(0.54)
+    assert res.spread_sum == pytest.approx(0.80)
+    assert res.debit_F > res.debit_fair
     exit_ = _legs_frame(fq, chunk, legs, at_exit=True)
     assert fvf.structure_exit(exit_[exit_["qty"] > 0]).outcome == "ok"
     for col in ("repaired", "unknown_bid_size", "unknown_ask_size", "unknown_oi"):
         assert entry[col].dtype == bool and exit_[col].dtype == bool
+    for i, leg in enumerate(legs):
+        idx = leg["idx"]
+        assert entry.loc[i, "right"] == ("P" if chunk["right"][idx] == 0 else "C")
+        assert entry.loc[i, "bid"] == pytest.approx(chunk["bid_e"][idx])
+        assert entry.loc[i, "ask"] == pytest.approx(chunk["ask_e"][idx])
+        assert exit_.loc[i, "right"] == ("P" if chunk["right"][idx] == 0 else "C")
+        assert exit_.loc[i, "bid"] == pytest.approx(chunk["bid_x"][idx])
+        assert exit_.loc[i, "ask"] == pytest.approx(chunk["ask_x"][idx])
 
 
 def test_blanked_entry_quote_with_a_stored_crossed_row_is_not_a_mismatch(tmp_path):
@@ -289,6 +303,15 @@ def test_blanked_entry_quote_with_a_stored_crossed_row_is_not_a_mismatch(tmp_pat
 def test_changed_stored_bid_is_f_quote_mismatch(tmp_path, date, at_exit):
     base = _base(_frames())
     fq, chunk = _setup(tmp_path, _frames(), DEFAULT_PLAN, snap=_set(base, "AAA", date, "P", 100.0, bid=0.95))
+    with pytest.raises(FairValueRefusal) as exc:
+        fq.legs(chunk, 0, [_leg(chunk, 0, "P", 100.0)], exit=at_exit)
+    _refused(exc, "f_quote_mismatch")
+
+
+@pytest.mark.parametrize("date,at_exit", [(ENTRY, False), (EXIT, True)], ids=["entry", "exit"])
+def test_changed_stored_ask_is_f_quote_mismatch(tmp_path, date, at_exit):
+    base = _base(_frames())
+    fq, chunk = _setup(tmp_path, _frames(), DEFAULT_PLAN, snap=_set(base, "AAA", date, "P", 100.0, ask=1.05))
     with pytest.raises(FairValueRefusal) as exc:
         fq.legs(chunk, 0, [_leg(chunk, 0, "P", 100.0)], exit=at_exit)
     _refused(exc, "f_quote_mismatch")
@@ -336,6 +359,88 @@ def test_snapshot_mismatch_is_refused_before_any_read(tmp_path):
     assert calls == []
 
 
+@pytest.mark.parametrize("pins", [{}, None, {"manifest_sha256": "x", "files": None}], ids=["empty", "none", "files-null"])
+def test_malformed_pins_are_refused_before_any_read(tmp_path, pins):
+    calls = []
+    with pytest.raises(FairValueRefusal) as exc:
+        wf.FQuotes(DEFAULT_PLAN, _reader(_base(_frames()), calls), tables_root=tmp_path, pins=pins,
+                   snapshot_id="snap-1", expected_snapshot_id="snap-1", vol_scale=0.01, rate_scale=0.01)
+    _refused(exc, "pins_invalid")
+    assert calls == []
+
+
+BAD_PLANS = [
+    pytest.param(DEFAULT_PLAN.drop(columns="event_id"), id="missing-event_id"),
+    pytest.param(_plan(("E0", "AAA", ENTRY, EXIT), ("E0", "BBB", ENTRY, EXIT)), id="duplicate-event_id"),
+    pytest.param(DEFAULT_PLAN.assign(entry_date=pd.NaT), id="null-entry_date"),
+    pytest.param(DEFAULT_PLAN.assign(exit_date="not a date"), id="unparseable-exit_date"),
+    pytest.param([1, 2], id="not-a-dataframe"),
+]
+
+
+@pytest.mark.parametrize("plan", BAD_PLANS)
+def test_malformed_plan_is_refused_before_any_read(tmp_path, plan):
+    calls = []
+    with pytest.raises(FairValueRefusal) as exc:
+        wf.FQuotes(plan, _reader(_base(_frames()), calls), tables_root=tmp_path,
+                   pins={"manifest_sha256": "0" * 64, "files": {}}, snapshot_id="snap-1",
+                   expected_snapshot_id="snap-1", vol_scale=0.01, rate_scale=0.01)
+    _refused(exc, "plan_invalid")
+    assert calls == []
+
+
+def test_chunk_event_absent_from_the_plan_is_refused_before_any_read(tmp_path):
+    frames, calls = _frames(), []
+    chunk = _chunk(frames, DEFAULT_PLAN)  # two events
+    fq, _ = _setup(tmp_path, frames, _plan(("E0", "AAA", ENTRY, EXIT)), calls=calls)  # plan holds only E0
+    with pytest.raises(FairValueRefusal) as exc:
+        fq.table(chunk)
+    _refused(exc, "plan_invalid")
+    assert calls == []
+
+
+def test_batches_never_split_an_expiry_and_match_the_unbatched_table(tmp_path, monkeypatch, caplog):
+    fq, chunk = _setup(tmp_path, _frames(), DEFAULT_PLAN)
+    unbatched = fq.table(chunk)  # default BATCH_ROWS: one batch
+    spied, real = [], fvf.leg_fills
+
+    def spy(frame, vols):
+        spied.append(frame.copy())
+        return real(frame, vols)
+
+    monkeypatch.setattr(fvf, "leg_fills", spy)
+    monkeypatch.setattr(fvr, "BATCH_ROWS", 1)  # every expiry (82 rows) exceeds the bound: one batch each
+    fq2, chunk2 = _setup(tmp_path, _frames(), DEFAULT_PLAN)
+    caplog.set_level(logging.INFO, logger="size_width_f_quotes")
+    batched = fq2.table(chunk2)
+    assert len(spied) == 2
+    for frame in spied:
+        assert len(frame) == 82 and frame["expiry"].nunique() == 1 and frame["ticker"].nunique() == 1
+    pd.testing.assert_frame_equal(batched, unbatched)
+    assert len([r for r in caplog.records if " batch " in r.getMessage()]) == 2
+
+
+def test_duplicated_listed_rows_are_counted_per_side(tmp_path):
+    base = _base(_frames())
+    entry_row = base[_match(base, "AAA", ENTRY, "P", 100.0)]
+    exit_row = base[_match(base, "AAA", EXIT, "P", 100.0)]
+    snap = pd.concat([base, entry_row, exit_row, exit_row], ignore_index=True)
+    fq, chunk = _setup(tmp_path, _frames(), DEFAULT_PLAN, snap=snap)
+    fq.table(chunk)
+    fq.table(chunk, exit=True)
+    assert fq.counts == {"entry_duplicates": 1, "exit_duplicates": 2}
+
+
+def test_table_hashes_match_the_manifest_and_the_loaded_table_files(tmp_path):
+    fq, chunk = _setup(tmp_path, _frames(), DEFAULT_PLAN)
+    fq.table(chunk)
+    fq.table(chunk, exit=True)
+    pins = _pins(tmp_path / "root")
+    # Entry (Feb 5, 7-day lag reaches Jan 29): quotes and rates for Feb, rates for Jan. Exit (Feb 8, lag Feb 1): Feb only.
+    loaded = ["quotes/year=2024/month=02.parquet", "rates/year=2024/month=01.parquet", "rates/year=2024/month=02.parquet"]
+    assert fq.table_hashes == {"manifest.json": pins["manifest_sha256"], **{r: pins["files"][r] for r in loaded}}
+
+
 def test_an_unpinned_month_is_table_absent(tmp_path):
     frames = _frames(entry="2024-01-29", exit_="2024-02-01")
     plan = _plan(("E0", "AAA", "2024-01-29", "2024-02-01"))
@@ -361,61 +466,6 @@ def test_a_null_strike_in_a_requested_expiry_is_key_value(tmp_path):
     with pytest.raises(FairValueRefusal) as exc:
         fq.table(chunk)
     _refused(exc, "key_value")
-
-
-class _Repo:
-    def __init__(self, columns, listed):
-        self._columns, self._listed = columns, listed
-
-    def table_contract(self, snapshot, table):
-        return SimpleNamespace(columns=[SimpleNamespace(name=c) for c in self._columns])
-
-    def fragment_records(self, snapshot, table):
-        return [SimpleNamespace(partition_key=k) for k in self._listed]
-
-
-EXPIRIES = pd.DataFrame({"ticker": ["AAA", "BBB"], "obs_date": pd.to_datetime(["2024-01-02", "2023-12-29"]),
-                         "expiry": pd.to_datetime(["2024-02-16", "2024-01-19"])})
-
-
-def test_reader_refuses_a_snapshot_without_the_f_columns():
-    repo = _Repo([c for c in fvi.QUOTE_COLUMNS if c != "chain_kind"], ["2024"])
-    with pytest.raises(FairValueRefusal) as exc:
-        wf.option_chain_reader(repo, "snap")
-    _refused(exc, "required_column")
-    assert exc.value.details["columns"] == ["chain_kind"]
-
-
-def test_reader_requests_quote_columns_visits_years_in_manifest_order_and_keeps_requested_rows(monkeypatch):
-    data = {"2024": pd.concat([_one("AAA", "2024-01-02", "P", 100.0, 1.0, 1.2, expiry="2024-02-16"),
-                               _one("AAA", "2024-01-02", "C", 100.0, 1.0, 1.2, expiry="2024-02-16"),
-                               _one("AAA", "2024-01-02", "P", 100.0, 1.0, 1.2, expiry="2024-03-15"),
-                               _one("AAA", "2024-01-03", "P", 100.0, 1.0, 1.2, expiry="2024-02-16")],
-                              ignore_index=True),
-            "2023": pd.concat([_one("BBB", "2023-12-29", "P", 100.0, 1.0, 1.2, expiry="2024-01-19"),
-                               _one("BBB", "2023-12-29", "P", 100.0, 1.0, 1.2, expiry="2024-02-16")],
-                              ignore_index=True)}
-    calls = []
-
-    def fake_read(repository, snapshot, table, columns, partition_keys=None, batch_filter=None, key_filter=()):
-        calls.append((table, list(columns), partition_keys[0]))
-        frame = data.get(partition_keys[0], pd.DataFrame(columns=fvi.QUOTE_COLUMNS))[list(columns)]
-        return batch_filter(frame) if batch_filter else frame
-
-    monkeypatch.setattr(_snapshot, "read_table", fake_read)
-    out = wf.option_chain_reader(_Repo(fvi.QUOTE_COLUMNS, ["2025", "2024", "2023"]), "snap")(EXPIRIES)
-    assert calls == [("option_chains", fvi.QUOTE_COLUMNS, "2024"), ("option_chains", fvi.QUOTE_COLUMNS, "2023")]
-    assert list(out.columns) == fvi.QUOTE_COLUMNS
-    got = sorted(zip(out["ticker"], out["obs_date"].dt.strftime("%Y-%m-%d"),
-                     out["expiry"].dt.strftime("%Y-%m-%d"), out["right"]))
-    assert got == [("AAA", "2024-01-02", "2024-02-16", "C"), ("AAA", "2024-01-02", "2024-02-16", "P"),
-                   ("BBB", "2023-12-29", "2024-01-19", "P")]
-
-
-def test_reader_returns_an_empty_frame_with_the_quote_columns_when_nothing_matches(monkeypatch):
-    monkeypatch.setattr(_snapshot, "read_table", lambda repo, snap, table, columns, **kw: pd.DataFrame(columns=list(columns)))
-    out = wf.option_chain_reader(_Repo(fvi.QUOTE_COLUMNS, ["2024"]), "snap")(EXPIRIES)
-    assert out.empty and list(out.columns) == fvi.QUOTE_COLUMNS
 
 
 def test_table_prices_with_unit_scaled_vol_and_rate(tmp_path):

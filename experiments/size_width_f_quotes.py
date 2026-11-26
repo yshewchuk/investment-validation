@@ -9,6 +9,7 @@ import pandas as pd
 
 from experiments import fair_value_fills as fvf
 from experiments import fair_value_inputs as fvi
+from experiments import fair_value_run as fvr
 from experiments.size_pnl_ladder import _rss_mib
 
 _LOG = logging.getLogger("size_width_f_quotes")
@@ -35,44 +36,43 @@ def ladder_rows(rows, *, entry):
     return rows.iloc[np.sort(order[~drop])].reset_index(drop=True), int(drop.sum())
 
 
-def _triples(frame):
-    return pd.MultiIndex.from_arrays([frame["ticker"].astype(str), pd.to_datetime(frame["obs_date"]),
-                                      pd.to_datetime(frame["expiry"])])
+def _admit(plan, pins):
+    """Refuse malformed pins (pins_invalid) or plans (plan_invalid) before anything is stored or read."""
+    if not (isinstance(pins, dict) and isinstance(pins.get("manifest_sha256"), str) and isinstance(pins.get("files"), dict)):
+        raise fvi.FairValueRefusal("pins_invalid", "pins need a manifest_sha256 string and a files dict")
+    cols = ["event_id", "ticker", "entry_date", "exit_date"]
+    if not isinstance(plan, pd.DataFrame) or any(c not in plan.columns for c in cols):
+        raise fvi.FairValueRefusal("plan_invalid", "plan must be a DataFrame with event_id, ticker, entry_date, exit_date")
+    dates = [pd.to_datetime(plan[c], errors="coerce") for c in ("entry_date", "exit_date")]
+    if plan[cols].isna().any().any() or not plan["event_id"].astype(str).is_unique or any(d.isna().any() for d in dates):
+        raise fvi.FairValueRefusal("plan_invalid", "plan holds a null, a duplicate event_id or a date that does not convert")
 
 
-def option_chain_reader(repository, snapshot):
-    """Return read(expiries): the listed option_chains rows of the requested (ticker, obs_date, expiry) triples."""
-    names = {c.name for c in repository.table_contract(snapshot, "option_chains").columns}
-    missing = [c for c in fvi.QUOTE_COLUMNS if c not in names]
-    if missing:
-        raise fvi.FairValueRefusal("required_column", "the snapshot lacks columns F requires", columns=missing)
-
-    def read(expiries):
-        from engine.v2.research import _chains, _snapshot  # lazy: read_table is looked up at call time
-        wanted = {(str(t), pd.Timestamp(d).normalize()) for t, d in zip(expiries["ticker"], expiries["obs_date"])}
-        tickers, years = {t for t, _ in wanted}, sorted({d.year for _, d in wanted})
-        listed = [r.partition_key for r in repository.fragment_records(snapshot, "option_chains")]
-        order = list(dict.fromkeys([int(p) for p in listed if p in {str(y) for y in years}] + years))
-        pairs, key_filter = _chains._chain_batch_filter(tickers, wanted), _chains._chain_key_filter(tickers, wanted)
-        trip = _triples(expiries)
-
-        def keep(frame):
-            return frame if frame.empty else frame[_triples(frame).isin(trip)]
-
-        parts = [keep(_snapshot.read_table(repository, snapshot, "option_chains", fvi.QUOTE_COLUMNS,
-                                           partition_keys=[str(y)], batch_filter=lambda f: keep(pairs(f)),
-                                           key_filter=key_filter)) for y in order]
-        frames = [part for part in parts if not part.empty]
-        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=fvi.QUOTE_COLUMNS)
-
-    return read
+def _price(rows, vols, side):
+    """leg_fills over whole-expiry batches of fvr.BATCH_ROWS rows (an expiry is never split); input row order kept."""
+    if not len(rows):
+        return fvf.leg_fills(rows, vols)
+    grouped = rows.groupby(_EXPIRY)
+    starts = grouped.size().cumsum().shift(fill_value=0).to_numpy() // fvr.BATCH_ROWS
+    batches, parts, done = rows.groupby(starts[grouped.ngroup().to_numpy()]), [], 0
+    started, total = time.monotonic(), len(rows)
+    for _, part in batches:
+        parts.append(fvf.leg_fills(part, vols))
+        done, elapsed = done + len(part), time.monotonic() - started
+        _LOG.info("F quotes %s batch %d/%d rows %d/%d rows/s=%.0f eta=%.0fs rss=%.0fMiB", side, len(parts), batches.ngroups,
+                  done, total, done / max(elapsed, 1e-9), elapsed / done * (total - done), _rss_mib())
+    return pd.concat(parts).sort_index()
 
 
 class FQuotes:
+    """`read_quotes(expiries)` must return every listed row (fvi.QUOTE_COLUMNS) of each requested (ticker, obs_date,
+    expiry) from the pinned snapshot."""
+
     def __init__(self, plan, read_quotes, *, tables_root, pins, snapshot_id, expected_snapshot_id, vol_scale, rate_scale,
                  rate_rules=None):
         if not (isinstance(snapshot_id, str) and snapshot_id and snapshot_id == expected_snapshot_id):
             raise fvi.FairValueRefusal("snapshot_binding", "snapshot ids are missing or differ")
+        _admit(plan, pins)
         self._plan = plan.set_axis(plan["event_id"].astype(str).to_numpy(), axis=0)
         self._read, self._root, self._pins, self._rules = read_quotes, tables_root, pins, dict(rate_rules or {})
         self._ids, self._scales = (snapshot_id, expected_snapshot_id), (vol_scale, rate_scale)
@@ -88,6 +88,8 @@ class FQuotes:
 
     def _build(self, chunk, side):
         started, events = time.monotonic(), chunk["event_id"]
+        if absent := [str(e) for e in events if str(e) not in self._plan.index]:
+            raise fvi.FairValueRefusal("plan_invalid", "chunk events are absent from the plan", event_ids=absent)
         plan_rows = self._plan.loc[[str(e) for e in events]]
         dates = pd.to_datetime(plan_rows["exit_date" if side == "exit" else "entry_date"]).dt.normalize()
         expiries = pd.DataFrame({"ticker": plan_rows["ticker"].astype(str).to_numpy(), "obs_date": dates.to_numpy(),
@@ -109,7 +111,7 @@ class FQuotes:
                                  rate_scale=self._scales[1], file_sha256={r: self._pins["files"][r] for r in rels}, **self._rules)
         self.table_hashes.update(tables.hashes)
         rows["rate"] = fvi.lookup_rate(rows, tables.rates)
-        priced = fvf.leg_fills(rows, tables.vols)
+        priced = _price(rows, tables.vols, side)
         priced["bid"], priced["ask"] = (pd.to_numeric(rows[c], errors="coerce") for c in ("bid", "ask"))
         priced.index = pd.MultiIndex.from_arrays([priced[c].to_numpy() for c in _KEY])
         without = len(expiries) - len(rows[_EXPIRY].drop_duplicates())
