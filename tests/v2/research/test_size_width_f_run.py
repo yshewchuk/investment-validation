@@ -275,9 +275,17 @@ def test_an_f_run_writes_the_binding_and_the_post_hoc_report(tmp_path, monkeypat
         receipt = receipts.load_receipt(out / "receipts" / f"inputs_{stage}.json")
         assert receipt["fill_model"] == binding
     summary = report.assemble(out, expected=src.expected)
-    assert summary["recommendation"]
-    assert LABEL in (out / "REPORT.md").read_text(encoding="utf-8")
-    assert json.loads((out / "proposed_rule.json").read_text(encoding="utf-8"))["label"] == LABEL
+    # Oracle (guides/size_width_tuning_design.md section 7): an arm passes only if its account return strictly beats
+    # production's in each of 2025, 2023H2 and 2024; "None passing: recommend no change". PLAN has events only in 2024
+    # and 2025, so in 2023H2 neither production nor any arm can trade, no arm can strictly beat production, and the
+    # only correct recommendation is no change.
+    assert set(PLAN["event_date"].dt.year) == {2024, 2025}
+    assert summary["recommendation"] == "no_change"
+    assert json.loads((out / "proposed_rule.json").read_text(encoding="utf-8")) == {
+        "recommendation": "no_change", "rows": [], "label": LABEL}
+    report_text = (out / "REPORT.md").read_text(encoding="utf-8")
+    assert LABEL in report_text
+    assert "Recommendation: no change recommended." in report_text
 
 
 def test_the_taken_rows_pair_f_debits_with_f_proceeds_and_the_account_is_the_f_account(tmp_path, monkeypatch, m0, stubbed):
