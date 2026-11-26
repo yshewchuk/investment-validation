@@ -65,6 +65,7 @@ def test_recipe_for_binds_fixed_grid_quantile_loss_and_signed_domain():
     assert recipe["target_domain"] == "signed"
     assert recipe["prediction_projection"] == "none"
     assert recipe["features"] == ["f_a", "f_b", "f_empty"]
+    assert recipe["feature_dictionary_hash"] == "sha256:" + "a" * 64
 
 
 def test_arm_id_is_hash_of_fitted_payload_and_differs_by_configuration_and_source():
@@ -168,7 +169,7 @@ def test_selection_ignores_events_without_a_label():
     assert losses == pytest.approx({k: 0.0 for k in KEYS})
 
 
-@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), None, "x"])
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), None, "x", True, "3.0", -1.0])
 def test_non_finite_selection_label_refuses(bad):
     receipt = _receipt(["e1", "e2"], {k: [1.0, 1.0] for k in KEYS})
     with pytest.raises(OpsError) as exc:
@@ -180,6 +181,51 @@ def test_non_finite_label_outside_earlier_outputs_is_ignored():
     receipt = _receipt(["e1"], {k: [1.0] for k in KEYS})
     _, losses = fits.select_configuration(SPEC, [receipt], {"e1": 0.0, "zz": float("nan")})
     assert losses == pytest.approx({k: 0.5 for k in KEYS})
+
+
+@pytest.mark.parametrize("bad", [None, "3.0", True, float("nan"), float("inf"), -1.0])
+def test_bad_training_label_refuses_before_any_fit(monkeypatch, bad):
+    training = [*TRAINING[:-1], (TRAINING[-1][0], bad)]
+    calls = _patch_fit(monkeypatch)
+    with pytest.raises(OpsError) as exc:
+        fits.fit_fold(SPEC, _fit_sealed(), training, EVALUATION)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "training_label_invalid")
+    assert calls == []
+
+
+FOLD_ID_CASES = [
+    ([], EVALUATION),
+    (TRAINING, []),
+    ([*TRAINING, TRAINING[0]], EVALUATION),
+    (TRAINING, [*EVALUATION, EVALUATION[0]]),
+    (TRAINING, [*EVALUATION[:-1], TRAINING[0][0]]),
+]
+
+
+@pytest.mark.parametrize("training, evaluation", FOLD_ID_CASES)
+def test_invalid_fold_ids_refuse_before_any_fit(monkeypatch, training, evaluation):
+    calls = _patch_fit(monkeypatch)
+    with pytest.raises(OpsError) as exc:
+        fits.fit_fold(SPEC, _fit_sealed(), training, evaluation)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "fold_inputs_invalid")
+    assert calls == []
+
+
+def test_fit_fold_binds_each_output_to_its_configuration_level_and_row(monkeypatch):
+    def encode(recipe, n):
+        p = recipe["estimator"]["params"]
+        j = LEVELS.index(p["quantile"])
+        return {"predictions": [((p["max_leaf_nodes"] * 10000 + p["min_samples_leaf"]) * 10 + j) * 100 + i
+                                for i in range(n)]}
+
+    _patch_fit(monkeypatch, fit=encode)
+    out = fits.fit_fold(SPEC, _fit_sealed(), TRAINING, EVALUATION)
+    for leaves, leaf in [(7, 300), (7, 1000), (15, 300), (15, 1000)]:
+        rows = out["raw"][f"{leaves}x{leaf}"]
+        assert len(rows) == len(EVALUATION)
+        for i in range(len(EVALUATION)):
+            for j in range(len(LEVELS)):
+                assert rows[i][j] == ((leaves * 10000 + leaf) * 10 + j) * 100 + i, (leaves, leaf, i, j)
 
 
 def test_fit_fold_real_sklearn_shapes_and_determinism():

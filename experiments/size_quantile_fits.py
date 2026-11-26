@@ -4,8 +4,11 @@ caller yet. The year-by-year loop, label reads, `bind_grid` and the fit receipts
 fits also need `size_quantile_prereg.require_preregistration` first. Uses v14's fit path
 (`fit_regression_predictions`: signed domain so raw outputs are not clipped, native NaN, all-empty training columns
 zeroed, one thread). Row masks are v14's: every training pair the caller passes, no feature filter. A `ValueError`
-from a fit propagates: the caller records the fold's arm as `fit_failed` and does not retry."""
+from the fit itself propagates: the caller records the fold's arm as `fit_failed` and does not retry. Input defects
+are typed refusals raised before any fit, so they are not recorded as `fit_failed`."""
 import itertools
+import math
+import numbers
 
 import numpy as np
 
@@ -21,6 +24,13 @@ FIRST_CONFIGURATION = (7, 300)
 
 def _refuse(reason, message):
     return fail("EXPERIMENT_IDENTITY_CONFLICT", f"{reason}: {message}", details={"reason": reason})
+
+
+def _label_array(values, reason):
+    for v in values:
+        if not (isinstance(v, numbers.Real) and not isinstance(v, bool)) or not math.isfinite(v) or v < 0:
+            raise _refuse(reason, "a label is not a finite non-negative number")
+    return np.asarray(values, dtype=float)
 
 
 def _key(c):
@@ -84,12 +94,7 @@ def select_configuration(spec, outputs, labels):
     if not pairs:
         raise fail("INVALID_EXPERIMENT_SPEC", "no earlier out-of-sample event has a label",
                    details={"reason": "selection_labels_empty"})
-    try:
-        y = np.asarray([v for _, _, v in pairs], dtype=float)
-    except (TypeError, ValueError):
-        raise _refuse("selection_label_invalid", "a selection label is not a finite number") from None
-    if y.ndim != 1 or not np.isfinite(y).all():
-        raise _refuse("selection_label_invalid", "a selection label is not a finite number")
+    y = _label_array([v for _, _, v in pairs], "selection_label_invalid")
     losses = {}
     for c in configs:
         rows = np.asarray([out["raw"][_key(c)][i] for out, i, _ in pairs], float).reshape(len(pairs), len(levels))
@@ -107,8 +112,12 @@ def fit_fold(spec, sealed, training, evaluation_ids):
         if len(by_id) != len(sealed["rows"]):
             raise _refuse("panel_row_duplicate", "an event has more than one lead-1 row")
         columns, levels = sealed["model_columns"], list(spec["levels"])
-        train_x = _matrix(by_id, [e for e, _ in training], columns)
-        y = np.asarray([v for _, v in training], dtype=float)
+        training_ids = [e for e, _ in training]
+        ids = set(training_ids) | set(evaluation_ids)
+        if not training_ids or not evaluation_ids or len(ids) != len(training_ids) + len(evaluation_ids):
+            raise _refuse("fold_inputs_invalid", "training and evaluation ids must be non-empty, unique and disjoint")
+        y = _label_array([v for _, v in training], "training_label_invalid")
+        train_x = _matrix(by_id, training_ids, columns)
         eval_x = _matrix(by_id, evaluation_ids, columns)
         configs = configurations(spec)
         progress = Progress("quantile fits", len(configs) * len(levels))
