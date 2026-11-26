@@ -61,7 +61,7 @@ zero_median:
 
 baselines:
   B0: {name: "production forecast + ResidualPool (bar)", rule: "stored tier-4 pred_abs_move; native full-history pool, strictly earlier; quantiles of max(f + err_move, 0) over the exact rows draw samples: forecast bucket, or whole earlier pool when bucket under MIN_POOL; refused draw unscored"}
-  B1: {name: "M0 with v14 band", rule: "size_distribution.v1 residual-ratio band, max(f, 0.05) * Q_q(y / max(pool_f, 0.05)), parity-tested at shared levels; monthly M0 donor pool, labels before the month, full history; v14 quintile buckets of the forecast with the 20-row floor, below which the event is unscored (pool_too_small)"}
+  B1: {name: "M0 with v14 band", rule: "size_distribution.v1 residual-ratio band, max(f, 0.05) * Q_q(y / max(pool_f, 0.05)), parity-tested at shared levels; monthly M0 donor pool, labels before the month, full history; user decision (2026-11-26): the v14 bucket rule: v14 quintile buckets of the forecast with the 20-row floor, below which the event is unscored (pool_too_small)"}
   B2: {name: "option-implied", rule: "panel implied_move times trailing earlier quantiles of y / implied_move: trailing 12 months, at least 500 donors, anchored at month start with labels before it; donors with null, zero, negative or non-finite implied_move dropped and counted; event abstains if its own is invalid"}
   B3: {name: "best v14 point model, own pool", rule: "sealed lead-1 predictions of M3 (v14 MAE winner, per sealed selection record); B0's construction on M3's own strictly earlier residuals (from 2023). If M3 lacks HMOSXLP, lowest inner-MAE HMOSXLP candidate with stored predictions; missing year: not_testable"}
 
