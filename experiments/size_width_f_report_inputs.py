@@ -23,8 +23,8 @@ EXIT_METRICS = ("trades", "exit_fair_mid", "exit_unquoted_worst_case", "exit_neg
 POINT_COLS = ["point", "year", "chain_kind", "metric", "value", "count"]
 FLAG_COLS = ["repaired", "unknown_bid_size", "unknown_ask_size", "unknown_oi", "carry_fallback", "dividend_fallback",
              "dividend_applied"]
-LEG_COLS = ["obs_date", "chain_kind", "status", "source", "clamp_side", *FLAG_COLS, "annIdiv", "annActDiv",
-            "eff_bid", "eff_ask", "fill_buy", "fill_sell"]
+INPUT_COLS = ["chain_kind", "annIdiv", "annActDiv"]
+LEG_COLS = ["obs_date", "status", "source", "clamp_side", *FLAG_COLS, "eff_bid", "eff_ask", "fill_buy", "fill_sell"]
 
 
 def _flag(series):
@@ -53,14 +53,20 @@ def exit_flag_counts(rows):
     return out.sort_values(keys + ["metric"], kind="mergesort", ignore_index=True)
 
 
-def leg_counts(legs, *, point):
+def leg_counts(legs, inputs, *, point):
     """Long frame [point, year, chain_kind, metric, value, count] of F leg rows, each row once: categorical metrics per observed
-    value; count metrics (value "") for every (year, chain_kind) group, zeros included."""
+    value; count metrics (value "") for every (year, chain_kind) group, zeros included. ``legs`` is F's leg table; ``inputs`` is
+    the frame that was priced to make it (quote rows joined with lookup_inputs), same index. A caller holding only FQuotes.legs
+    output cannot supply ``inputs``, so part b takes both where FQuotes prices the rows. Refusals: column_missing (table "legs"
+    or "inputs") and leg_inputs_misaligned."""
     if point not in ("entry", "exit"): raise ValueError(f"point must be 'entry' or 'exit', got {point!r}")
-    missing = [c for c in LEG_COLS if c not in legs.columns]
-    if missing: raise fvi.FairValueRefusal("column_missing", "leg table lacks required columns", columns=missing)
+    for table, frame, cols in (("legs", legs, LEG_COLS), ("inputs", inputs, INPUT_COLS)):
+        missing = [c for c in cols if c not in frame.columns]
+        if missing: raise fvi.FairValueRefusal("column_missing", f"{table} lacks required columns", table=table, columns=missing)
+    if not legs.index.equals(inputs.index):
+        raise fvi.FairValueRefusal("leg_inputs_misaligned", "leg table and priced rows differ in index")
     if len(legs) == 0: return pd.DataFrame(columns=POINT_COLS)
-    legs = legs.reset_index(drop=True)
+    legs = legs.assign(**{c: inputs[c].to_numpy() for c in INPUT_COLS}).reset_index(drop=True)
     year, chain, keys = pd.to_datetime(legs["obs_date"]).dt.year, _text(legs["chain_kind"], "null"), ["year", "chain_kind"]
     parts = [pd.DataFrame({"year": year, "chain_kind": chain, "value": _text(legs[n], null)}).groupby(keys + ["value"]).size()
              .rename("count").reset_index().assign(metric=n)

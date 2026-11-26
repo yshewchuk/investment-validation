@@ -9,17 +9,18 @@ import pandas as pd
 import pytest
 
 from experiments import size_pnl_receipts as receipts
+from experiments import size_width_f_quotes as wf
 from experiments import size_width_f_report_inputs as ri
 from experiments.fair_value_inputs import FairValueRefusal
 from experiments.size_pnl_shortvol import Refusal
 from experiments.size_pnl_straddle import EXIT_UNQUOTED
+from tests.v2.research.test_size_width_f_quotes import DEFAULT_PLAN, _frames, _resolved, _setup
 
 
 def _legs():
-    """Four leg rows: two in 2024 (chain A, one with a null chain_kind), one in 2025 (chain B)."""
+    """Four rows of F's leg table (no chain_kind, annIdiv or annActDiv: see _inputs): three in 2024, one in 2025."""
     return pd.DataFrame({
         "obs_date": ["2024-03-01", "2024-03-01", "2024-03-02", "2025-01-05"],
-        "chain_kind": ["A", "A", None, "B"],
         "status": ["ok", "no_fair_value", "ok", "rate_unknown"],
         "source": ["smvvol", None, "smvvol", "smvvol"],
         "clamp_side": ["none", "low", None, "none"],
@@ -30,12 +31,19 @@ def _legs():
         "carry_fallback": [False, True, False, False],
         "dividend_fallback": [False, False, False, False],
         "dividend_applied": [True, False, False, False],
-        "annIdiv": [0.02, "n/a", 0.03, None],
-        "annActDiv": [0.01, np.nan, 0.02, 0.04],
         "eff_bid": [1.0, 0.5, 2.0, 1.0],
         "eff_ask": [1.2, 0.7, 2.2, 1.0],
         "fill_buy": [1.05, 0.7, np.nan, 0.9],   # mids 1.1, 0.6, 2.1, 1.0
         "fill_sell": [1.15, np.nan, 2.05, 1.2],
+    })
+
+
+def _inputs():
+    """The priced frame's input columns, same index as _legs: chain A (one null chain_kind) in 2024, chain B in 2025."""
+    return pd.DataFrame({
+        "chain_kind": ["A", "A", None, "B"],
+        "annIdiv": [0.02, "n/a", 0.03, None],
+        "annActDiv": [0.01, np.nan, 0.02, 0.04],
     })
 
 
@@ -90,7 +98,7 @@ def _as_dict(frame):
 
 
 def _tables():
-    return {"legs": ri.leg_counts(_legs(), point="entry"), "exits": ri.exit_flag_counts(_rows())}
+    return {"legs": ri.leg_counts(_legs(), _inputs(), point="entry"), "exits": ri.exit_flag_counts(_rows())}
 
 
 def _sha(path):
@@ -113,33 +121,50 @@ def test_exit_flag_counts_of_empty_input_keeps_the_columns():
 
 
 def test_leg_counts_hand_counts_with_null_keys_nan_and_better_than_mid():
-    out = ri.leg_counts(_legs(), point="entry")
+    out = ri.leg_counts(_legs(), _inputs(), point="entry")
     assert set(out["point"]) == {"entry"}
     assert len(out) == len(_leg_want()) == 48
     assert _as_dict(out) == _leg_want()
 
 
-def test_leg_counts_refuses_a_missing_column():
+def test_leg_counts_refuses_a_missing_leg_column():
     with pytest.raises(FairValueRefusal) as caught:
-        ri.leg_counts(_legs().drop(columns=["eff_bid"]), point="entry")
+        ri.leg_counts(_legs().drop(columns=["eff_bid"]), _inputs(), point="entry")
     assert caught.value.details["reason"] == "column_missing"
+    assert caught.value.details["table"] == "legs"
     assert caught.value.details["columns"] == ["eff_bid"]
+
+
+def test_leg_counts_refuses_a_missing_input_column():
+    with pytest.raises(FairValueRefusal) as caught:
+        ri.leg_counts(_legs(), _inputs().drop(columns=["annIdiv"]), point="entry")
+    assert caught.value.details["reason"] == "column_missing"
+    assert caught.value.details["table"] == "inputs"
+    assert caught.value.details["columns"] == ["annIdiv"]
+
+
+def test_leg_counts_refuses_inputs_whose_index_differs_from_the_legs():
+    inputs = _inputs().set_axis([10, 11, 12, 13], axis=0)
+    with pytest.raises(FairValueRefusal) as caught:
+        ri.leg_counts(_legs(), inputs, point="entry")
+    assert caught.value.details["reason"] == "leg_inputs_misaligned"
 
 
 def test_leg_counts_refuses_a_point_other_than_entry_or_exit():
     with pytest.raises(ValueError, match="point"):
-        ri.leg_counts(_legs(), point="entry_leg")
+        ri.leg_counts(_legs(), _inputs(), point="entry_leg")
 
 
 def test_leg_counts_of_empty_input_keeps_the_columns():
-    out = ri.leg_counts(_legs().iloc[0:0], point="exit")
+    out = ri.leg_counts(_legs().iloc[0:0], _inputs().iloc[0:0], point="exit")
     assert out.empty and list(out.columns) == ["point", "year", "chain_kind", "metric", "value", "count"]
 
 
 def test_merging_two_halves_equals_counting_the_whole_leg_table():
-    legs = _legs()
-    merged = ri.merge_counts([ri.leg_counts(legs.iloc[:2], point="entry"), ri.leg_counts(legs.iloc[2:], point="entry")])
-    whole = ri.leg_counts(legs, point="entry")
+    legs, inputs = _legs(), _inputs()
+    merged = ri.merge_counts([ri.leg_counts(legs.iloc[:2], inputs.iloc[:2], point="entry"),
+                              ri.leg_counts(legs.iloc[2:], inputs.iloc[2:], point="entry")])
+    whole = ri.leg_counts(legs, inputs, point="entry")
     pd.testing.assert_frame_equal(merged.reset_index(drop=True), whole.reset_index(drop=True), check_dtype=False)
 
 
@@ -151,7 +176,7 @@ def test_merging_two_halves_equals_counting_the_whole_exit_table():
 
 
 def test_merging_empty_frames_keeps_the_columns_and_an_empty_list_is_refused():
-    empty = ri.leg_counts(_legs().iloc[0:0], point="exit")
+    empty = ri.leg_counts(_legs().iloc[0:0], _inputs().iloc[0:0], point="exit")
     merged = ri.merge_counts([empty, empty])
     assert merged.empty and list(merged.columns) == list(empty.columns)
     with pytest.raises(ValueError):
@@ -181,7 +206,7 @@ def test_changed_table_bytes_refuse_and_leave_the_old_bytes_and_receipt(tmp_path
     first = ri.write(out, "inner", "H", "W", _tables())
     path = out / "report_inputs" / "inner" / "legs.parquet"
     before = path.read_bytes()
-    changed = {"legs": ri.leg_counts(_legs().iloc[:1], point="entry"), "exits": ri.exit_flag_counts(_rows())}
+    changed = {"legs": ri.leg_counts(_legs().iloc[:1], _inputs().iloc[:1], point="entry"), "exits": ri.exit_flag_counts(_rows())}
     with pytest.raises(Refusal) as caught:
         ri.write(out, "inner", "H", "W", changed)
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
@@ -206,3 +231,36 @@ def test_a_bad_stage_or_no_tables_is_refused_before_anything_is_written(tmp_path
     with pytest.raises(ValueError, match="tables"):
         ri.write(out, "inner", "H", "W", {})
     assert not out.exists()
+
+
+def test_leg_counts_of_a_real_priced_table_counts_each_quote_row_once(tmp_path, monkeypatch):
+    priced_in, real = [], wf._price
+
+    def spy(rows, vols, side):
+        priced_in.append(rows.copy())
+        return real(rows, vols, side)
+
+    monkeypatch.setattr(wf, "_price", spy)
+    fq, chunk = _setup(tmp_path, _frames(), DEFAULT_PLAN)
+    priced = fq.table(chunk).reset_index(drop=True)  # F's real entry leg table: two expiries of 82 listed rows
+    (rows,) = priced_in  # the frame F priced: quote rows joined with lookup_inputs, same index
+    assert len(priced) == len(rows) == 164
+    out = ri.leg_counts(priced, rows, point="entry")
+
+    def total(metric):
+        return int(out.loc[out["metric"] == metric, "count"].sum())
+
+    assert total("rows") == len(priced)
+    assert set(rows["chain_kind"]) == {"fetch"}  # hand count: every synthetic quote row is chain_kind "fetch"
+    assert out.loc[out["metric"] == "rows"].groupby("chain_kind")["count"].sum().to_dict() == {"fetch": 164}
+    for metric, col in (("annIdiv_known", "annIdiv"), ("annActDiv_known", "annActDiv")):
+        assert total(metric) == int(np.isfinite(pd.to_numeric(rows[col], errors="coerce")).sum()), metric
+
+
+def test_the_real_leg_table_has_the_leg_columns_and_none_of_the_input_columns(tmp_path):
+    fq, chunk = _setup(tmp_path, _frames(), DEFAULT_PLAN)
+    legs = fq.legs(chunk, 0, _resolved(chunk, 0))
+    for col in ri.LEG_COLS:
+        assert col in legs.columns, col
+    for col in ri.INPUT_COLS:
+        assert col not in legs.columns, col
