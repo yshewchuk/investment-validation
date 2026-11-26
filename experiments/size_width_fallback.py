@@ -6,6 +6,7 @@ import pandas as pd
 
 from engine.structures import BUY
 from experiments import size_pnl_shortvol as sv
+from experiments import size_width_account as account
 from experiments.size_width_band import PHIS, band_range, frozen_bands, rho_ladder, tier
 from experiments.size_width_sweep import TAKEN_COLS, ALPHA, E_ARM, INNER, Sweep, admit_k, in_window, scaled
 from experiments.size_width_tuning import evaluate
@@ -84,7 +85,7 @@ def _trades(sweep, arm_of, window):
     for name in sv.NAMES:
         rows = sweep.rows([(name, arm_of(name))], window)
         if not rows.empty:
-            parts.append(rows.assign(structure=name, ret=rows["exit_value_mid"] / rows["entry_cost"] - 1.0,
+            parts.append(rows.assign(structure=name, ret=rows[account.deciding_columns(rows)[0]] / rows["entry_cost"] - 1.0,
                                      tier=[tier(mcap.get(str(e))) for e in rows["event_id"]]))
     return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=[*TAKEN_COLS, "ret", "tier"])
 
@@ -107,7 +108,7 @@ def recovery(fb, base, window=INNER):
 
 
 def _stats(rows, tag):
-    return {f"{tag}_trades": len(rows), f"{tag}_ret": _mean(rows["ret"]), f"{tag}_pnl": _mean(rows["pnl_dollars_mid"])}
+    return {f"{tag}_trades": len(rows), f"{tag}_ret": _mean(rows["ret"]), f"{tag}_pnl": _mean(rows[account.deciding_columns(rows)[1]])}
 
 
 def t9(fb, base, phi, window):
@@ -133,6 +134,11 @@ def t9(fb, base, phi, window):
 
 
 def accounts(fb, base, windows):
-    """{label: {"fallback", "base"}}: the seven-structure total return with every structure at E_ARM, and the plain Sweep at the same factors."""
-    return {label: {"fallback": evaluate(fb, {n: E_ARM for n in sv.NAMES}, w)["account"]["total_return"],
-                    "base": evaluate(base, fb.factors, w)["account"]["total_return"]} for label, w in windows.items()}
+    """{label: {"fallback", "base"}} total returns (E_ARM everywhere; base at fb.factors); on an F sweep also "f": views and nonpositive_debit."""
+    out, keep = {}, ("views", "nonpositive_debit")
+    for label, w in windows.items():
+        fb_acc, base_acc = evaluate(fb, {n: E_ARM for n in sv.NAMES}, w)["account"], evaluate(base, fb.factors, w)["account"]
+        out[label] = {"fallback": fb_acc["total_return"], "base": base_acc["total_return"]}
+        if fb.f:
+            out[label]["f"] = {"fallback": {k: fb_acc[k] for k in keep if k in fb_acc}, "base": {k: base_acc[k] for k in keep if k in base_acc}}
+    return out

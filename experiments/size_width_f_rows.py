@@ -22,9 +22,8 @@ The taken set is F's and is shared by all views, which decide nothing. ``rung`` 
 ``rung_ladder`` belongs to mid and harsh. A rung-3 leg or an F-unquoted exit (``exit_unquoted_worst_case``) puts primary
 and every sensitivity exit at 0.0; mid and harsh keep the ladder's rung and value. With other fills no column is added.
 
-Not yet done here (W7b2): accounts, objective, fallback, T8 and T9 still read exit_value_mid/pnl_dollars_mid beside the
-F entry_cost, and the ladder (ret_a*, arm E choices' ladder columns) is still priced through the sweep's own instance.
-An F sweep's accounts, T8/T9 and breakeven values are not meaningful until W7b2.
+Accounts, objective, fallback, T8 and T9 read F through size_width_account.deciding_mark / deciding_columns.
+The ladder (ret_a*, arm E's choice ladder) is priced by ``ladder_pricing``, never by the F-loaded copy.
 """
 import pandas as pd
 
@@ -43,6 +42,10 @@ F_COLS = ["rung", "exit_fair_mid", "exit_negative", "entry_cost_mid", "rung_ladd
 
 def is_f(pricing):
     return isinstance(getattr(pricing, "fills", None), FFills)
+
+
+def ladder_pricing(pricing):
+    return seam.PRICING if is_f(pricing) else pricing
 
 
 def _pnl(exit_value, debit):

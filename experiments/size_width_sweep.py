@@ -69,7 +69,7 @@ class Sweep:
         self.taken_cols = _TAKEN + (size_width_f_rows.F_COLS if self.f else [])
         if not self.ks or len(set(self.ks)) != len(self.ks): raise ValueError(f"ks must be non-empty and unique: {self.ks}")
         if not self.names or len(set(self.names)) != len(self.names) or any(n not in sv.NAMES for n in self.names): raise ValueError(f"names must be non-empty, unique and in sv.NAMES: {self.names}")
-        self.scored, self.taken, self.declined = {}, {}, {}
+        self.scored, self.taken, self.declined, self.declined_frames = {}, {}, {}, {}
         self.priced = 0  # events simulated and kept, summed over every month (the smoke scope's refusal reads it)
 
     def add_month(self, chunk, events, pool, *, output, sessions, draws=DRAWS, sims=None):
@@ -111,7 +111,8 @@ class Sweep:
             return
         decided = self.pricing.decide(pd.concat(history, ignore_index=True))
         declined = decided[decided["event_id"].isin(ids) & (decided["structure"] == name) & (decided["status"] != "taken")]
-        self.fresh_declined.append(declined[["event_id", "event_date", "structure", "status", "reason"]].assign(arm=str(arm)))
+        self.declined_frames.setdefault(key, []).append(out := declined[["event_id", "event_date", "structure", "status", "reason"]].assign(arm=str(arm)))
+        self.fresh_declined.append(out)
         reasons = self.declined.setdefault(key, {})
         for reason, count in declined["reason"].fillna("none").value_counts().items():
             reasons[str(reason)] = reasons.get(str(reason), 0) + int(count)
@@ -138,7 +139,7 @@ class Sweep:
         lads = {}
         if self.ladder:
             for a, col in zip(LADDER, RET_COLS):
-                lad = self.pricing.score(chunk, ev, mine, name, a, mid_marks=True, repriced=True)
+                lad = size_width_f_rows.ladder_pricing(self.pricing).score(chunk, ev, mine, name, a, mid_marks=True, repriced=True)
                 lads[a] = lad
                 cost = pd.to_numeric(lad["entry_cost"], errors="coerce")
                 ret = (pd.to_numeric(lad["pnl_per_share"], errors="coerce") / cost).where(cost > 0)

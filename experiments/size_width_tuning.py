@@ -8,6 +8,7 @@ import pandas as pd
 from engine.pnl_sim import DRAWS
 from experiments import size_pnl_receipts as receipts
 from experiments import size_width_account as account
+from experiments import size_width_f_counts
 from experiments.size_pnl_shortvol import NAMES, Refusal
 from experiments.size_width_errmodel import MIN_EVENTS
 from experiments.size_width_sizing import GRID
@@ -27,10 +28,10 @@ def _quarters(window):
 
 
 def unit_score(rows, window):
-    """{"ret", "se", "trades"} of one account over the taken ``rows`` of ``window`` at marks_mid."""
+    """{"ret", "se", "trades"} of one account over the taken ``rows`` of ``window``; deciding marks (F on an F sweep, else marks_mid)."""
     q = account.quarter_returns(rows, _quarters(window))
     se = float(np.std(q, ddof=1) / math.sqrt(len(q))) if len(q) > 1 else 0.0
-    return {"ret": float(account.simulate_account(rows, "mid")["total_return"]), "se": se, "trades": int(len(rows))}
+    return {"ret": float(account.simulate_account(rows, account.deciding_mark(rows))["total_return"]), "se": se, "trades": int(len(rows))}
 
 
 def _pick(scored):
@@ -91,14 +92,17 @@ def e_summary(sweep, window=INNER):
 
 
 def evaluate(sweep, by_structure, window):
-    """Seven-structure $200,000 account at marks_mid and each structure's own account in ``window``; ``by_structure``: structure -> k or E_ARM."""
+    """Seven-structure $200,000 account and each structure's own account in ``window``, at the deciding marks; ``by_structure``: structure -> k or E_ARM."""
     pairs = [(n, by_structure[n] if by_structure[n] == E_ARM else admit_k(by_structure[n])) for n in NAMES]
     per = {}
     for pair in pairs:
         one = sweep.rows([pair], window)
-        per[pair[0]] = {**account.simulate_account(one, "mid"), "trades": int(len(one))}
+        per[pair[0]] = {**account.simulate_account(one, account.deciding_mark(one)), "trades": int(len(one))}
     rows = sweep.rows(pairs, window)
-    return {"account": {**account.simulate_account(rows, "mid"), "trades": int(len(rows))}, "structures": per}
+    result = {"account": {**account.simulate_account(rows, account.deciding_mark(rows)), "trades": int(len(rows))}, "structures": per}
+    if getattr(sweep, "f", False):
+        size_width_f_counts.add(result, sweep, pairs, window)
+    return result
 
 
 def run_inner(sweep, out, inputs_hash):
