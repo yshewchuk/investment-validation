@@ -66,7 +66,7 @@ def _score(sealed, walk, production, labels):
             af = arms[arm]
             y_arm, q = events["y"].reindex(af.index).to_numpy(float), af[QCOLS].to_numpy(float)
             ok, months = af["reason"].isna().to_numpy() & np.isfinite(y_arm), list(af["month"])
-            crps, progress = np.full(len(af), np.nan), Progress(f"stage A CRPS {arm}", len(af))
+            crps, progress = np.full(len(af), np.nan), Progress(f"stage A CRPS {arm}", int(ok.sum()))
             for k in np.flatnonzero(ok):
                 crps[k] = crps_quantile(y_arm[k], *quantile_points(q[k], *pools[(arm, months[k])]))
                 progress.tick()

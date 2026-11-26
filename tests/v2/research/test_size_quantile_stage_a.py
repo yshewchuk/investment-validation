@@ -339,11 +339,24 @@ def test_unsettled_stage_b_refuses_before_any_label_read_or_fit(monkeypatch, tmp
     assert calls == [] and not (tmp_path / "out").exists()
 
 
-def test_years_must_cover_2023_to_2025_and_end_in_2025(monkeypatch, tmp_path):
+def test_spec_changed_after_the_check_refuses_before_any_label_read_or_fit(monkeypatch, tmp_path):
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    calls = _spy(monkeypatch, world)
+    monkeypatch.setattr(stage_a, "load_spec", lambda _path: (SPEC, "sha256:" + "0" * 64))
+    with pytest.raises(OpsError) as exc:
+        _run(world, out, guard)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "spec_changed")
+    assert calls == [] and not out.exists()
+
+
+@pytest.mark.parametrize("years", [
+    ["2023", "2024"], ["2022", "2024", "2025"], ["2023", "2024", "2025", "2026"], ["2023", "2024", 2025],
+    "2023,2024,2025"])
+def test_years_must_cover_2023_to_2025_and_end_in_2025(monkeypatch, tmp_path, years):
     world, guard = _world(), _guard(tmp_path)
     calls = _spy(monkeypatch, world)
     with pytest.raises(OpsError) as exc:
-        _run(world, tmp_path / "out", guard, years=["2023", "2024"])
+        _run(world, tmp_path / "out", guard, years=years)
     assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "stage_a_years_invalid")
     assert calls == [] and not (tmp_path / "out").exists()
 
