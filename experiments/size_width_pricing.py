@@ -71,9 +71,15 @@ def _wire(module, fills):
         return rows
 
     def score(chunk, events, decisions, name, alpha, *, drop_unquoted=False, mid_marks=False, repriced=False):
-        state["exits"] = {}
-        rows = orig_score(chunk, events, decisions, name, alpha, drop_unquoted=drop_unquoted, mid_marks=mid_marks,
-                          repriced=repriced)
+        state["exits"], state["skipped"] = {}, {}
+        try:
+            rows = orig_score(chunk, events, decisions, name, alpha, drop_unquoted=drop_unquoted, mid_marks=mid_marks,
+                              repriced=repriced)
+        except ValueError as err:
+            if state["skipped"]:  # the copy raises right after the first skipped taken event, so this holds exactly that one
+                eid, reason = next(iter(state["skipped"].items()))
+                raise ValueError(f"taken event {eid!r} was skipped by the fill model at re-pricing: {reason}") from err
+            raise
         if not state["exits"] and not fills.exit_flags:
             return rows
         got = [state["exits"].get(eid) for eid in rows["event_id"]]

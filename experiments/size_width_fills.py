@@ -2,7 +2,7 @@
 
 The default is today's marks (EXP-188's own functions, called, never copied). A later PR plugs another model in via
 ``size_width_pricing.load(fills=...)`` without touching the sweep. Rung-3 rows (value 0.0, defined-risk floor) still
-bypass the seam: their exit flags are all False. Strike resolution is a rule of ``score``, not a mark, and stays there.
+bypass the seam: their exit flags are all False. Strike resolution (``size_pnl_shortvol.resolve_priced``, called by both ``score_events`` and ``score``) is not a mark and does not pass through the seam.
 """
 import typing
 

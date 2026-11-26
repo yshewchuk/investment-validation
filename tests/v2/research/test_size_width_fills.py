@@ -5,6 +5,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from engine.forecast_sizing import forecast_params
+from engine.structures import STRUCTURES
 from experiments import size_pnl_decisions as decisions
 from experiments import size_pnl_shortvol as sv
 from experiments import size_width_fills as fills
@@ -13,7 +15,7 @@ from experiments import size_width_tuning as tuning
 from experiments.size_pnl_pool import build_pool
 from experiments.size_pnl_straddle import EXIT_UNQUOTED
 from experiments.size_width_sweep import Sweep
-from tests.v2.research.test_size_pnl_shortvol import _tables, chunk_of, events_for
+from tests.v2.research.test_size_pnl_shortvol import PRED, _tables, chunk_of, events_for
 from tests.v2.research.test_size_width_sweep import DRAW, NAME, _two_months
 
 PERIOD = pd.Period("2024-06", "M")
@@ -226,6 +228,58 @@ def test_a_skip_reaches_the_score_events_row_and_leaves_no_stale_reason():
     fill.unusable = True  # a later call where B's quote is unusable: the earlier skip must not leak into its reason
     later = model.score_events(chunk, events, sims, NAME, alpha=0.5)
     assert later.loc[later["event_id"] == "B", "reason"].iloc[0] == "entry_quote_unusable"
+
+
+def _taken_ab():
+    chunk = chunk_of(("A", {}), ("B", {}))
+    events = events_for("A", "B")
+    sims = _sims(["A", "B"])
+    scored = seam.load().score_events(chunk, events, sims, NAME, alpha=0.5)
+    return chunk, events, sims, scored.loc[scored["status"] == "scored"].assign(status="taken")
+
+
+def test_a_skip_switched_on_after_the_decisions_are_built_is_named_at_repricing():
+    chunk, events, _, taken = _taken_ab()
+    assert set(taken["event_id"]) == {"A", "B"}
+    model = seam.load(fills=SkipB())  # the decisions above were built with no skip; the skip is on for this model only
+    with pytest.raises(ValueError, match="skipped by the fill model at re-pricing: f_not_a_debit") as err:
+        model.score(chunk, events, taken, NAME, 0.5)
+    assert "'B'" in str(err.value)
+
+
+def test_an_unusable_quote_at_repricing_keeps_its_own_message_and_no_skip_reason_leaks():
+    chunk, events, sims, taken = _taken_ab()
+    fill = SkipB()
+    fresh = SkipB()
+    fresh.skip, fresh.unusable = False, True
+    with pytest.raises(ValueError, match="has an unusable entry quote") as err:
+        seam.load(fills=fresh).score(chunk, events, taken, NAME, 0.5)
+    assert "fill model" not in str(err.value)
+
+    model = seam.load(fills=fill)
+    model.score_events(chunk, events, sims, NAME, alpha=0.5)  # skips B: leaves its reason behind
+    fill.skip, fill.unusable = False, True  # B's quote is now unusable, returned as None rather than a Skip
+    with pytest.raises(ValueError, match="has an unusable entry quote") as err:
+        model.score(chunk, events, taken, NAME, 0.5)
+    assert "fill model" not in str(err.value)
+
+
+def test_trade_legs_keep_the_zero_quantity_reference_legs():
+    chunk = chunk_of(("A", {}))
+    events = events_for("A")
+    sims = _sims(["A"])
+    expected, got = {}, {}
+    for name in sv.NAMES:
+        expected[name] = [(leg.name, leg.qty) for leg in STRUCTURES[name](**forecast_params(name, PRED)).legs]
+        rec = Recorder()
+        seam.load(fills=rec).score_events(chunk, events, sims, name, alpha=0.5)
+        assert len(rec.entries) == 1, name
+        got[name] = [(leg["name"], leg["qty"]) for leg in rec.entries[0].legs]
+        assert got[name] == expected[name], name
+    zero = [name for name in sv.NAMES if any(qty == 0 for _, qty in expected[name])]
+    assert zero, "no sized structure has a zero-quantity leg"  # CND-PS: its anchor is a reference leg
+    for name in zero:
+        assert any(qty == 0 for _, qty in got[name]), name
 
 
 class Flagged(fills.CurrentFills):
