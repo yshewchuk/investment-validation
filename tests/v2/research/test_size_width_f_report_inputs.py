@@ -3,6 +3,7 @@
 Synthetic frames only. Expected counts are hand-counted in this file from the fixture rows, never from the module.
 """
 import hashlib
+import os
 
 import numpy as np
 import pandas as pd
@@ -381,3 +382,64 @@ def test_the_real_leg_table_has_the_leg_columns_and_none_of_the_input_columns(tm
         assert col in legs.columns, col
     for col in ri.INPUT_COLS:
         assert col not in legs.columns, col
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="needs symlinks")
+def test_a_symlink_at_the_carried_path_refuses_even_to_a_correct_parquet(tmp_path):
+    out = tmp_path / "out"
+    published = ri.publish(out, "inner", "carried", _rows())
+    final = out / "report_inputs" / "inner" / "carried.parquet"
+    elsewhere = tmp_path / "elsewhere.parquet"
+    os.replace(final, elsewhere)
+    os.symlink(elsewhere, final)
+    assert ri._carried_matches(final, published) is False
+    receipt_path = out / "receipts" / "report_inputs_inner.json"
+    with pytest.raises(Refusal) as caught:
+        ri.write(out, "inner", "H", "W", {"exits": ri.exit_flag_counts(_rows())}, parts={"carried": published})
+    assert caught.value.details["reason"] == "report_input_changed"
+    assert not receipt_path.exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs mkfifo")
+def test_a_fifo_at_the_carried_path_refuses_without_hanging(tmp_path):
+    out = tmp_path / "out"
+    stage = out / "report_inputs" / "inner"
+    stage.mkdir(parents=True)
+    os.mkfifo(stage / "carried.parquet")  # no writer: a blocking open would hang the test
+    part = {"sha256": "0" * 64, "rows": 1, "bytes": 1}
+    assert ri._carried_matches(stage / "carried.parquet", part) is False
+    receipt_path = out / "receipts" / "report_inputs_inner.json"
+    with pytest.raises(Refusal) as caught:
+        ri.write(out, "inner", "H", "W", {"exits": ri.exit_flag_counts(_rows())}, parts={"carried": part})
+    assert caught.value.details["reason"] == "report_input_changed"
+    assert not receipt_path.exists()
+
+
+def test_the_footer_is_read_from_the_same_descriptor_that_was_hashed(tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    published = ri.publish(out, "inner", "carried", _rows())
+    carried = out / "report_inputs" / "inner" / "carried.parquet"
+    alt = ri.publish(tmp_path / "alt", "inner", "carried", _rows().iloc[:1])  # a different parquet: fewer rows, other bytes
+    alt_path = tmp_path / "alt" / "report_inputs" / "inner" / "carried.parquet"
+    assert alt["rows"] != published["rows"] and alt["bytes"] != published["bytes"]
+    real_read_metadata, seen = ri.pq.read_metadata, []
+
+    def replace_then_read(source, *args, **kwargs):
+        os.replace(alt_path, carried)  # the path now names a different file; the hashed descriptor still names the original
+        seen.append(source)
+        return real_read_metadata(source, *args, **kwargs)
+
+    monkeypatch.setattr(ri.pq, "read_metadata", replace_then_read)
+    receipt = ri.write(out, "inner", "H", "W", {"exits": ri.exit_flag_counts(_rows())}, parts={"carried": published})
+    assert len(seen) == 1 and not isinstance(seen[0], (str, bytes, os.PathLike)) and hasattr(seen[0], "read")
+    assert receipt["tables"]["carried"] == published  # the original file's rows, not the replacement's
+    assert receipts.load_receipt(out / "receipts" / "report_inputs_inner.json") == receipt
+
+
+def test_a_carried_part_larger_than_the_size_cap_is_refused(tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    published = ri.publish(out, "inner", "carried", _rows())
+    carried = out / "report_inputs" / "inner" / "carried.parquet"
+    assert ri._carried_matches(carried, published) is True  # control: the cap is not hit at the real size
+    monkeypatch.setattr(ri.decisions, "MAX_DECISIONS_BYTES", published["bytes"] - 1)  # only the carried check sees this cap
+    assert ri._carried_matches(carried, published) is False

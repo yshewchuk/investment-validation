@@ -6,7 +6,9 @@ Schema: ``out/report_inputs/<stage>/<name>.parquet`` (index=False); ``out/receip
 receipt (nothing bound); an exact replay completes it; changed bytes refuse ``report_input_changed`` (old bytes kept); a changed
 receipt body refuses ``tuning_receipt_changed``; files are never replaced; concurrent writers are safe via create-only links.
 """
+import hashlib
 import os
+import stat
 import sys
 import time
 from pathlib import Path
@@ -120,14 +122,28 @@ def publish(out, stage, name, frame):
 
 
 def _carried_matches(path, part):
-    """True only if ``path`` is a regular file whose sha256 and bytes match ``part`` before any parquet parsing, and whose footer row count completes ``part`` exactly."""
-    if not path.is_file(): return False
+    """True only if ``path`` is a regular file whose sha256 and bytes match ``part`` before any parquet parsing, and whose footer row count completes ``part`` exactly.
+    One no-follow, non-blocking, size-capped descriptor serves both the hash and the footer: the path is opened once, so the bytes
+    hashed are the bytes parsed. A missing path, a symlink or a FIFO returns False."""
     try:
-        sha = decisions._file_sha256(path)
-        if sha != part.get("sha256") or path.stat().st_size != part.get("bytes"): return False
-        rows = pq.read_metadata(path).num_rows
-    except (Refusal, pa.ArrowException, OSError): return False
-    return part == {"sha256": sha, "rows": rows, "bytes": path.stat().st_size}
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as handle:
+            st = os.fstat(handle.fileno())
+            if not stat.S_ISREG(st.st_mode) or st.st_size > decisions.MAX_DECISIONS_BYTES or st.st_size != part.get("bytes"): return False
+            digest, total = hashlib.sha256(), 0
+            while True:  # bounded by the cap, whatever fstat reported: never reads past MAX_DECISIONS_BYTES + 1 bytes
+                block = handle.read(min(decisions._HASH_BLOCK, decisions.MAX_DECISIONS_BYTES + 1 - total))
+                if not block: break
+                total += len(block)
+                if total > decisions.MAX_DECISIONS_BYTES: return False
+                digest.update(block)
+            if total != st.st_size: return False
+            sha = digest.hexdigest()
+            if sha != part.get("sha256"): return False  # before any parquet parsing
+            handle.seek(0)
+            rows = pq.read_metadata(handle).num_rows  # the same handle: the footer read is of the bytes that were hashed
+        return part == {"sha256": sha, "rows": rows, "bytes": st.st_size}
+    except (pa.ArrowException, OSError): return False
 
 
 def write(out, stage, inputs_hash, scope, tables, parts=None):
