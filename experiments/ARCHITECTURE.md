@@ -914,8 +914,8 @@ so a large fold is bounded by the child's memory limit. Selection and cutoff rul
 | Missing any outer terminal during collection | `EXPERIMENT_IDENTITY_CONFLICT` before any outer replay; no writes or missing-work launch. |
 | Metric computation refuses | `EXPERIMENT_VARIANT_FAILED` propagates; no successful terminal/report or candidate substitution. |
 
-The `outer-terminal` record binds training lineage by reference only: it carries `inputs_id` (the Merkle hash of the published `outer-inputs` manifest, which includes `training_inputs`) and neither inline `training_inputs` nor per-horizon `training_event_ids` in `fit_diagnostics`, so its size is independent of the training set. `evaluation_inputs` stay inline. Replay loads the manifest for the terminal's `inputs_id` and verifies it by manifest hash before reading any shard; a missing manifest, or one whose hash differs from `inputs_id`, refuses `EXPERIMENT_IDENTITY_CONFLICT` (retryable store errors propagate); no inline fallback, no rewrite. A journal holding an older terminal refuses replay and a new run is required. `collect_outer_results` inventories all outer terminals/limits, admits native inner evidence once per call,
-then verifies every fold's source/evidence bindings through a replay-only internal path. It returns a deterministic
+The `outer-terminal` record binds training lineage by reference only: it carries `inputs_id` (the Merkle hash of the published `outer-inputs` manifest, which includes `training_inputs`) and neither inline `training_inputs` nor per-horizon `training_event_ids` in `fit_diagnostics`, so its size is independent of the training set. `evaluation_inputs` stay inline. Replay loads the manifest for the terminal's `inputs_id` and verifies it by manifest hash before reading any shard; a missing manifest, or one whose hash differs from `inputs_id`, refuses `EXPERIMENT_IDENTITY_CONFLICT` (retryable store errors propagate); no inline fallback, no rewrite. A journal holding an older terminal refuses replay; rerun. `collect_outer_results` inventories all outer terminals/limits, admits native inner evidence once per call,
+then verifies every fold's source/evidence bindings through a replay-only path, returning a deterministic
 read-only aggregate; no admission is cached across calls. Fold/horizon metrics keep complete forecast-target pairs;
 primary RMSE pools event/horizon errors, not fold RMSEs; equal complete
 horizon counts keep event weights equal. The prospective recipe is the
@@ -929,7 +929,7 @@ The evidence helper separately consumes native history admission and research st
 
 ## Magnitude search orchestration
 
-`v2_magnitude_search_run` composes public plan, journal, trial and outer APIs. Separate `seal`, `run` and read-only `collect` commands keep explicit ownership. A distinct driver seal binds plan/ref and full driver source closure. Run and CLI collection
+`v2_magnitude_search_run` composes public plan, journal, trial and outer APIs. Separate `seal`, `run` and read-only `collect` commands exist. A distinct driver seal binds plan/ref and full driver source closure. Run and CLI collection
 require that exact binding. The same pre-work roster check (unfinished claims, premature selections) gates serial and bounded-worker execution; each fit child stays single-threaded (including MLP), preserving request identity and the parent/child memory contract.
 Freeze precedes all selected outer evaluation, with zero fit retries and unchanged winner policy.
 
@@ -983,6 +983,7 @@ EXP-190 (`guides/size_quantile_move_design.md`; uncalled): `size_quantile_prereg
 `size_quantile_walk.fit_walk_forward` write-once `fit_<year>.json`: gap→`years_not_contiguous`; changed/invalid receipt→`fit_receipt_{changed,unreadable}`; memory/oversize-publish→`RESOURCE_LIMIT_EXCEEDED`; fit `ValueError`→`fit_failed`, stops.
 `size_quantile_calibration` (uncalled) calibrates/tails Q, Q_raw: unscored `non_finite_output`/`calibration_burn_in`/`tail_pool_thin`; bad input `ValueError`; memory `RESOURCE_LIMIT_EXCEEDED`.
 `size_quantile_arm_s.fit_arm_s` write-once `arm_s_fit_<year>.json`: `raw_receipt_mismatch`, walk receipt refusals, `RESOURCE_LIMIT_EXCEEDED`; `fit_failed` year continues; `scale_burn_in`.
+`size_quantile_arm_tables`: `scored_share_below_floor`/`period_no_paired_events`/`bootstrap_too_few_groups`→`not_testable`; bad input `ValueError`; `RESOURCE_LIMIT_EXCEEDED`.
 
 ## Fill model F
 
