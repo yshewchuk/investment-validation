@@ -1,22 +1,36 @@
-"""EXP-189 Amendment 1, slice W7d re-cut: spec-driven F selection only; every F run is refused until W7d2 wires F.
+"""EXP-189 Amendment 1, slice W7d2: spec-driven F selection, the F run boundary (open_run), the report check and the run.py F inputs.
 
-Synthetic only: fixture spec dicts and tmp_path spec files, never the real spec.yaml selection, never data/."""
+Synthetic only: fixture spec dicts, tmp_path pinned tables and fake quote readers; never the real spec.yaml selection, never data/."""
 import json
+import sys
+import types
 
 import pytest
 
+from engine import paths
 from experiments import fair_value_inputs as fvi
 from experiments import fair_value_legs as fvl
 from experiments import fair_value_run as fvr
+from experiments import size_pnl_receipts as receipts
+from experiments import size_pnl_shortvol as shortvol
 from experiments import size_width_driver as driver
+from experiments import size_width_f_fills as ff
 from experiments import size_width_f_select as sel
 from experiments import size_width_prereg
 from experiments import size_width_report
 from tests.v2.research import test_size_pnl_driver as pnl
+from tests.v2.research import test_size_width_f_quotes as qt
 from tests.v2.research import test_size_width_prereg as ptest
-from tests.v2.research.test_size_width_run import FAKE, NO_SOURCES, OK, _argv, _install, _run_main
+from tests.v2.research.test_size_width_run import FAKE, NO_SOURCES, OK, _argv, _gates, _install, _run_main
 
 CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
+BINDING_KEYS = {"fill_model_id", "fvf_id", "reingest_manifest_sha256", "every_table_file_sha256", "quote_snapshot_id", "units",
+                "rate_out_of_range", "rate_empty_row", "carry_dividend_mode"}
+
+
+@pytest.fixture(autouse=True)
+def bounded(monkeypatch):
+    monkeypatch.setenv("BOUNDED_RUN_NESTED", "1")
 
 
 def _fill(**changes):
@@ -130,8 +144,34 @@ def test_an_f_amendment_with_a_wrong_fvf_id_refuses_fvf_id_mismatch(tmp_path):
 
 # ---- 3. open_run: the public run boundary --------------------------------------------
 
+def _tables(tmp_path):
+    """The pinned tables under tmp_path/root (the fill's reingest path); returns their pins."""
+    return qt._pins(qt._write(tmp_path, qt._base(qt._frames())))
+
+
+def _full(pins, **changes):
+    """A complete F fill (the spec's fill_model shape) for the pinned tables under ``root``, with ``changes`` applied."""
+    fill = {"id": "F", "fvf_id": fvr.fvf_id(), "carry_dividend_mode": sel.MODE,
+            "rate_rules": {"rate_out_of_range": "missing", "rate_empty_row": "rate_unknown"}, "vol_scale": 0.01, "rate_scale": 0.01,
+            "reingest": {"path": "root", "tool_version": "4", "manifest_sha256": pins["manifest_sha256"], "manifest_units": qt.UNITS}}
+    fill.update(changes)
+    return fill
+
+
+def _inputs(pins, read=None, snapshot_id="snap-1"):
+    return sel.FInputs(pins, read or qt._reader(qt._base(qt._frames())), snapshot_id)
+
+
+def _open(fill, inputs, tmp_path):
+    return sel.open_run(fill, inputs, qt.DEFAULT_PLAN, "snap-1", root=tmp_path)
+
+
 def test_open_run_without_a_selection_is_current_marks():
     assert sel.open_run(None) is None
+
+
+def test_open_run_with_inputs_and_no_selection_refuses_f_inputs_unexpected():
+    _refused("f_inputs_unexpected", lambda: sel.open_run(None, _inputs({"manifest_sha256": "0" * 64, "files": {"a": "0"}})))
 
 
 def test_open_run_refuses_a_non_dict_fill():
@@ -162,49 +202,233 @@ def test_open_run_with_a_wrong_fvf_id_refuses_fvf_id_mismatch():
     _refused("fvf_id_mismatch", lambda: sel.open_run(_fill(fvf_id="0" * 64)))
 
 
-def test_open_run_with_a_valid_f_selection_refuses_f_run_not_wired():
-    _refused("f_run_not_wired", lambda: sel.open_run(_fill()))
+def test_open_run_with_a_valid_f_selection_and_no_inputs_refuses_f_inputs_missing():
+    _refused("f_inputs_missing", lambda: sel.open_run(_fill()))
 
 
-# ---- 4. the driver refuses an F spec before sources or writes ---------------------------
+def test_open_run_with_a_valid_f_selection_returns_the_f_run(tmp_path):
+    pins = _tables(tmp_path)
+    run = _open(_full(pins), _inputs(pins), tmp_path)
+    assert isinstance(run, sel.FRun)
+    assert set(run.binding) == BINDING_KEYS
+    assert run.binding["fill_model_id"] == "F" and run.binding["quote_snapshot_id"] == "snap-1"
+    assert run.binding["every_table_file_sha256"] == dict(sorted(pins["files"].items()))
+    assert run.binding["units"] == {"vol_scale": 0.01, "rate_scale": 0.01, "manifest_units": qt.UNITS}
+    assert run.binding["rate_out_of_range"] == "missing" and run.binding["rate_empty_row"] == "rate_unknown"
+    assert isinstance(run.pricing.fills, ff.FFills)
 
-class _Boom:
-    """Sources whose every attribute raises: an F spec must refuse before any of them is touched."""
 
-    def __getattr__(self, name):
-        raise AssertionError(f"sources.{name} was touched")
+def test_open_run_reads_the_tables_root_from_paths_at_call_time(tmp_path, monkeypatch):
+    pins = _tables(tmp_path)
+    monkeypatch.setattr(paths, "ROOT", tmp_path)
+    assert isinstance(sel.open_run(_full(pins), _inputs(pins), qt.DEFAULT_PLAN, "snap-1"), sel.FRun)
 
 
-@pytest.mark.parametrize("stage", ["inner", "outer"])
-def test_driver_refuses_a_valid_f_spec_before_sources_or_writes(tmp_path, stage):
+def test_a_non_callable_reader_refuses_f_quotes_invalid_before_any_read(tmp_path):
+    pins = _tables(tmp_path)
+    _refused("f_quotes_invalid", lambda: _open(_full(pins), _inputs(pins, read="not callable"), tmp_path))
+
+
+MALFORMED = [
+    pytest.param(lambda f: f.pop("reingest"), id="no-reingest"),
+    pytest.param(lambda f: f.pop("vol_scale"), id="no-vol-scale"),
+    pytest.param(lambda f: f.update(rate_rules={"rate_out_of_range": "bogus", "rate_empty_row": "rate_unknown"}), id="bad-rate-rule"),
+    pytest.param(lambda f: f.update(rate_rules={"rate_out_of_range": "missing"}), id="short-rate-rules"),
+    pytest.param(lambda f: f["reingest"].update(path="/abs/root"), id="absolute-path"),
+    pytest.param(lambda f: f["reingest"].update(path="root/../root"), id="dotdot-path"),
+    pytest.param(lambda f: f["reingest"].update(manifest_sha256="ABC"), id="short-hash"),
+    pytest.param(lambda f: f["reingest"].update(manifest_units=["percent"]), id="units-not-a-dict"),
+]
+
+
+@pytest.mark.parametrize("edit", MALFORMED)
+def test_malformed_fill_refuses_fill_model_invalid_before_any_read(tmp_path, edit):
+    pins, calls = _tables(tmp_path), []
+    fill = _full(pins)
+    edit(fill)
+    _refused("fill_model_invalid", lambda: _open(fill, _inputs(pins, read=qt._reader(qt._base(qt._frames()), calls)), tmp_path))
+    assert calls == []
+
+
+def test_a_carry_and_dividend_mode_other_than_the_registered_one_refuses(tmp_path):
+    pins = _tables(tmp_path)
+    _refused("carry_dividend_mode", lambda: _open(_full(pins, carry_dividend_mode="other"), _inputs(pins), tmp_path))
+
+
+BAD_PINS = [
+    pytest.param({}, id="empty"),
+    pytest.param(None, id="none"),
+    pytest.param({"manifest_sha256": 1, "files": {"a": "0"}}, id="hash-not-a-string"),
+    pytest.param({"manifest_sha256": "0" * 64, "files": {}}, id="no-files"),
+    pytest.param({"manifest_sha256": "0" * 64, "files": {"a": None}}, id="file-hash-not-a-string"),
+]
+
+
+@pytest.mark.parametrize("pins", BAD_PINS)
+def test_malformed_pins_refuse_pins_invalid_before_any_read(tmp_path, pins):
+    _tables(tmp_path)
+    _refused("pins_invalid", lambda: _open(_full({"manifest_sha256": "0" * 64}), _inputs(pins), tmp_path))
+
+
+def test_a_missing_manifest_refuses_manifest_binding(tmp_path):
+    pins = _tables(tmp_path)
+    (tmp_path / "root" / "manifest.json").unlink()
+    _refused("manifest_binding", lambda: _open(_full(pins), _inputs(pins), tmp_path))
+
+
+def test_manifest_units_differing_from_the_spec_refuse_manifest_binding(tmp_path):
+    pins = _tables(tmp_path)
+    fill = _full(pins)
+    fill["reingest"]["manifest_units"] = {**qt.UNITS, "borrow30": "dollars_per_share"}
+    _refused("manifest_binding", lambda: _open(fill, _inputs(pins), tmp_path))
+
+
+def test_a_pins_hash_differing_from_the_fill_refuses_manifest_binding(tmp_path):
+    pins = _tables(tmp_path)
+    _refused("manifest_binding", lambda: _open(_full(pins), _inputs({**pins, "manifest_sha256": "1" * 64}), tmp_path))
+
+
+def test_a_pinned_file_hash_differing_from_the_file_opens_and_refuses_table_hash_at_the_first_load(tmp_path):
+    pins = _tables(tmp_path)
+    files = {**pins["files"], "quotes/year=2024/month=02.parquet": "0" * 64}
+    calls = []
+    run = _open(_full(pins), _inputs({**pins, "files": files}, read=qt._reader(qt._base(qt._frames()), calls)), tmp_path)
+    assert isinstance(run, sel.FRun) and calls == []
+    chunk = qt._chunk(qt._frames(), qt.DEFAULT_PLAN)
+    _refused("table_hash", lambda: run.pricing.fills._quotes.table(chunk))
+
+
+# ---- 4. the report check: an F report reads only inputs that bind F ------------------
+
+def _write_inputs(out, body):
+    (out / "receipts").mkdir(parents=True, exist_ok=True)
+    receipts.write_receipt(out / "receipts" / "inputs_inner.json", body)
+
+
+def test_check_report_is_a_no_op_without_fill_model_and_reads_nothing(tmp_path):
+    sel.check_report({"spec_hash": "SPEC", "spec_hash_checked": True}, tmp_path / "missing")
+
+
+def test_check_report_refuses_an_f_report_whose_inputs_are_missing(tmp_path):
+    with pytest.raises(shortvol.Refusal) as caught:
+        sel.check_report(_f_receipt(), tmp_path)
+    assert caught.value.details["reason"] == "tuning_receipt_missing"
+
+
+@pytest.mark.parametrize("body", [
+    pytest.param({"spec_hash": "SPEC"}, id="non-f-inputs"),
+    pytest.param({"spec_hash": "SPEC", "fill_model": {"fill_model_id": "G"}}, id="fill-id-not-f"),
+    pytest.param({"spec_hash": "OTHER", "fill_model": {"fill_model_id": "F"}}, id="other-spec-hash"),
+])
+def test_check_report_refuses_inputs_that_do_not_bind_f_under_this_registration(tmp_path, body):
+    _write_inputs(tmp_path, body)
+    _refused("f_report_unbound", lambda: sel.check_report(_f_receipt(), tmp_path))
+
+
+def test_check_report_accepts_inputs_bound_to_f_under_this_registration(tmp_path):
+    _write_inputs(tmp_path, {"spec_hash": "SPEC", "fill_model": {"fill_model_id": "F"}})
+    sel.check_report(_f_receipt(), tmp_path)
+
+
+# ---- 5. the driver and run.py refuse an F spec's missing or unexpected inputs --------------
+
+def test_driver_refuses_an_id_g_spec_before_any_write(tmp_path):
     out = tmp_path / "out"
-    _refused("f_run_not_wired", lambda: driver.run(_Boom(), stage, out, prereg=_f_receipt))
+    _refused("fill_model_id", lambda: driver.run(pnl.sources(), "inner", out, prereg=lambda: _f_receipt(_fill(id="G"))))
     assert not out.exists()
 
 
 @pytest.mark.parametrize("stage", ["inner", "outer"])
-def test_driver_refuses_an_id_g_spec_with_fill_model_id_before_sources_or_writes(tmp_path, stage):
+def test_driver_refuses_an_f_spec_without_inputs_before_any_write(tmp_path, stage):
     out = tmp_path / "out"
-    _refused("fill_model_id", lambda: driver.run(_Boom(), stage, out, prereg=lambda: _f_receipt(_fill(id="G"))))
+    _refused("f_inputs_missing", lambda: driver.run(pnl.sources(), stage, out, prereg=_f_receipt))
     assert not out.exists()
 
 
-# ---- 5. run.py refuses an F spec at every stage, before inputs or --sources --------------
+def _pins_file(tmp_path):
+    path = tmp_path / "pins.json"
+    path.write_text(json.dumps({"manifest_sha256": "0" * 64, "files": {"quotes/year=2024/month=02.parquet": "0" * 64}}), encoding="utf-8")
+    return str(path)
 
-@pytest.mark.parametrize("stage", ["inner", "outer", "report"])
-def test_run_py_refuses_a_valid_f_spec_for_every_stage_before_sources_or_inputs(tmp_path, monkeypatch, capsys, stage):
+
+def _quotes_factory(monkeypatch, result, name="exp189_fake_quotes"):
+    module = types.ModuleType(name)
+    module.make = lambda args: result
+    monkeypatch.setitem(sys.modules, name, module)
+    return f"{name}:make"
+
+
+def _quotes_pair():
+    return (qt._reader(qt._base(qt._frames())), "snap-1")
+
+
+@pytest.mark.parametrize("only_pins", [True, False], ids=["pins-only", "quotes-only"])
+def test_run_py_refuses_one_f_flag_without_the_other(tmp_path, monkeypatch, capsys, only_pins):
+    run_py = _run_main()
+    _gates(monkeypatch)
+    _install(monkeypatch, lambda args: pnl.sources())
+    flags = ["--f-pins", _pins_file(tmp_path)] if only_pins else ["--f-quotes", "exp189_fake_quotes:make"]
+    assert run_py.main(_argv(tmp_path, *flags, sources=FAKE)) == 2
+    assert json.loads(capsys.readouterr().out)["reason"] == "f_inputs_incomplete"
+
+
+def test_run_py_refuses_an_f_quotes_factory_that_does_not_resolve(tmp_path, monkeypatch, capsys):
+    run_py = _run_main()
+    _gates(monkeypatch)
+    _install(monkeypatch, lambda args: pnl.sources())
+    assert run_py.main(_argv(tmp_path, "--f-pins", _pins_file(tmp_path), "--f-quotes", "no_such_module_exp189_q:make",
+                             sources=FAKE)) == 2
+    refused = json.loads(capsys.readouterr().out)
+    assert refused["reason"] == "f_quotes_invalid" and refused["refused"] == "INVALID_EXPERIMENT_SPEC"
+
+
+@pytest.mark.parametrize("result", [
+    pytest.param("nope", id="not-a-pair"),
+    pytest.param((lambda expiries: None,), id="one-item"),
+    pytest.param((1, "snap-1"), id="reader-not-callable"),
+])
+def test_run_py_refuses_an_f_quotes_result_that_is_not_a_read_and_snapshot_pair(tmp_path, monkeypatch, capsys, result):
+    run_py = _run_main()
+    _gates(monkeypatch)
+    _install(monkeypatch, lambda args: pnl.sources())
+    quotes = _quotes_factory(monkeypatch, result)
+    assert run_py.main(_argv(tmp_path, "--f-pins", _pins_file(tmp_path), "--f-quotes", quotes, sources=FAKE)) == 2
+    assert json.loads(capsys.readouterr().out)["reason"] == "f_quotes_invalid"
+
+
+@pytest.mark.parametrize("stage", ["inner", "outer"])
+def test_run_py_refuses_an_f_spec_with_no_f_flags_before_any_write(tmp_path, monkeypatch, capsys, stage):
+    run_py = _run_main()
+    monkeypatch.setattr(size_width_prereg, "require_preregistration", _f_receipt)
+    monkeypatch.setenv("BOUNDED_RUN_NESTED", "1")
+    _install(monkeypatch, lambda args: pnl.sources())
+    assert run_py.main(_argv(tmp_path, sources=FAKE, stage=stage)) == 2
+    refused = json.loads(capsys.readouterr().out)
+    assert refused["refused"] == CONFLICT and refused["reason"] == "f_inputs_missing"
+    assert not (tmp_path / "out").exists()
+
+
+def test_run_py_refuses_f_inputs_under_a_spec_that_selects_no_f(tmp_path, monkeypatch, capsys):
+    run_py = _run_main()
+    _gates(monkeypatch)
+    _install(monkeypatch, lambda args: pnl.sources())
+    quotes = _quotes_factory(monkeypatch, _quotes_pair())
+    assert run_py.main(_argv(tmp_path, "--f-pins", _pins_file(tmp_path), "--f-quotes", quotes, sources=FAKE)) == 2
+    refused = json.loads(capsys.readouterr().out)
+    assert refused["refused"] == CONFLICT and refused["reason"] == "f_inputs_unexpected"
+
+
+def test_run_py_report_of_an_f_spec_refuses_when_its_inputs_are_missing(tmp_path, monkeypatch, capsys):
     run_py = _run_main()
     monkeypatch.setattr(size_width_prereg, "require_preregistration", _f_receipt)
     monkeypatch.setenv("BOUNDED_RUN_NESTED", "1")
 
     def boom(out_dir, **kwargs):
-        raise AssertionError("report must not run for an F spec")
+        raise AssertionError("report must not be assembled without inputs that bind F")
 
     monkeypatch.setattr(size_width_report, "assemble", boom)
-    assert run_py.main(_argv(tmp_path, stage=stage, sources=NO_SOURCES)) == 2
-    refused = json.loads(capsys.readouterr().out)
-    assert refused["refused"] == CONFLICT and refused["reason"] == "f_run_not_wired"
-    assert not (tmp_path / "out").exists()
+    assert run_py.main(_argv(tmp_path, sources=NO_SOURCES, stage="report")) == 2
+    assert json.loads(capsys.readouterr().out)["reason"] == "tuning_receipt_missing"
 
 
 # ---- 6. run.py maps the fair-value refusals to a JSON refusal and exit 2 ----------------

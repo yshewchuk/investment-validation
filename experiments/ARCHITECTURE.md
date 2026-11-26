@@ -984,7 +984,7 @@ EXP-190 (`guides/size_quantile_move_design.md`; uncalled): `size_quantile_prereg
 
 ## Fill model F
 
-Uncalled ([design](../guides/fair_value_fill_design.md)). `fair_value_carry` prices; `fair_value_legs` clamps; `fair_value_fills` fills (uses `engine.fills.MIN_MEANINGFUL_COST`; [README](README.md)).
+EXP-189 ([design](../guides/fair_value_fill_design.md)). `fair_value_carry` prices; `fair_value_legs` clamps; `fair_value_fills` fills (uses `engine.fills.MIN_MEANINGFUL_COST`; [README](README.md)).
 
 |Condition|Outcome|
 |-|-|
@@ -998,5 +998,5 @@ Uncalled ([design](../guides/fair_value_fill_design.md)). `fair_value_carry` pri
 |`exit_negative`|kept|
 |Invalid pricer input|NaN|
 |Missing column, duplicate quote/vol key, invalid `right`/`quote_repaired`|`FairValueRefusal` (`EXPERIMENT_IDENTITY_CONFLICT`), no partial output|
-|`fair_value_inputs`/`fair_value_run`/`size_width_f_quotes` check fails|Same|
-|`fair_value_inputs`/`fair_value_run`/`size_width_f_quotes` cap exceeded|`RESOURCE_LIMIT_EXCEEDED`|
+|`fair_value_inputs`/`fair_value_run`/`size_width_f_quotes`/`size_width_f_select` check fails|Same|
+|`fair_value_inputs`/`fair_value_run`/`size_width_f_quotes`/`size_width_f_select` cap exceeded|`RESOURCE_LIMIT_EXCEEDED`|

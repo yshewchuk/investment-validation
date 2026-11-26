@@ -260,8 +260,13 @@ def test_table_is_built_once_per_side_and_rebuilt_for_a_new_chunk(tmp_path):
     fq.table(chunk, exit=True)
     fq.table(chunk, exit=True)
     assert len(calls) == 2 and set(calls[1]["obs_date"]) == {_ts(EXIT)}
-    other = _chunk(frames, DEFAULT_PLAN)
-    assert fq.table(other) is not first
+    other = _chunk(frames, DEFAULT_PLAN)  # a new object with the same events and expiries reuses the tables
+    assert fq.table(other) is first and fq.table(other, exit=True) is not None
+    assert len(calls) == 2
+    subset = _chunk(frames, _plan(("E0", "AAA", ENTRY, EXIT)))  # other events build anew
+    fq.table(subset)
+    assert len(calls) == 3
+    assert fq.table(chunk) is first  # back to the first chunk: no new call
     assert len(calls) == 3
 
 

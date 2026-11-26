@@ -1,6 +1,6 @@
 """EXP-189 driver: the width sweep's inner (2023H2-2024) and outer (2025) stages over EXP-188's inputs (design sections 3-6).
 
-Every sweep is built on ``PRICING``, the one pricing seam. The inner stage holds every quarter chunk in memory (W3's contract:
+Every sweep is built on the run's pricing: ``PRICING`` (current marks), or the F copy an F spec opens. The inner stage holds every quarter chunk in memory (W3's contract:
 the fake and the anchor re-use the months). The outer stage freezes each 2025 month before its labels are read (R6)."""
 import math
 import os
@@ -98,7 +98,7 @@ def _require_priced(sweep, ids, stage):
         raise Refusal(_CONFLICT, "the smoke scope priced no event in any month", {"reason": "smoke_priced_nothing", "stage": stage})
 
 
-def _load(src, stage, ids, receipt):
+def _load(src, stage, ids, receipt, f=None):
     """The loaded run: the M0 table on the stage's plan with its facts and labels, and the inputs body (stage-independent but for the table and plan bindings)."""
     # The scope limits the events priced, never the pool history: history is read and kept whole, and only the plan is scoped.
     roster, bound, _production = base._prepare(src, stage, None)
@@ -139,11 +139,13 @@ def _load(src, stage, ids, receipt):
             "labels": content_hash(base._label_rows([labels])), "scope": base._scope(ids),
             "inner_table": content_hash(sorted([str(i), str(d), float(m), float(c)] for i, d, m, c in zip(inner_table.index, inner_table["event_date"], inner_table["pred_move"], inner_table["pred_crush"]))),
             "inner_plan": content_hash(base._plan_rows(inner_window)), "inner_facts": content_hash(base._facts_rows(survivors, inner_ids))}
+    if f is not None:
+        body["fill_model"] = f.binding
     inputs_hash = content_hash(body)
     inputs = {**body, "inputs_hash": inputs_hash, "table": base._table_binding(ready["M0"], ids),
               "plan": content_hash(base._plan_rows(plan)), "facts": content_hash(base._facts_rows(survivors, stage_ids))}
     return {"ids": ids, "plan": plan, "table": table, "labels": labels, "facts_all": facts_all, "sessions": base._sessions(src),
-            "exits": base._exits(src), "inputs_hash": inputs_hash, "inputs": inputs}
+            "exits": base._exits(src), "inputs_hash": inputs_hash, "inputs": inputs, "pricing": f.pricing if f is not None else PRICING}
 
 
 def _inner(src, out, loaded):
@@ -152,7 +154,7 @@ def _inner(src, out, loaded):
     sessions, inputs_hash = loaded["sessions"], loaded["inputs_hash"]
     months = list(_months(src, plan, base._restrict(table, ids), loaded["facts_all"], loaded["exits"], base.INNER_EMIT_FROM))
     _log(f"materialised months={len(months)}")
-    sweep, started, total = deviation.DeviationSweep(ladder=True, pricing=PRICING, choices=True), time.monotonic(), _total(plan)
+    sweep, started, total = deviation.DeviationSweep(ladder=True, pricing=loaded.get("pricing", PRICING), choices=True), time.monotonic(), _total(plan)
     persisted = []
     for done, (chunk, events, output) in enumerate(months, start=1):
         sweep.add_month(chunk, events, _pool(table, labels, _period(events).start_time), output=output, sessions=sessions)
@@ -170,9 +172,9 @@ def _inner(src, out, loaded):
             raise
         model, c = None, {"status": "smoke_no_fake", "calibration": None}
     else:
-        c = fake.run_fake(months, table, printed, model, sessions, out, inputs_hash, pricing=PRICING)
+        c = fake.run_fake(months, table, printed, model, sessions, out, inputs_hash, pricing=loaded.get("pricing", PRICING))
     _log(f"c_status={c['status']}")
-    anchor = {name: {str(k): v for k, v in row.items()} for name, row in fake.run_anchor(months, table, printed, sessions, pricing=PRICING).items()}
+    anchor = {name: {str(k): v for k, v in row.items()} for name, row in fake.run_anchor(months, table, printed, sessions, pricing=loaded.get("pricing", PRICING)).items()}
     res = tuning.run_inner(sweep, out, inputs_hash)
     results = res["results"]
     by = {"production": {n: 1.0 for n in NAMES}, "A": tuning.factors("A", res["tuned"]["A"]), "B": tuning.factors("B", res["tuned"]["B"]),
@@ -184,7 +186,7 @@ def _inner(src, out, loaded):
     bands = band.build_bands(flex.curves(res["tuned"]["B"], c["body"] if c["status"] == "ok" else None, anchor, tuning.MIN_TRADES))
     band.write_bands(out, bands, inputs_hash)
     flexed = flex.inner(by, ((chunk, events, output, _pool(table, labels, _period(events).start_time)) for chunk, events, output in months),
-                        total, sweep, out, inputs_hash, sessions, PRICING)
+                        total, sweep, out, inputs_hash, sessions, loaded.get("pricing", PRICING))
     body = {"stage": "inner", "inputs_hash": inputs_hash, "scope": base._scope(ids), "smoke": ids is not None, "c_status": c["status"],
             "model": model, "calibration": c.get("calibration"), "anchor": anchor, "results": results, "stats": stats,
             "declined": _declined(sweep), "bands": bands, "t8": deviation.tables(sweep, {"2023-24": INNER}), "flex": flexed,
@@ -209,7 +211,7 @@ def _outer(src, out, loaded):
     """The outer stage: preflight first, then each 2025 month is frozen before its labels are read (R6)."""
     ids, inputs_hash, plan = loaded["ids"], loaded["inputs_hash"], loaded["plan"]
     arms, by, inner = _preflight(out, loaded)
-    sweep, labels, table, sessions = deviation.DeviationSweep(ladder=True, pricing=PRICING, choices=True), loaded["labels"], loaded["table"], loaded["sessions"]
+    sweep, labels, table, sessions = deviation.DeviationSweep(ladder=True, pricing=loaded.get("pricing", PRICING), choices=True), loaded["labels"], loaded["table"], loaded["sessions"]
     total, started, count, fresh_labels, persisted = _total(plan), time.monotonic(), 0, [], []
     read_to = pd.Timestamp(base.OUTER[0])  # every 2025 label of an event dated before read_to has been read
     for count, (chunk, events, output) in enumerate(_months(src, plan, base._restrict(table, ids), loaded["facts_all"], loaded["exits"], pd.Timestamp(base.OUTER[0])), start=1):
@@ -243,7 +245,7 @@ def _outer(src, out, loaded):
     # The fallback pass runs after the 2025 recommendation; phi comes from the inner summary.
     months = ((chunk, events, output, _pool(table, labels, _period(events).start_time))
               for chunk, events, output in _months(src, plan, base._restrict(table, ids), loaded["facts_all"], loaded["exits"], pd.Timestamp(base.OUTER[0])))
-    flexed = flex.outer(by, inner["flex"], rec, months, total, sweep, out, inputs_hash, sessions, PRICING, _stats)
+    flexed = flex.outer(by, inner["flex"], rec, months, total, sweep, out, inputs_hash, sessions, loaded.get("pricing", PRICING), _stats)
     body = {"stage": "outer", "inputs_hash": inputs_hash, "scope": base._scope(ids), "smoke": ids is not None, "arms": arms,
             "results": {label: {"2025": results[label]} for label in results}, "stats": stats, "declined": _declined(sweep),
             "inputs_outer": content_hash(loaded["inputs"]), "labels_2025": content_hash(base._label_rows(fresh_labels)),
@@ -252,12 +254,11 @@ def _outer(src, out, loaded):
     return {"stage": "outer", "arms": arms, "months": count}
 
 
-def run(src, stage, out_dir, *, event_ids=None, prereg=size_width_prereg.require_preregistration):
-    """Run one stage and write its receipts under ``out_dir``; returns a JSON-safe summary. ``event_ids`` is an optional smoke set."""
+def run(src, stage, out_dir, *, event_ids=None, prereg=size_width_prereg.require_preregistration, f_inputs=None):
+    """Run one stage and write its receipts under ``out_dir``; returns a JSON-safe summary. ``event_ids`` is an optional smoke set; ``f_inputs`` is the F spec's pins."""
     started = time.monotonic()
     _log(f"stage={stage} start rss={base._rss_mb():.0f}MB")
     receipt = prereg()
-    size_width_f_select.open_run(receipt.get("fill_model"))  # refuses an F spec before sources, inputs or writes
     base.check_sources(src)
     if os.environ.get("BOUNDED_RUN_NESTED") != "1":
         raise fail("RESOURCE_UNAVAILABLE", "run under tools/bounded_run.py --heavy", details={"reason": "not_bounded"})
@@ -266,7 +267,9 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_width_prereg.require
     out = Path(out_dir)
     ids = base._smoke(src, event_ids)
     _log(f"scope={'smoke' if ids is not None else 'full'} events={'all' if ids is None else len(ids)}")
-    loaded = _load(src, stage, ids, receipt)
+    f = size_width_f_select.open_run(receipt.get("fill_model"), f_inputs, src.plan_frame, src.snapshot_id)  # refuses before any load or write
+    _log(f"fill_model=F fvf_id={f.binding['fvf_id']}" if f is not None else "fill_model=current")
+    loaded = _load(src, stage, ids, receipt, f)
     if stage == "outer":
         _preflight(out, loaded)  # before the receipt: a failed preflight leaves no inputs_outer.json
     out.mkdir(parents=True, exist_ok=True)

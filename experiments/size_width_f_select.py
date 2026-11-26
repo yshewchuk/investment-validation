@@ -1,6 +1,20 @@
-"""EXP-189 A1: the spec selects model F via its one amendment carrying ``fill_model``, id "F" (A1.7 R5, A1.9); F runs are refused until #3001 (F driver wiring and receipt bindings) lands."""
+"""EXP-189 A1: the spec selects model F via its one amendment carrying ``fill_model``, id "F" (A1.7 R5, A1.9). ``open_run`` builds the F run (pricing and receipt binding); ``check_report`` refuses an F report whose inputs do not bind F under this registration."""
+import hashlib
+import json
+import re
+from collections import namedtuple
+from pathlib import Path
+
+from engine import paths
 from experiments import fair_value_inputs as fvi
 from experiments import fair_value_run as fvr
+from experiments import size_pnl_receipts as receipts
+from experiments import size_width_f_fills, size_width_f_quotes, size_width_pricing
+
+MODE = "f7_orats_borrow_discrete_dividend"
+FInputs = namedtuple("FInputs", "pins read_quotes snapshot_id")
+FRun = namedtuple("FRun", "pricing binding")
+_SHA = re.compile(r"[0-9a-f]{64}")
 
 
 def _validate(fill):
@@ -26,9 +40,50 @@ def fill_model(spec):
     return _validate(carriers[0])
 
 
-def open_run(fill):
-    """The public run boundary: None (current marks) for no selection. Every F selection refuses until #3001 wires F."""
+def open_run(fill, inputs=None, plan=None, expected_snapshot_id=None, *, root=None):
+    """The run boundary: None (current marks) with no selection; else the F run's pricing and binding, or a refusal before any read."""
     if fill is None:
+        if inputs is not None: raise fvi.FairValueRefusal("f_inputs_unexpected", "F inputs were given, but the spec selects no F")
         return None
     _validate(fill)
-    raise fvi.FairValueRefusal("f_run_not_wired", "the spec selects F, but F runs are not wired yet; an F spec never runs on current marks")
+    if inputs is None: raise fvi.FairValueRefusal("f_inputs_missing", "the spec selects F: pass its pinned inputs (--f-pins and --f-quotes)")
+    if not callable(inputs.read_quotes): raise fvi.FairValueRefusal("f_quotes_invalid", "read_quotes is not callable")
+    r = fill["reingest"] if isinstance(fill.get("reingest"), dict) else {}
+    rules, pins = fill.get("rate_rules"), inputs.pins
+    if not (all(k in fill for k in ("carry_dividend_mode", "rate_rules", "vol_scale", "rate_scale", "reingest")) and isinstance(rules, dict) and set(rules) == set(fvi.RATE_RULE_VALUES)
+            and all(rules[k] in v for k, v in fvi.RATE_RULE_VALUES.items()) and isinstance(r.get("path"), str) and r.get("path")
+            and not Path(r["path"]).is_absolute() and ".." not in Path(r["path"]).parts and isinstance(r.get("manifest_sha256"), str)
+            and _SHA.fullmatch(r["manifest_sha256"]) and isinstance(r.get("manifest_units"), dict)
+            and all(isinstance(k, str) and isinstance(v, str) for k, v in r["manifest_units"].items())):
+        raise fvi.FairValueRefusal("fill_model_invalid", "fill_model lacks a field, or its rate rules, reingest path, hash or units are malformed")
+    if fill["carry_dividend_mode"] != MODE: raise fvi.FairValueRefusal("carry_dividend_mode", "the carry and dividend mode is not the registered one")
+    if not (isinstance(pins, dict) and isinstance(pins.get("manifest_sha256"), str) and isinstance(pins.get("files"), dict) and pins["files"]
+            and all(isinstance(k, str) and isinstance(v, str) for k, v in pins["files"].items())):
+        raise fvi.FairValueRefusal("pins_invalid", "pins need a manifest_sha256 string and a non-empty str-to-str files dict")
+    tables = Path(paths.ROOT if root is None else root) / r["path"]
+    vol, rate = fvi._unit_scale(fill["vol_scale"], "vol_scale"), fvi._unit_scale(fill["rate_scale"], "rate_scale")
+    blob = fvi._read_capped(tables / "manifest.json", fvi.MAX_MANIFEST_BYTES, "manifest.json") if (tables / "manifest.json").is_file() else b""
+    try:  # an absent or non-object manifest never matches the spec's units
+        units = json.loads(blob).get("units")
+    except (ValueError, AttributeError):
+        units = None
+    if not (hashlib.sha256(blob).hexdigest() == pins["manifest_sha256"] == r["manifest_sha256"] and units == r["manifest_units"]):
+        raise fvi.FairValueRefusal("manifest_binding", "the manifest, the pins, or the reingest hash or units differ")
+    quotes = size_width_f_quotes.FQuotes(plan, inputs.read_quotes, tables_root=tables, pins=pins, snapshot_id=inputs.snapshot_id,
+                                         expected_snapshot_id=expected_snapshot_id, vol_scale=vol, rate_scale=rate, rate_rules=rules)
+    binding = {"fill_model_id": "F", "fvf_id": fill["fvf_id"], "reingest_manifest_sha256": r["manifest_sha256"],
+               "every_table_file_sha256": dict(sorted(pins["files"].items())), "quote_snapshot_id": inputs.snapshot_id,
+               "units": {"vol_scale": vol, "rate_scale": rate, "manifest_units": r["manifest_units"]},
+               "rate_out_of_range": rules["rate_out_of_range"], "rate_empty_row": rules["rate_empty_row"],
+               "carry_dividend_mode": fill["carry_dividend_mode"]}
+    return FRun(size_width_pricing.load(fills=size_width_f_fills.FFills(quotes)), binding)
+
+
+def check_report(receipt, out_dir):
+    """An F spec's report reads only an out-dir whose inputs bind F under this registration (A1.7 R5)."""
+    if receipt.get("fill_model") is None: return
+    _validate(receipt["fill_model"])
+    inputs = receipts.load_receipt(Path(out_dir) / "receipts" / "inputs_inner.json")
+    if not (isinstance(inputs.get("fill_model"), dict) and inputs["fill_model"].get("fill_model_id") == "F"
+            and inputs.get("spec_hash") == receipt.get("spec_hash")):
+        raise fvi.FairValueRefusal("f_report_unbound", "the out-dir's inputs do not bind F under this registration")

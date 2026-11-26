@@ -77,10 +77,14 @@ class FQuotes:
         self._read, self._root, self._pins, self._rules = read_quotes, tables_root, pins, dict(rate_rules or {})
         self._ids, self._scales = (snapshot_id, expected_snapshot_id), (vol_scale, rate_scale)
         self.counts, self.table_hashes, self._chunk, self._tables = Counter(), {}, None, {}
+        self._built = {}
 
     def table(self, chunk, *, exit=False):
+        """Built once per (quarter chunk, side) and kept for the run (A1.7 R2)."""
         if chunk is not self._chunk:
-            self._chunk, self._tables = chunk, {}
+            self._chunk = chunk
+            key = (tuple(str(e) for e in chunk["event_id"]), tuple(str(x) for x in chunk["expiry"]))
+            self._tables = self._built.setdefault(key, {})
         side = "exit" if exit else "entry"
         if side not in self._tables:
             self._tables[side] = self._build(chunk, side)
