@@ -514,6 +514,27 @@ def test_a_null_strike_in_a_requested_expiry_is_key_value(tmp_path):
     _refused(exc, "key_value")
 
 
+@pytest.mark.parametrize("column", ["bid", "ask", "ticker", "obs_date", "expiry", "right", "strike", "iv"])
+def test_a_quote_column_absent_from_the_read_is_refused_before_pricing(tmp_path, column):
+    frames = _frames()
+    read = _reader(_base(frames))
+    fq, chunk = _setup(tmp_path, frames, DEFAULT_PLAN, read=lambda expiries: read(expiries).drop(columns=column))
+    with pytest.raises(FairValueRefusal) as exc:
+        fq.table(chunk)
+    _refused(exc, "required_column")
+    assert exc.value.details["columns"] == [column]
+
+
+def test_an_exit_quote_column_absent_from_the_read_is_refused_before_pricing(tmp_path):
+    frames = _frames()
+    read = _reader(_base(frames))
+    fq, chunk = _setup(tmp_path, frames, DEFAULT_PLAN, read=lambda expiries: read(expiries).drop(columns="bid"))
+    with pytest.raises(FairValueRefusal) as exc:
+        fq.table(chunk, exit=True)
+    _refused(exc, "required_column")
+    assert exc.value.details["columns"] == ["bid"]
+
+
 def test_table_prices_with_unit_scaled_vol_and_rate(tmp_path):
     frames = _frames()
     fq, chunk = _setup(tmp_path, frames, DEFAULT_PLAN)  # pinned vols 25.0 and rates 5.0 / 4.0 percent, scaled by 0.01
