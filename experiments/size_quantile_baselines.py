@@ -16,6 +16,7 @@ from experiments.size_pnl_pool import build_pool
 from experiments.size_quantile_metrics import Rules
 
 BUCKETS = 10  # ResidualPool's default bucket count, as build_pool uses it
+LEVELS = Rules().levels
 _EXTRA = ["bucket", "fallback", "n_rows", "reason"]
 
 
@@ -26,12 +27,12 @@ class _EveryRow:
         return np.arange(low, high)
 
 
-def _score(pool, pred, cutoff, forecast, levels, cache):
+def _score(pool, pred, cutoff, forecast, cache):
     """(quantiles, bucket, fallback, n_rows, reason) for one event; reason is None when scored.
 
     ``cache`` maps end -> (edges, counts), where counts is the per-bucket donor count for pred[:end].
     """
-    blank = np.full(len(levels), np.nan)
+    blank = np.full(len(LEVELS), np.nan)
     if not np.isfinite(forecast):
         return blank, np.nan, False, 0, "forecast_missing"
     move, _ = pool.draw(cutoff, forecast, 0, _EveryRow())
@@ -48,14 +49,14 @@ def _score(pool, pred, cutoff, forecast, levels, cache):
     fallback = members < MIN_POOL
     if move.size != (end if fallback else members):
         raise RuntimeError("B0 bucket labels disagree with ResidualPool.draw")
-    quant = np.quantile(np.maximum(forecast + move, 0.0), levels)
+    quant = np.quantile(np.maximum(forecast + move, 0.0), LEVELS)
     reason = None
     if not np.isfinite(quant).all():
         quant, reason = blank, "non_finite_output"
     return quant, float(bucket), bool(fallback), int(move.size), reason
 
 
-def pool_quantiles(table, labels, events, *, levels=Rules().levels, name="B0"):
+def pool_quantiles(table, labels, events, *, name="B0"):
     """Per-event quantile forecast of ``events`` from the earlier donors in ``table`` and ``labels``.
 
     Returns a frame indexed like ``events`` with one column per level (q10, q25, ...), then bucket, fallback,
@@ -68,7 +69,7 @@ def pool_quantiles(table, labels, events, *, levels=Rules().levels, name="B0"):
     if dates.isna().any():
         raise ValueError("events event_date must not be null")
     forecasts = [np.nan if v is None else float(v) for v in events["pred_move"]]
-    cols = [f"q{round(a * 100)}" for a in levels] + _EXTRA
+    cols = [f"q{round(a * 100)}" for a in LEVELS] + _EXTRA
     rows, reasons, counts, fallbacks = [], [], Counter(), 0
     with stage(f"quantile {name}"):
         pool = build_pool(table, labels, floor=None)
@@ -76,7 +77,7 @@ def pool_quantiles(table, labels, events, *, levels=Rules().levels, name="B0"):
         cache = {}
         progress = Progress(f"quantile {name}", len(events))
         for cutoff, forecast in zip(dates, forecasts):
-            quant, bucket, fallback, n_rows, reason = _score(pool, pred, cutoff, forecast, levels, cache)
+            quant, bucket, fallback, n_rows, reason = _score(pool, pred, cutoff, forecast, cache)
             rows.append([*quant, bucket, fallback, n_rows])
             reasons.append(reason)
             counts[reason or "scored"] += 1
