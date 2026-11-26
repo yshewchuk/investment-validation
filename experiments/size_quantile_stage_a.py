@@ -67,7 +67,7 @@ def _score(sealed, walk, production, labels):
             y_arm, q = events["y"].reindex(af.index).to_numpy(float), af[QCOLS].to_numpy(float)
             ok, months = af["reason"].isna().to_numpy() & np.isfinite(y_arm), list(af["month"])
             crps, progress = np.full(len(af), np.nan), Progress(f"stage A CRPS {arm}", int(ok.sum()))
-            for k in np.flatnonzero(ok):
+            for k in np.flatnonzero(ok):  # ok also selects L history; a tail_pool_thin event is unscored (s4, #3042)
                 crps[k] = crps_quantile(y_arm[k], *quantile_points(q[k], *pools[(arm, months[k])]))
                 progress.tick()
             history = pd.DataFrame({"q50": q[ok, 3], "y": y_arm[ok], "label_available": (pd.to_datetime(

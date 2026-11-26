@@ -176,17 +176,17 @@ def _why(doc):
     return "\n".join(lines)
 
 
-def _oracle_mean_crps(world, quarter):
-    """Mean CRPS over the quarter's events, from the design rule alone (no production helper).
-    quantiles[0], [3], [6] are the event's q10, q50, q90."""
-    grid = (np.arange(20000) + 0.5) / 20000
+def _true_quantiles(world, event_id):
+    """The event's true quantiles at LEVELS, from its mu and s, floored at zero."""
+    return np.maximum(world["mu"][event_id] + world["s"][event_id] * np.array(Z), 0.0)
+
+
+def _donor_pools(world):
+    """Returns donor_pools(month) -> (hi, lo), from the design rule alone. Donors are events dated in
+    [M - 12 months, M), dated >= 2022-01-01, with label_end + 1 day < M. hi holds the donors with y > true q90
+    and lo those with y < true q10, each scaled by its true band width (at least 0.5)."""
     dated = [(date.fromisoformat(e["date"]), date.fromisoformat(e["label_end"]) + timedelta(days=1), e["id"])
              for e in world["events"]]
-    z = np.array(Z)
-
-    def quantiles(event_id):
-        return np.maximum(world["mu"][event_id] + world["s"][event_id] * z, 0.0)
-
     pools = {}
 
     def donor_pools(month):
@@ -196,7 +196,7 @@ def _oracle_mean_crps(world, quarter):
             for day, ready, event_id in dated:
                 if not (start <= day < month and day >= date(2022, 1, 1) and ready < month):
                     continue
-                q, y = quantiles(event_id), world["y"][event_id]
+                q, y = _true_quantiles(world, event_id), world["y"][event_id]
                 if y > q[6]:
                     hi.append((y - q[6]) / max(q[6] - q[3], 0.5))
                 if y < q[0]:
@@ -204,11 +204,19 @@ def _oracle_mean_crps(world, quarter):
             pools[month] = (np.array(hi), np.array(lo))
         return pools[month]
 
+    return donor_pools
+
+
+def _oracle_mean_crps(world, quarter):
+    """Mean CRPS over the quarter's events, from the design rule alone (no production helper).
+    quantiles[0], [3], [6] are the event's q10, q50, q90."""
+    grid = (np.arange(20000) + 0.5) / 20000
+    donor_pools = _donor_pools(world)
     scores = []
     for event in quarter:
         month = date.fromisoformat(event["date"]).replace(day=1)
         hi, lo = donor_pools(month)
-        q = quantiles(event["id"])
+        q = _true_quantiles(world, event["id"])
         q10, q50, q90 = q[0], q[3], q[6]
         upper = q90 + max(q90 - q50, 0.5) * np.quantile(hi, np.clip((grid - 0.9) / 0.1, 0.0, 1.0))
         lower = np.maximum(0.0, q10 + max(q50 - q10, 0.5) * np.quantile(lo, np.clip(grid / 0.1, 0.0, 1.0)))
@@ -295,6 +303,38 @@ def test_q_raw_quarter_crps_matches_an_independent_oracle(full_run):
     row = next(t for t in doc["arms"]["Q_raw"]["tables"] if t["slice"] == "quarter" and t["label"] == "2024Q2")
     assert row["n"] == len(quarter)
     assert row["crps"] == pytest.approx(_oracle_mean_crps(world, quarter), rel=1e-3)
+
+
+def test_history_is_the_arms_own_scored_out_of_sample_rows(monkeypatch, tmp_path):
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    _install(monkeypatch, world)
+    judged, real_judge = {}, stage_a.judge_arm
+
+    def recording(*args, **kwargs):
+        judged[args[0]] = args[4].copy()
+        return real_judge(*args, **kwargs)
+    monkeypatch.setattr(stage_a, "judge_arm", recording)
+    _run(world, out, guard)
+
+    donor_pools = _donor_pools(world)
+    months = [date(year, month, 1) for year in range(2022, 2026) for month in range(1, 13)]
+    scored = set()
+    for month in months:
+        hi, lo = donor_pools(month)
+        if len(hi) >= 50 and len(lo) >= 50:
+            scored.add(month)
+    assert any(m.year == 2022 and m not in scored for m in months)
+    assert all(m in scored for m in months if m.year == 2025)
+    window = [e for e in world["events"] if "2022-01-01" <= e["date"] <= "2025-12-31"]
+    expected = [e for e in window if date.fromisoformat(e["date"]).replace(day=1) in scored]
+    history = judged["Q_raw"]
+    assert len(history) == len(expected) < len(window)
+    got_pairs = sorted(zip(history["q50"].tolist(), history["y"].tolist()))
+    want_pairs = sorted((max(world["mu"][e["id"]], 0.0), world["y"][e["id"]]) for e in expected)
+    np.testing.assert_allclose(np.array(got_pairs), np.array(want_pairs))
+    got_available = sorted(pd.to_datetime(history["label_available"]))
+    want_available = sorted(pd.Timestamp(e["date"]) + pd.Timedelta(days=2) for e in expected)
+    assert got_available == want_available
 
 
 def test_replay_is_identical_and_a_changed_binding_refuses_without_touching_the_report(monkeypatch, tmp_path):
