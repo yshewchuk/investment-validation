@@ -76,13 +76,16 @@ def _atomic_json(path: Path, obj) -> None:
     _atomic(path, lambda t: t.write_text(text, encoding="utf-8"))
 
 
+def _rss_mb() -> float:
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+
+
 @contextmanager
 def _stage(name: str):
     LOG.info("[smvvol] %s start", name)
     t0 = time.monotonic()
     yield
-    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
-    LOG.info("[smvvol] %s end: %.1f s, rss %.0f MB", name, time.monotonic() - t0, rss)
+    LOG.info("[smvvol] %s end: %.1f s, rss %.0f MB", name, time.monotonic() - t0, _rss_mb())
 
 
 def _eta(done: int, total: int, start: float) -> float:
@@ -212,6 +215,24 @@ def shard_stage(entries: list, work: Path) -> tuple:
     return markers, counts
 
 
+def _read_shards(work: Path, table: str, month: str, entry_keys: list, markers: dict) -> list:
+    shards, total = [], len(entry_keys)
+    start = last = time.monotonic()
+    for done, k in enumerate(entry_keys, 1):
+        path = work / "shards" / table / month / f"{k}.parquet"
+        blob = _shard_bytes(path)
+        if hashlib.sha256(blob).hexdigest() != markers[table][k]["months"][month]:
+            raise ValueError(f"shard {path} changed after it was written")
+        shards.append(pd.read_parquet(io.BytesIO(blob)))
+        now = time.monotonic()
+        if now - last >= PROGRESS_S:
+            last = now
+            rate = done / max(now - start, 1e-9)
+            LOG.info("[smvvol] merge %s %s: shards %d/%d, %.1f shards/s, ETA %.0f s, rss %.0f MB",
+                     table, month, done, total, rate, _eta(done, total, start), _rss_mb())
+    return shards
+
+
 def merge_stage(work: Path, out: Path, markers: dict) -> dict:
     result = {}
     for table in TABLES:
@@ -227,14 +248,10 @@ def merge_stage(work: Path, out: Path, markers: dict) -> dict:
         non_null = Counter(dict.fromkeys(values, 0))
         start = time.monotonic()
         for done, (month, entry_keys) in enumerate(sorted(index.items()), 1):
-            shards = []
-            for k in entry_keys:
-                path = work / "shards" / table / month / f"{k}.parquet"
-                blob = _shard_bytes(path)
-                if hashlib.sha256(blob).hexdigest() != markers[table][k]["months"][month]:
-                    raise ValueError(f"shard {path} changed after it was written")
-                shards.append(pd.read_parquet(io.BytesIO(blob)))
+            shards = _read_shards(work, table, month, entry_keys, markers)
             df = pd.concat(shards, ignore_index=True)
+            LOG.info("[smvvol] merge %s %s: dedupe %d rows, rss %.0f MB",
+                     table, month, len(df), _rss_mb())
             nc_cols = [*keys, *(v for v in values if v not in CARRY)]
             conflicts = (df[nc_cols].drop_duplicates().groupby(keys, sort=False).size() > 1).sum()
             conflicts_all = conflicts if len(nc_cols) == len(cols) else (
@@ -246,9 +263,10 @@ def merge_stage(work: Path, out: Path, markers: dict) -> dict:
             totals.update({"rows_out": len(final), "conflicting_keys": int(conflicts),
                            "conflicting_keys_all_columns": int(conflicts_all)})
             non_null.update({v: int(final[v].notna().sum()) for v in values})
-            LOG.info("[smvvol] merge %s %s: %d/%d months, rows_out %d, %.1f months/s, ETA %.0f s",
+            LOG.info("[smvvol] merge %s %s: %d/%d months, rows_out %d, %.1f months/s, ETA %.0f s, rss %.0f MB",
                      table, month, done, len(index), len(final),
-                     done / max(time.monotonic() - start, 1e-9), _eta(done, len(index), start))
+                     done / max(time.monotonic() - start, 1e-9), _eta(done, len(index), start),
+                     _rss_mb())
         result[table] = {**totals, "non_null": dict(non_null)}
     return result
 

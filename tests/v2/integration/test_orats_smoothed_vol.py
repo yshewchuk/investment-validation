@@ -539,3 +539,18 @@ def test_rates_conflicts_accumulate_across_months(tmp_path):
     assert rates_m["non_null"]["iRate5wk"] == 2
     assert rates_m["non_null"]["iRateLt"] == 2
     assert rates_m["non_null"]["borrow30"] == 0
+    for month in ("01", "02"):
+        rf = pd.read_parquet(out / "rates" / "year=2025" / f"month={month}.parquet")
+        assert rf["iRate5wk"].tolist() == [0.05]
+
+
+def test_merge_heartbeat(tmp_path, monkeypatch, caplog):
+    raw = _world(tmp_path)
+    out = tmp_path / "out"
+    monkeypatch.setattr(tool, "PROGRESS_S", 0.0)
+    caplog.set_level("INFO", logger="smvvol")
+    assert tool.main(_args(raw, out, tmp_path / "work")) == 0
+    assert "merge quotes 2025-01: shards 1/" in caplog.text
+    assert "shards/s" in caplog.text
+    assert "dedupe " in caplog.text
+    assert "rss " in caplog.text
