@@ -10,12 +10,14 @@ import pandas as pd
 from experiments import fair_value_fills as fvf
 from experiments import fair_value_inputs as fvi
 from experiments import fair_value_run as fvr
+from experiments import size_width_f_report_inputs as ri
 from experiments.size_pnl_ladder import _rss_mib
 
 _LOG = logging.getLogger("size_width_f_quotes")
 _EXPIRY = ["ticker", "obs_date", "expiry"]
 _KEY = _EXPIRY + ["right", "strike"]
 _LEG_COLS = fvf.OUT_COLUMNS + fvf.FILL_COLUMNS + ["bid", "ask"]
+RAW_COLS = ["open_interest", "bid_size", "ask_size", "chain_kind", "assetType", "spot"]  # quote and carry fields kept for the report inputs
 MAX_QUOTE_ROWS = 5_000_000  # per chunk side; read at call time
 
 
@@ -86,6 +88,7 @@ class FQuotes:
         self._ids, self._scales = (snapshot_id, expected_snapshot_id), (vol_scale, rate_scale)
         self.counts, self.table_hashes, self._chunk, self._tables = Counter(), {}, None, {}
         self._built = {}
+        self.coverage = []
 
     def table(self, chunk, *, exit=False):
         """Built once per (quarter chunk, side) and kept for the run (A1.7 R2)."""
@@ -125,7 +128,10 @@ class FQuotes:
         tables = fvi.load_tables(self._root, manifest_sha256=self._pins["manifest_sha256"], vol_scale=self._scales[0],
                                  rate_scale=self._scales[1], file_sha256={r: self._pins["files"][r] for r in rels}, **self._rules)
         self.table_hashes.update(tables.hashes)
-        priced = _price(rows.join(fvi.lookup_inputs(rows, tables.rates)), tables.vols, side)
+        inputs = rows.join(fvi.lookup_inputs(rows, tables.rates))
+        priced = _price(inputs, tables.vols, side)
+        self.coverage.append(ri.leg_counts(priced, inputs, point=side))  # each priced row once: a table is built once per (chunk key, side)
+        priced[RAW_COLS], priced["smvVol"] = inputs[RAW_COLS], fvi.attach_vol(rows, tables.vols)
         priced["bid"], priced["ask"] = (pd.to_numeric(rows[c], errors="coerce") for c in ("bid", "ask"))
         priced.index = pd.MultiIndex.from_arrays([priced[c].to_numpy() for c in _KEY])
         _LOG.info("F quotes %s end: events=%d expiries=%d without_rows=%d rows=%d duplicates_dropped=%d elapsed=%.1fs "
@@ -133,14 +139,17 @@ class FQuotes:
                   len(priced), dropped, time.monotonic() - started, _rss_mib())
         return priced
 
+    def leg_key(self, chunk, i, idx, *, exit=False):
+        plan_row = self._plan.loc[str(chunk["event_id"][i])]
+        return (str(plan_row["ticker"]), pd.Timestamp(plan_row["exit_date" if exit else "entry_date"]).normalize(),
+                pd.Timestamp(chunk["expiry"][i]), ("P" if chunk["right"][idx] == 0 else "C"), float(chunk["strike"][idx]))
+
     def legs(self, chunk, i, resolved, *, exit=False):
         side, table, event = ("exit" if exit else "entry"), self.table(chunk, exit=exit), str(chunk["event_id"][i])
-        plan_row, names, pieces = self._plan.loc[event], (("bid_x", "ask_x") if exit else ("bid_e", "ask_e")), []
+        names, pieces = (("bid_x", "ask_x") if exit else ("bid_e", "ask_e")), []
         for leg in resolved:
             idx = leg["idx"]
-            right, strike = ("P" if chunk["right"][idx] == 0 else "C"), float(chunk["strike"][idx])
-            key = (str(plan_row["ticker"]), pd.Timestamp(plan_row["exit_date" if exit else "entry_date"]).normalize(),
-                   pd.Timestamp(chunk["expiry"][i]), right, strike)
+            key = self.leg_key(chunk, i, idx, exit=exit)
             ours = np.array([chunk[names[0]][idx], chunk[names[1]][idx]], float)
             listed = key in table.index
             if listed:
@@ -150,7 +159,7 @@ class FQuotes:
                 clean = exit and bool(np.isnan(ours).all())
             if not clean:
                 raise fvi.FairValueRefusal("f_quote_mismatch", "a resolved leg's stored quote differs from the chunk's",
-                                           event_id=event, side=side, right=right, strike=strike)
+                                           event_id=event, side=side, right=key[3], strike=key[4])
             if listed:
                 pieces.append(table.iloc[[pos]])
             else:  # F's unlisted exit quote: unpriceable, unknown liquidity, thin terms at F's values

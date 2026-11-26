@@ -314,7 +314,7 @@ def test_a_pinned_file_hash_differing_from_the_file_opens_and_refuses_table_hash
     run = _open(_full(pins), _inputs({**pins, "files": files}, read=qt._reader(qt._base(qt._frames()), calls)), tmp_path)
     assert isinstance(run, sel.FRun) and calls == []
     chunk = qt._chunk(qt._frames(), qt.DEFAULT_PLAN)
-    _refused("table_hash", lambda: run.pricing.fills._quotes.table(chunk))
+    _refused("table_hash", lambda: run.pricing.fills.quotes.table(chunk))
 
 
 def test_open_run_binds_and_loads_from_a_private_copy_of_the_pins(tmp_path):
@@ -327,7 +327,7 @@ def test_open_run_binds_and_loads_from_a_private_copy_of_the_pins(tmp_path):
     pins["manifest_sha256"] = "x"
     assert run.binding["every_table_file_sha256"] == original
     chunk = qt._chunk(qt._frames(), qt.DEFAULT_PLAN)
-    run.pricing.fills._quotes.table(chunk)  # the first load still verifies against the copy's original hashes
+    run.pricing.fills.quotes.table(chunk)  # the first load still verifies against the copy's original hashes
 
 
 # ---- 4. the report check: an F report reads only inputs that bind F ------------------

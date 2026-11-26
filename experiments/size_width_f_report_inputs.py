@@ -1,21 +1,26 @@
-"""EXP-189 A1 W7c3 part a: report-input producers (design A1.2, A1.7, A1.10 "Report inputs"; F design section 8). Nothing calls
-this yet; part b calls it from the run stages. Aggregates are integer counts (shares: count / the group's ``rows``), so chunk
-results add up with ``merge_counts``. Follow-up: smile minus smvVol, |V - mid|/half-spread, c quantiles, no-arbitrage bound.
+"""EXP-189 A1 W7c3 part a: report-input producers (design A1.2, A1.7, A1.10 "Report inputs"; F design section 8). The run stages
+call it through size_width_f_store. Aggregates are integer counts (shares: count / the group's ``rows``), so chunk results add up with
+``merge_counts``. Follow-up: smile minus smvVol, |V - mid|/half-spread, c quantiles, no-arbitrage bound.
 Schema: ``out/report_inputs/<stage>/<name>.parquet`` (index=False); ``out/receipts/report_inputs_<stage>.json`` with body
-``{"stage", "inputs_hash", "scope", "tables": {name: {"sha256", "rows"}}}``. Failure rules: a partial failure leaves files but no
+``{"stage", "inputs_hash", "scope", "tables": {name: {"sha256", "rows", "bytes"}}, "rows", "bytes", "leg_rows"}``. Failure rules: a partial failure leaves files but no
 receipt (nothing bound); an exact replay completes it; changed bytes refuse ``report_input_changed`` (old bytes kept); a changed
 receipt body refuses ``tuning_receipt_changed``; files are never replaced; concurrent writers are safe via create-only links.
 """
+import hashlib
 import os
+import stat
 import sys
 import time
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from experiments import fair_value_inputs as fvi
 from experiments import size_pnl_decisions as decisions
 from experiments import size_pnl_receipts as receipts
+from experiments.size_pnl_ladder import _rss_mib
 from experiments.size_pnl_shortvol import Refusal
 from experiments.size_pnl_straddle import EXIT_UNQUOTED
 
@@ -107,18 +112,55 @@ def _publish(directory, name, frame):
     return sha
 
 
-def write(out, stage, inputs_hash, scope, tables):
-    """Publish each table, then write the stage's receipt once; returns the receipt (failure rules: module docstring)."""
+def publish(out, stage, name, frame):
+    """One create-only table ``report_inputs/<stage>/<name>.parquet`` as {"sha256", "rows", "bytes"}; the stage is checked first."""
+    if stage not in ("inner", "outer"): raise ValueError(f"stage must be 'inner' or 'outer', got {stage!r}")
+    directory = Path(out) / "report_inputs" / stage
+    directory.mkdir(parents=True, exist_ok=True)
+    for path in (Path(out), directory.parent, directory): receipts._fsync_dir(path)
+    return {"sha256": _publish(directory, name, frame), "rows": len(frame), "bytes": (directory / f"{name}.parquet").stat().st_size}
+
+
+def _carried_matches(path, part):
+    """True only if ``path`` is a regular file whose sha256 and bytes match ``part`` before any parquet parsing, and whose footer row count completes ``part`` exactly.
+    One no-follow, non-blocking, size-capped descriptor serves both the hash and the footer: the path is opened once, so the bytes
+    hashed are the bytes parsed. A missing path, a symlink or a FIFO returns False."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as handle:
+            st = os.fstat(handle.fileno())
+            if not stat.S_ISREG(st.st_mode) or st.st_size > decisions.MAX_DECISIONS_BYTES or st.st_size != part.get("bytes"): return False
+            digest, total = hashlib.sha256(), 0
+            while True:  # bounded by the cap, whatever fstat reported: never reads past MAX_DECISIONS_BYTES + 1 bytes
+                block = handle.read(min(decisions._HASH_BLOCK, decisions.MAX_DECISIONS_BYTES + 1 - total))
+                if not block: break
+                total += len(block)
+                if total > decisions.MAX_DECISIONS_BYTES: return False
+                digest.update(block)
+            if total != st.st_size: return False
+            sha = digest.hexdigest()
+            if sha != part.get("sha256"): return False  # before any parquet parsing
+            handle.seek(0)
+            rows = pq.read_metadata(handle).num_rows  # the same handle: the footer read is of the bytes that were hashed
+        return part == {"sha256": sha, "rows": rows, "bytes": st.st_size}
+    except (pa.ArrowException, OSError): return False
+
+
+def write(out, stage, inputs_hash, scope, tables, parts=None):
+    """Publish each table, name the already published ``parts`` too, then write the stage's receipt once (failure rules: docstring)."""
     if stage not in ("inner", "outer"): raise ValueError(f"stage must be 'inner' or 'outer', got {stage!r}")
     if not tables: raise ValueError("write needs a non-empty dict of tables")
+    if clash := set(parts or {}) & set(tables): raise ValueError(f"table names are in both parts and tables: {sorted(clash)}")
     started, out = time.monotonic(), Path(out)
-    directory = out / "report_inputs" / stage
-    directory.mkdir(parents=True, exist_ok=True)
-    for path in (out, out / "report_inputs", directory): receipts._fsync_dir(path)
-    entries = {n: {"sha256": _publish(directory, n, tables[n]), "rows": len(tables[n])} for n in sorted(tables)}
-    body = {"stage": stage, "inputs_hash": inputs_hash, "scope": scope, "tables": entries}
-    receipt = receipts.write_receipt(out / "receipts" / f"report_inputs_{stage}.json", body)
-    rows = sum(e["rows"] for e in entries.values())
-    print(f"[f_report_inputs] {stage} tables={len(entries)} rows={rows} "
-          f"elapsed={time.monotonic() - started:.1f}s", file=sys.stderr)
+    for name, part in (parts or {}).items():  # a carried part is bound only if its published file holds exactly this metadata
+        f = Path(out) / "report_inputs" / stage / f"{name}.parquet"
+        if not _carried_matches(f, part):
+            raise Refusal("EXPERIMENT_IDENTITY_CONFLICT", f"report input {name} differs", {"reason": "report_input_changed"})
+    entries = {**(parts or {}), **{n: publish(out, stage, n, tables[n]) for n in sorted(tables)}}
+    body = {"stage": stage, "inputs_hash": inputs_hash, "scope": scope, "tables": entries,
+            "rows": sum(e["rows"] for e in entries.values()), "bytes": sum(e["bytes"] for e in entries.values()),
+            "leg_rows": sum(e["rows"] for n, e in entries.items() if n.startswith("legs_"))}
+    receipt = receipts.write_receipt(Path(out) / "receipts" / f"report_inputs_{stage}.json", body)
+    print(f"[f_report_inputs] {stage} tables={len(entries)} rows={body['rows']} leg_rows={body['leg_rows']} bytes={body['bytes']} "
+          f"elapsed={time.monotonic() - started:.1f}s rss={_rss_mib():.0f}MiB", file=sys.stderr)
     return receipt

@@ -635,3 +635,13 @@ def test_exit_result_and_exit_value_at_v_refuse_alike(tmp_path, build):
     assert via_value.value.code == via_result.value.code
     assert via_value.value.details["reason"] == via_result.value.details["reason"] == "leg_invalid"
     assert str(via_value.value) == str(via_result.value)
+
+
+def test_was_priced_is_false_before_the_entry_result_true_after_and_false_for_a_new_chunk(tmp_path):
+    fq, chunk = _setup(tmp_path, _frames(), DEFAULT_PLAN)
+    model = ff.FFills(fq)
+    trade, _ = _trade(chunk, 0)
+    assert model.was_priced(trade) is False
+    model.entry_result(trade)
+    assert model.was_priced(trade) is True
+    assert model.was_priced(trade._replace(chunk=dict(chunk))) is False  # a new chunk object drops the results

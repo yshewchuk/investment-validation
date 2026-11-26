@@ -18,6 +18,7 @@ from experiments import fair_value_run as fvr
 from experiments import size_pnl_ladder as lad
 from experiments import size_pnl_shortvol as sv
 from experiments import size_width_f_quotes as wf
+from experiments import size_width_f_report_inputs as ri
 from experiments.fair_value_inputs import FairValueRefusal
 
 NAN = float("nan")
@@ -126,10 +127,12 @@ def _idx(chunk, i, right, strike):
                 if chunk["right"][j] == code and chunk["strike"][j] == strike)
 
 
-def _write(tmp_path, base, rates=(5.0, 4.0)):
-    """Pinned tables root: quotes and rates split by month of obs_date (Jan and Feb 2024), plus a manifest."""
+def _write(tmp_path, base, rates=(5.0, 4.0), smv_gap=()):
+    """Pinned tables root: quotes and rates split by month of obs_date (Jan and Feb 2024), plus a manifest. ``smv_gap``
+    strikes have no smvVol (a fit-set gap: the expiry takes the smile)."""
     root = tmp_path / "root"
     vols = base[fvi.VOL_KEYS].drop_duplicates().assign(smvVol=25.0)
+    vols.loc[vols["strike"].isin(smv_gap), "smvVol"] = np.nan
     # Zero borrow (percent) and zero dividend: carry b = r when the rate is zero, and no dividend is applied.
     carry = {"borrow30": 0.0, "borrow2yr": 0.0, "divAmt": 0.0, "divDate": pd.NaT, "annIdiv": 0.0, "annActDiv": 0.0,
              "assetType": 1.0}
@@ -163,9 +166,9 @@ def _reader(snap, calls=None):
 
 
 def _setup(tmp_path, frames, plan, *, snap=None, read=None, calls=None, pins_edit=None, expected="snap-1",
-           rates=(5.0, 4.0)):
+           rates=(5.0, 4.0), smv_gap=()):
     base = _base(frames)
-    root = _write(tmp_path, base, rates)
+    root = _write(tmp_path, base, rates, smv_gap)
     pins = _pins(root)
     if pins_edit is not None:
         pins_edit(pins)
@@ -625,3 +628,14 @@ def test_quote_rows_at_the_cap_build_and_one_more_is_refused_before_any_pricing(
     assert exc.value.code == "RESOURCE_LIMIT_EXCEEDED"
     assert not fq.counts
     assert calls == []
+
+
+def test_a_smile_expiry_keeps_each_rows_smvvol_and_counts_the_coverage_once(tmp_path):
+    fq, chunk = _setup(tmp_path, _frames(), DEFAULT_PLAN, smv_gap=(95.0,))  # strike 95 has no smvVol: the expiry takes the smile
+    table = fq.table(chunk)
+    assert fq.table(chunk) is table and len(fq.coverage) == 1  # a second call neither rebuilds nor recounts
+    assert set(table["source"]) == {"smile"}
+    assert table.loc[("AAA", _ts(ENTRY), _ts(EXPIRY), "P", 100.0), "smvVol"] == pytest.approx(0.25)  # kept on a smile row
+    counts = ri.merge_counts(fq.coverage)
+    rows = counts[(counts["point"] == "entry") & (counts["metric"] == "rows")]
+    assert rows["count"].sum() == len(table)

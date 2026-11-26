@@ -22,7 +22,7 @@ from experiments import size_width_deviation as deviation
 from experiments import size_width_errmodel as errmodel
 from experiments import size_width_fake as fake
 from experiments import size_width_flex as flex
-from experiments import size_width_f_select, size_width_prereg
+from experiments import size_width_f_select, size_width_f_store, size_width_prereg
 from experiments import size_width_tuning as tuning
 from experiments.size_pnl_pool import build_pool
 from experiments.size_pnl_shortvol import NAMES, Refusal
@@ -155,9 +155,12 @@ def _inner(src, out, loaded):
     months = list(_months(src, plan, base._restrict(table, ids), loaded["facts_all"], loaded["exits"], base.INNER_EMIT_FROM))
     _log(f"materialised months={len(months)}")
     sweep, started, total = deviation.DeviationSweep(ladder=True, pricing=loaded.get("pricing", PRICING), choices=True), time.monotonic(), _total(plan)
+    sweep.store = size_width_f_store.open_store(out, "inner", sweep.pricing)
+    if sweep.store: sweep.store.print_entry_coverage(c for c, _e, _o in months)  # before any exit quote or outcome is priced (A1.7)
     persisted = []
     for done, (chunk, events, output) in enumerate(months, start=1):
         sweep.add_month(chunk, events, _pool(table, labels, _period(events).start_time), output=output, sessions=sessions)
+        if sweep.store: sweep.store.flush(chunk)
         if output:
             persisted.append(choices.write_month(out, _period(events), sweep.fresh_choices))
         _progress("inner", done, total, started)
@@ -187,6 +190,7 @@ def _inner(src, out, loaded):
     band.write_bands(out, bands, inputs_hash)
     flexed = flex.inner(by, ((chunk, events, output, _pool(table, labels, _period(events).start_time)) for chunk, events, output in months),
                         total, sweep, out, inputs_hash, sessions, loaded.get("pricing", PRICING))
+    if sweep.store: sweep.store.close(inputs_hash, base._scope(ids))  # before the summary: a summary implies bound report inputs
     body = {"stage": "inner", "inputs_hash": inputs_hash, "scope": base._scope(ids), "smoke": ids is not None, "c_status": c["status"],
             "model": model, "calibration": c.get("calibration"), "anchor": anchor, "results": results, "stats": stats,
             "declined": _declined(sweep), "bands": bands, "t8": deviation.tables(sweep, {"2023-24": INNER}), "flex": flexed,
@@ -214,7 +218,10 @@ def _outer(src, out, loaded):
     sweep, labels, table, sessions = deviation.DeviationSweep(ladder=True, pricing=loaded.get("pricing", PRICING), choices=True), loaded["labels"], loaded["table"], loaded["sessions"]
     total, started, count, fresh_labels, persisted = _total(plan), time.monotonic(), 0, [], []
     read_to = pd.Timestamp(base.OUTER[0])  # every 2025 label of an event dated before read_to has been read
-    for count, (chunk, events, output) in enumerate(_months(src, plan, base._restrict(table, ids), loaded["facts_all"], loaded["exits"], pd.Timestamp(base.OUTER[0])), start=1):
+    def outer_months(): return _months(src, plan, base._restrict(table, ids), loaded["facts_all"], loaded["exits"], pd.Timestamp(base.OUTER[0]))
+    sweep.store = size_width_f_store.open_store(out, "outer", sweep.pricing)
+    if sweep.store: sweep.store.print_entry_coverage(c for c, _e, _o in outer_months())  # A1.7: before any exit quote or outcome
+    for count, (chunk, events, output) in enumerate(outer_months(), start=1):
         period = _period(events)
         if read_to < period.start_time:  # months with no scoped event: read their labels now, they have no decisions to freeze
             gap = readers.read_labels(src.fetch, src.admitted, start=read_to, end=period.start_time, event_ids=None)
@@ -223,6 +230,7 @@ def _outer(src, out, loaded):
             labels = pd.concat([labels, gap])
             read_to = period.start_time
         fresh = sweep.add_month(chunk, events, _pool(table, labels, period.start_time), output=output, sessions=sessions)
+        if sweep.store: sweep.store.flush(chunk)
         _progress("outer", count, total, started)
         if output:
             taken = fresh.assign(model_id="M0", book="short_vol", arm_or_rule=fresh["arm"], status="taken", reason=None)
@@ -243,9 +251,9 @@ def _outer(src, out, loaded):
     rec = recommend(success_table(merged["production"], {l: r for l, r in merged.items() if l != "production"},
                                   {l: {"2025": stats[l]["2025"]["x"]} for l in merged}, tuned_e))
     # The fallback pass runs after the 2025 recommendation; phi comes from the inner summary.
-    months = ((chunk, events, output, _pool(table, labels, _period(events).start_time))
-              for chunk, events, output in _months(src, plan, base._restrict(table, ids), loaded["facts_all"], loaded["exits"], pd.Timestamp(base.OUTER[0])))
+    months = ((chunk, events, output, _pool(table, labels, _period(events).start_time)) for chunk, events, output in outer_months())
     flexed = flex.outer(by, inner["flex"], rec, months, total, sweep, out, inputs_hash, sessions, loaded.get("pricing", PRICING), _stats)
+    if sweep.store: sweep.store.close(inputs_hash, base._scope(ids))  # before the summary: a summary implies bound report inputs
     body = {"stage": "outer", "inputs_hash": inputs_hash, "scope": base._scope(ids), "smoke": ids is not None, "arms": arms,
             "results": {label: {"2025": results[label]} for label in results}, "stats": stats, "declined": _declined(sweep),
             "inputs_outer": content_hash(loaded["inputs"]), "labels_2025": content_hash(base._label_rows(fresh_labels)),

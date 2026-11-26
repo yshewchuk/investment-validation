@@ -8,7 +8,9 @@ Independent oracle: the 2025 F rows (debit, proceeds, mid pair, ladder returns, 
 account are checked against values computed IN THIS TEST from the stored synthetic quotes and the F design formulas
 (guides/fair_value_fill_design.md sections 5-6). Nothing from the experiments fair_value_*, size_width_f_* or
 size_width_pricing modules computes an expected value here; only the legs (strike resolution) come from resolve_priced."""
+import hashlib
 import json
+import sys
 
 import numpy as np
 import pandas as pd
@@ -398,3 +400,178 @@ def test_outer_with_an_f_binding_other_than_the_inners_refuses_tuning_receipt_ch
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.details["reason"] == "tuning_receipt_changed"
     assert not (out / "receipts" / "outer_summary.json").exists()
+
+
+def _report_parts(out, stage, prefix):
+    """The report-input parts ``prefix_NNNN`` of one stage, read in part order."""
+    return [pd.read_parquet(p) for p in sorted((out / "report_inputs" / stage).glob(f"{prefix}_*.parquet"))]
+
+
+def _run_both(tmp_path, monkeypatch):
+    """Runs the inner and then the outer F stage on a fresh synthetic world; returns (out, pins, src, frames)."""
+    frames, root, pins, src = _setup(tmp_path, monkeypatch)
+    out = tmp_path / "out"
+    for stage in ("inner", "outer"):
+        _f_run(src, out, stage, _fill(pins), sel.FInputs(pins, qt._reader(qt._base(frames)), "snap-1"))
+    return out, pins, src, frames
+
+
+def _c(k):
+    """F's c of a put at strike ``k`` (design section 5): the spread weight on the fixture's quote, the same at both dates."""
+    mid, bid, ask = _quote(k)
+    return min(1.0, 0.25 + 0.50 * min(((ask - bid) / mid) / 0.50, 1.0))
+
+
+def test_the_report_input_receipts_bind_every_table_and_match_the_stage_summaries(tmp_path, monkeypatch, m0, stubbed):
+    out, _pins, _src, _frames = _run_both(tmp_path, monkeypatch)
+    for stage in ("inner", "outer"):
+        tables = receipts.load_receipt(out / "receipts" / f"report_inputs_{stage}.json")
+        summary = receipts.load_receipt(out / "receipts" / f"{stage}_summary.json")
+        assert tables["inputs_hash"] == summary["inputs_hash"] and tables["scope"] == summary["scope"]
+        entries = tables["tables"]
+        assert any(name.startswith("legs_") for name in entries)
+        for name, entry in entries.items():
+            file = out / "report_inputs" / stage / f"{name}.parquet"
+            assert hashlib.sha256(file.read_bytes()).hexdigest() == entry["sha256"]
+            assert entry["rows"] == len(pd.read_parquet(file))
+            assert entry["bytes"] == file.stat().st_size
+        assert tables["rows"] == sum(e["rows"] for e in entries.values())
+        assert tables["bytes"] == sum(e["bytes"] for e in entries.values())
+        assert tables["leg_rows"] == sum(e["rows"] for n, e in entries.items() if n.startswith("legs_"))
+
+
+def test_every_taken_trade_has_entry_and_exit_legs_on_the_same_contracts_and_no_duplicates(tmp_path, monkeypatch, m0, stubbed):
+    out, _pins, _src, _frames = _run_both(tmp_path, monkeypatch)
+    keys = ["event_id", "structure", "k", "point", "right", "strike", "side"]
+    legs_parts = _report_parts(out, "outer", "legs")
+    for part in legs_parts:
+        assert not part.duplicated(keys).any()
+    legs = pd.concat(legs_parts, ignore_index=True)
+    taken = pd.concat(_report_parts(out, "outer", "taken"), ignore_index=True)
+    assert len(taken) >= 1
+    legs["event_id"] = legs["event_id"].astype(str)
+    for eid, structure, k in {(str(e), s, float(x)) for e, s, x in zip(taken["event_id"], taken["structure"], taken["k"])}:
+        group = legs[(legs["event_id"] == eid) & (legs["structure"] == structure) & (legs["k"] == k)]
+        contracts = {point: set(zip(part["right"], part["strike"], part["side"])) for point, part in group.groupby("point")}
+        assert set(contracts) == {"entry", "exit"}
+        assert contracts["entry"] == contracts["exit"]
+
+
+def test_a_2025_taken_trade_matches_the_oracle_and_its_stored_legs(tmp_path, monkeypatch, m0, stubbed):
+    out, _pins, _src, _frames = _run_both(tmp_path, monkeypatch)
+    taken = pd.concat(_report_parts(out, "outer", "taken"), ignore_index=True)
+    rec = taken[taken["arm"] == "1.0"].iloc[0]
+    eid, structure, k = str(rec["event_id"]), rec["structure"], float(rec["k"])
+    frozen = pd.read_parquet(out / "months" / "2025-02.parquet")
+    frozen = frozen[(frozen["status"] == "taken") & (frozen["arm_or_rule"] == "1.0") & (frozen["event_id"].astype(str) == eid)
+                    & (frozen["structure"] == structure)]
+    assert len(frozen) == 1
+    debit_f = float(frozen["entry_cost"].iloc[0])  # the frozen F debit (test_the_taken_rows: entry_cost is debit_F)
+    chunk, pos = _outer_chunk()
+    traded = _traded(chunk, pos, eid, structure)
+    entry, exit_ = DATES[eid]
+    oracle = _oracle(traded, entry, exit_)
+    legs = pd.concat(_report_parts(out, "outer", "legs"), ignore_index=True)
+    key = ["event_id", "structure", "k", "point", "right", "strike", "side"]
+    assert len(legs.drop_duplicates()) == len(legs.drop_duplicates(key))
+    legs = legs.drop_duplicates(key)
+    mine = legs[(legs["event_id"].astype(str) == eid) & (legs["structure"] == structure) & (legs["k"] == k)]
+    for point, obs in (("entry", entry), ("exit", exit_)):
+        rows = mine[mine["point"] == point].to_dict("records")
+        assert len(rows) == len(traded)
+        assert {(float(r["strike"]), r["side"]): float(r["qty"]) for r in rows} == \
+            {(float(chunk["strike"][leg["idx"]]), leg["side"]): float(leg["qty"]) for leg in traded}
+        for r in rows:
+            strike = float(r["strike"])
+            mid, bid, ask = _quote(strike)
+            v, c = _fair(strike, obs), _c(strike)
+            assert r["right"] == "P" and r["year"] == 2025 and pd.Timestamp(r["obs_date"]) == obs and pd.Timestamp(r["expiry"]) == EXP_2025
+            assert (r["bid"], r["ask"], r["mid"]) == pytest.approx((bid, ask, mid))
+            assert r["V"] == pytest.approx(v)
+            assert (r["c_buy"], r["c_sell"]) == pytest.approx((c, c))
+            assert r["fill_buy"] == pytest.approx(v + c * (ask - v)) and r["fill_sell"] == pytest.approx(v - c * (v - bid))
+            assert r["smvVol"] == pytest.approx(0.25) and r["open_interest"] == 500.0 and r["bid_size"] == 50.0
+            assert r["ask_size"] == 50.0 and r["chain_kind"] == "fetch" and r["assetType"] == CARRY["assetType"]
+    entry_rows = mine[mine["point"] == "entry"].to_dict("records")
+    stored = sum(float(r["qty"]) * (r["fill_buy"] if r["side"] == "buy" else -r["fill_sell"]) for r in entry_rows)
+    assert stored == pytest.approx(debit_f, rel=1e-9, abs=1e-12)
+    assert stored == pytest.approx(oracle["debit_f"], rel=1e-9, abs=1e-12)
+
+
+def test_the_legs_parts_hold_entry_rows_for_more_than_one_grid_k(tmp_path, monkeypatch, m0, stubbed):
+    out, _pins, _src, _frames = _run_both(tmp_path, monkeypatch)
+    for stage in ("inner", "outer"):
+        entry = pd.concat(_report_parts(out, stage, "legs"), ignore_index=True)
+        entry = entry[entry["point"] == "entry"]
+        assert entry["k"].nunique() > 1
+
+
+def test_the_entry_coverage_print_comes_before_the_first_exit_quote_table_in_both_stages(tmp_path, monkeypatch, m0, stubbed):
+    frames, root, pins, src = _setup(tmp_path, monkeypatch)
+    order, real_table = [], wf.FQuotes.table
+
+    class Tap:
+        """Records the coverage print in ``order``; everything else written to stderr is dropped."""
+        def write(self, text):
+            if "[f_store] entry coverage" in text:
+                order.append("coverage")
+            return len(text)
+
+        def flush(self):
+            pass
+
+        def isatty(self):
+            return False
+
+    def recording(self, chunk, *, exit=False):
+        order.append("exit_table" if exit else "entry_table")
+        return real_table(self, chunk, exit=exit)
+
+    monkeypatch.setattr(wf.FQuotes, "table", recording)
+    monkeypatch.setattr(sys, "stderr", Tap())
+    out = tmp_path / "out"
+    for stage in ("inner", "outer"):
+        order.append(f"run {stage}")
+        _f_run(src, out, stage, _fill(pins), sel.FInputs(pins, qt._reader(qt._base(frames)), "snap-1"))
+    end = len(order)
+    for stage, stop in (("inner", order.index("run outer")), ("outer", end)):
+        window = order[order.index(f"run {stage}"):stop]
+        assert "coverage" in window and "exit_table" in window
+        assert window.index("coverage") < window.index("exit_table")
+
+
+def test_a_structure_with_no_taken_trade_still_stores_its_entry_candidates_and_no_exit_legs(tmp_path, monkeypatch, m0, stubbed):
+    """Decide takes nothing for one structure (its rows are undetermined), so none of its events is taken, yet every F-priced
+    entry candidate of it is stored: entry rows for every outer event and at least one grid k, no exit rows, no taken row. The
+    k == 1.0 entry legs of one outer event are the legs the file's ``_traded`` helper resolves for it."""
+    name = sv.NAMES[0]
+    decide_all = _decide  # the module-level decide, read before any patch below
+
+    def take_nothing_for_name(scored):
+        decided = decide_all(scored)
+        silenced = (decided["structure"] == name).to_numpy()
+        return decided.assign(status=np.where(silenced, "undetermined", decided["status"]),
+                              reason=np.where(silenced, "silenced_for_test", decided["reason"]))
+
+    monkeypatch.setattr(sys.modules[__name__], "_decide", take_nothing_for_name)  # the copies load() builds read this global
+    monkeypatch.setattr(seam.PRICING, "decide", take_nothing_for_name)  # the current-marks copy the stubbed fixture set
+    out, _pins, _src, _frames = _run_both(tmp_path, monkeypatch)
+
+    legs = pd.concat(_report_parts(out, "outer", "legs"), ignore_index=True)
+    legs["event_id"] = legs["event_id"].astype(str)
+    mine = legs[legs["structure"] == name]
+    entry = mine[mine["point"] == "entry"]
+    outer_ids = {str(e) for e in PLAN.loc[PLAN["event_date"].dt.year == 2025, "event_id"]}
+    assert set(entry["event_id"]) == outer_ids
+    assert entry["k"].nunique() > 0
+    assert not (mine["point"] == "exit").any()
+    taken = pd.concat(_report_parts(out, "outer", "taken"), ignore_index=True)
+    assert len(taken) >= 1  # other structures still trade, so the taken parts exist
+    assert not (taken["structure"] == name).any()
+
+    chunk, pos = _outer_chunk()
+    eid = min(outer_ids)
+    k1 = entry[(entry["event_id"] == eid) & (entry["k"] == 1.0)]
+    assert len(k1) > 0
+    expected = sorted((float(chunk["strike"][leg["idx"]]), leg["side"]) for leg in _traded(chunk, pos, eid, name))
+    assert sorted(zip(k1["strike"].astype(float), k1["side"])) == expected

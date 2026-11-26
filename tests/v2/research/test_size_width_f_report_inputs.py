@@ -3,6 +3,7 @@
 Synthetic frames only. Expected counts are hand-counted in this file from the fixture rows, never from the module.
 """
 import hashlib
+import os
 
 import numpy as np
 import pandas as pd
@@ -227,8 +228,10 @@ def test_write_publishes_each_table_then_one_receipt_bound_by_hashes(tmp_path):
     stage = out / "report_inputs" / "inner"
     assert sorted(p.name for p in stage.iterdir()) == ["exits.parquet", "legs.parquet"]
     assert receipt["stage"] == "inner" and receipt["inputs_hash"] == "H1" and receipt["scope"] == "W"
-    assert receipt["tables"] == {name: {"sha256": _sha(stage / f"{name}.parquet"), "rows": len(frame)}
-                                 for name, frame in tables.items()}
+    assert receipt["tables"] == {name: {"sha256": _sha(stage / f"{name}.parquet"), "rows": len(frame),
+                                        "bytes": (stage / f"{name}.parquet").stat().st_size} for name, frame in tables.items()}
+    assert receipt["rows"] == sum(len(f) for f in tables.values()) and receipt["leg_rows"] == 0
+    assert receipt["bytes"] == sum(e["bytes"] for e in receipt["tables"].values())
     for name, frame in tables.items():
         pd.testing.assert_frame_equal(pd.read_parquet(stage / f"{name}.parquet"), frame)
     assert receipts.load_receipt(out / "receipts" / "report_inputs_inner.json") == receipt
@@ -265,12 +268,84 @@ def test_a_changed_inputs_hash_refuses_the_receipt(tmp_path):
     assert caught.value.details["reason"] == "tuning_receipt_changed"
 
 
+@pytest.mark.parametrize("field", ["fabricated", "sha256", "rows", "bytes", "correct"])
+def test_a_carried_part_is_bound_only_if_its_published_file_holds_exactly_its_metadata(tmp_path, field):
+    out = tmp_path / "out"
+    if field == "fabricated":
+        part = {"sha256": "0" * 64, "rows": 1, "bytes": 1}  # no file was published under this name
+    else:
+        published = ri.publish(out, "inner", "carried", _rows())
+        wrong = {"sha256": "0" * 64, "rows": published["rows"] + 1, "bytes": published["bytes"] + 1}
+        part = published if field == "correct" else {**published, field: wrong[field]}
+    tables, receipt_path = {"exits": ri.exit_flag_counts(_rows())}, out / "receipts" / "report_inputs_inner.json"
+    if field == "correct":
+        receipt = ri.write(out, "inner", "H", "W", tables, parts={"carried": part})
+        assert receipt["tables"]["carried"] == published
+        assert receipts.load_receipt(receipt_path) == receipt
+        return
+    with pytest.raises(Refusal) as caught:
+        ri.write(out, "inner", "H", "W", tables, parts={"carried": part})
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.details["reason"] == "report_input_changed"
+    assert not receipt_path.exists()
+
+
+def test_writing_a_correct_carried_part_never_decodes_it(tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    published = ri.publish(out, "inner", "carried", _rows())
+
+    def no_decode(*args, **kwargs):
+        raise AssertionError("carried part must not be decoded")
+
+    monkeypatch.setattr(ri.pd, "read_parquet", no_decode)
+    receipt = ri.write(out, "inner", "H", "W", {"exits": ri.exit_flag_counts(_rows())}, parts={"carried": published})
+    assert receipt["tables"]["carried"] == published
+
+
+def test_a_non_parquet_carried_file_with_matching_sha_and_bytes_is_refused_without_a_receipt(tmp_path):
+    out = tmp_path / "out"
+    stage = out / "report_inputs" / "inner"
+    stage.mkdir(parents=True)
+    data = b"not a parquet file"
+    (stage / "carried.parquet").write_bytes(data)
+    part = {"sha256": hashlib.sha256(data).hexdigest(), "rows": 1, "bytes": len(data)}
+    receipt_path = out / "receipts" / "report_inputs_inner.json"
+    with pytest.raises(Refusal) as caught:
+        ri.write(out, "inner", "H", "W", {"exits": ri.exit_flag_counts(_rows())}, parts={"carried": part})
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.details["reason"] == "report_input_changed"
+    assert not receipt_path.exists()
+
+
+def test_a_wrong_carried_sha_is_refused_before_any_footer_is_read(tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    published = ri.publish(out, "inner", "carried", _rows())
+
+    def no_footer(*args, **kwargs):
+        raise AssertionError("footer must not be read when the sha256 differs")
+
+    monkeypatch.setattr(ri.pq, "read_metadata", no_footer)
+    part = {**published, "sha256": "0" * 64}
+    with pytest.raises(Refusal) as caught:
+        ri.write(out, "inner", "H", "W", {"exits": ri.exit_flag_counts(_rows())}, parts={"carried": part})
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.details["reason"] == "report_input_changed"
+
+
 def test_a_bad_stage_or_no_tables_is_refused_before_anything_is_written(tmp_path):
     out = tmp_path / "out"
     with pytest.raises(ValueError, match="stage"):
         ri.write(out, "middle", "H", "W", _tables())
     with pytest.raises(ValueError, match="tables"):
         ri.write(out, "inner", "H", "W", {})
+    assert not out.exists()
+
+
+def test_a_name_in_both_parts_and_tables_is_refused_before_anything_is_written(tmp_path):
+    out = tmp_path / "out"
+    part = {"sha256": "0" * 64, "rows": 1, "bytes": 1}
+    with pytest.raises(ValueError, match="both parts and tables: \\['exits'\\]"):
+        ri.write(out, "inner", "H", "W", _tables(), parts={"exits": part})
     assert not out.exists()
 
 
@@ -307,3 +382,64 @@ def test_the_real_leg_table_has_the_leg_columns_and_none_of_the_input_columns(tm
         assert col in legs.columns, col
     for col in ri.INPUT_COLS:
         assert col not in legs.columns, col
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="needs symlinks")
+def test_a_symlink_at_the_carried_path_refuses_even_to_a_correct_parquet(tmp_path):
+    out = tmp_path / "out"
+    published = ri.publish(out, "inner", "carried", _rows())
+    final = out / "report_inputs" / "inner" / "carried.parquet"
+    elsewhere = tmp_path / "elsewhere.parquet"
+    os.replace(final, elsewhere)
+    os.symlink(elsewhere, final)
+    assert ri._carried_matches(final, published) is False
+    receipt_path = out / "receipts" / "report_inputs_inner.json"
+    with pytest.raises(Refusal) as caught:
+        ri.write(out, "inner", "H", "W", {"exits": ri.exit_flag_counts(_rows())}, parts={"carried": published})
+    assert caught.value.details["reason"] == "report_input_changed"
+    assert not receipt_path.exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs mkfifo")
+def test_a_fifo_at_the_carried_path_refuses_without_hanging(tmp_path):
+    out = tmp_path / "out"
+    stage = out / "report_inputs" / "inner"
+    stage.mkdir(parents=True)
+    os.mkfifo(stage / "carried.parquet")  # no writer: a blocking open would hang the test
+    part = {"sha256": "0" * 64, "rows": 1, "bytes": 1}
+    assert ri._carried_matches(stage / "carried.parquet", part) is False
+    receipt_path = out / "receipts" / "report_inputs_inner.json"
+    with pytest.raises(Refusal) as caught:
+        ri.write(out, "inner", "H", "W", {"exits": ri.exit_flag_counts(_rows())}, parts={"carried": part})
+    assert caught.value.details["reason"] == "report_input_changed"
+    assert not receipt_path.exists()
+
+
+def test_the_footer_is_read_from_the_same_descriptor_that_was_hashed(tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    published = ri.publish(out, "inner", "carried", _rows())
+    carried = out / "report_inputs" / "inner" / "carried.parquet"
+    alt = ri.publish(tmp_path / "alt", "inner", "carried", _rows().iloc[:1])  # a different parquet: fewer rows, other bytes
+    alt_path = tmp_path / "alt" / "report_inputs" / "inner" / "carried.parquet"
+    assert alt["rows"] != published["rows"] and alt["bytes"] != published["bytes"]
+    real_read_metadata, seen = ri.pq.read_metadata, []
+
+    def replace_then_read(source, *args, **kwargs):
+        os.replace(alt_path, carried)  # the path now names a different file; the hashed descriptor still names the original
+        seen.append(source)
+        return real_read_metadata(source, *args, **kwargs)
+
+    monkeypatch.setattr(ri.pq, "read_metadata", replace_then_read)
+    receipt = ri.write(out, "inner", "H", "W", {"exits": ri.exit_flag_counts(_rows())}, parts={"carried": published})
+    assert len(seen) == 1 and not isinstance(seen[0], (str, bytes, os.PathLike)) and hasattr(seen[0], "read")
+    assert receipt["tables"]["carried"] == published  # the original file's rows, not the replacement's
+    assert receipts.load_receipt(out / "receipts" / "report_inputs_inner.json") == receipt
+
+
+def test_a_carried_part_larger_than_the_size_cap_is_refused(tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    published = ri.publish(out, "inner", "carried", _rows())
+    carried = out / "report_inputs" / "inner" / "carried.parquet"
+    assert ri._carried_matches(carried, published) is True  # control: the cap is not hit at the real size
+    monkeypatch.setattr(ri.decisions, "MAX_DECISIONS_BYTES", published["bytes"] - 1)  # only the carried check sees this cap
+    assert ri._carried_matches(carried, published) is False
