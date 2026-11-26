@@ -7,6 +7,7 @@ import contextlib
 import importlib
 import inspect
 import json
+import logging
 import os
 import re
 import stat
@@ -72,6 +73,7 @@ def _factory(spec: str, args, flag: str, reason: str):
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="[%(name)s] %(message)s")  # F load and pricing progress to stderr (the default stream)
     try:
         with contextlib.redirect_stdout(sys.stderr):  # library prints go to stderr; stdout is one JSON document
             receipt = size_width_prereg.require_preregistration()  # refuses first, with or without --no-ledger

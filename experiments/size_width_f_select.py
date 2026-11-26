@@ -1,7 +1,6 @@
 """EXP-189 A1: the spec selects model F via its one amendment carrying ``fill_model``, id "F" (A1.7 R5, A1.9). ``open_run`` builds the F run (pricing and receipt binding); ``check_report`` refuses a report whose inputs do not bind what this registration selects."""
 import hashlib
 import json
-import re
 from collections import namedtuple
 from pathlib import Path
 
@@ -14,7 +13,6 @@ from experiments import size_width_f_fills, size_width_f_quotes, size_width_pric
 MODE = "f7_orats_borrow_discrete_dividend"
 FInputs = namedtuple("FInputs", "pins read_quotes snapshot_id")
 FRun = namedtuple("FRun", "pricing binding")
-_SHA = re.compile(r"[0-9a-f]{64}")
 
 
 def _validate(fill):
@@ -50,11 +48,11 @@ def open_run(fill, inputs=None, plan=None, expected_snapshot_id=None, *, root=No
     if not isinstance(inputs, FInputs): raise fvi.FairValueRefusal("f_inputs_invalid", "f_inputs is not a FInputs (pins, read_quotes, snapshot_id)")
     size_width_f_quotes.admit_inputs(inputs.pins, inputs.read_quotes)
     r = fill["reingest"] if isinstance(fill.get("reingest"), dict) else {}
-    rules, pins = fill.get("rate_rules"), inputs.pins
+    rules, pins = fill.get("rate_rules"), {**inputs.pins, "files": dict(inputs.pins["files"])}  # a private copy: a later change to the caller's mapping reaches neither the receipt nor the loads
     if not (all(k in fill for k in ("carry_dividend_mode", "rate_rules", "vol_scale", "rate_scale", "reingest")) and isinstance(rules, dict) and set(rules) == set(fvi.RATE_RULE_VALUES)
             and all(rules[k] in v for k, v in fvi.RATE_RULE_VALUES.items()) and isinstance(r.get("path"), str) and r.get("path")
             and not Path(r["path"]).is_absolute() and ".." not in Path(r["path"]).parts and isinstance(r.get("manifest_sha256"), str)
-            and _SHA.fullmatch(r["manifest_sha256"]) and isinstance(r.get("manifest_units"), dict)
+            and isinstance(r.get("manifest_units"), dict)
             and all(isinstance(k, str) and isinstance(v, str) for k, v in r["manifest_units"].items())):
         raise fvi.FairValueRefusal("fill_model_invalid", "fill_model lacks a field, or its rate rules, reingest path, hash or units are malformed")
     if fill["carry_dividend_mode"] != MODE: raise fvi.FairValueRefusal("carry_dividend_mode", "the carry and dividend mode is not the registered one")

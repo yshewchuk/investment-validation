@@ -2,6 +2,7 @@
 
 Synthetic only: fixture spec dicts, tmp_path pinned tables and fake quote readers; never the real spec.yaml selection, never data/."""
 import json
+import logging
 import sys
 import types
 
@@ -247,7 +248,6 @@ MALFORMED = [
     pytest.param(lambda f: f.update(rate_rules={"rate_out_of_range": "missing"}), id="short-rate-rules"),
     pytest.param(lambda f: f["reingest"].update(path="/abs/root"), id="absolute-path"),
     pytest.param(lambda f: f["reingest"].update(path="root/../root"), id="dotdot-path"),
-    pytest.param(lambda f: f["reingest"].update(manifest_sha256="ABC"), id="short-hash"),
     pytest.param(lambda f: f["reingest"].update(manifest_units=["percent"]), id="units-not-a-dict"),
 ]
 
@@ -258,6 +258,14 @@ def test_malformed_fill_refuses_fill_model_invalid_before_any_read(tmp_path, edi
     fill = _full(pins)
     edit(fill)
     _refused("fill_model_invalid", lambda: _open(fill, _inputs(pins, read=qt._reader(qt._base(qt._frames()), calls)), tmp_path))
+    assert calls == []
+
+
+def test_a_malformed_reingest_hash_refuses_manifest_binding_before_any_read(tmp_path):
+    pins, calls = _tables(tmp_path), []
+    fill = _full(pins)
+    fill["reingest"]["manifest_sha256"] = "ABC"
+    _refused("manifest_binding", lambda: _open(fill, _inputs(pins, read=qt._reader(qt._base(qt._frames()), calls)), tmp_path))
     assert calls == []
 
 
@@ -307,6 +315,19 @@ def test_a_pinned_file_hash_differing_from_the_file_opens_and_refuses_table_hash
     assert isinstance(run, sel.FRun) and calls == []
     chunk = qt._chunk(qt._frames(), qt.DEFAULT_PLAN)
     _refused("table_hash", lambda: run.pricing.fills._quotes.table(chunk))
+
+
+def test_open_run_binds_and_loads_from_a_private_copy_of_the_pins(tmp_path):
+    pins = _tables(tmp_path)
+    original = dict(sorted(pins["files"].items()))
+    run = _open(_full(pins), _inputs(pins), tmp_path)
+    for key in list(pins["files"]):
+        pins["files"][key] = "0" * 64
+    pins["files"]["bogus/extra.parquet"] = "0" * 64
+    pins["manifest_sha256"] = "x"
+    assert run.binding["every_table_file_sha256"] == original
+    chunk = qt._chunk(qt._frames(), qt.DEFAULT_PLAN)
+    run.pricing.fills._quotes.table(chunk)  # the first load still verifies against the copy's original hashes
 
 
 # ---- 4. the report check: an F report reads only inputs that bind F ------------------
@@ -488,3 +509,18 @@ def test_run_py_prints_a_fair_value_refusal_from_the_driver_and_returns_2(tmp_pa
     assert run_py.main(_argv(tmp_path, sources=FAKE)) == 2
     refused = json.loads(capsys.readouterr().out)
     assert refused["refused"] == CONFLICT and refused["reason"] == reason
+
+
+# ---- 7. run.py configures stderr logging; stdout stays the JSON document ----------------
+
+def test_run_py_logs_progress_to_stderr_and_never_to_stdout(tmp_path, monkeypatch, capsys):
+    run_py = _run_main()
+    _gates(monkeypatch)
+    monkeypatch.setattr(logging.root, "handlers", [])
+    monkeypatch.setattr(logging.root, "level", logging.WARNING)
+    ids = tmp_path / "ids.json"
+    ids.write_text('{"a": 1}', encoding="utf-8")
+    assert run_py.main(_argv(tmp_path, "--event-ids", str(ids))) == 2  # a quick refusal; main configures logging first
+    logging.getLogger("size_width_f_quotes").info("probe-line")
+    captured = capsys.readouterr()
+    assert "probe-line" in captured.err and "probe-line" not in captured.out
