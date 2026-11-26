@@ -18,11 +18,11 @@ the existing primary `hypotheses`/`experiment_runs` records in one catalog
 transaction. Re-registering identical content returns the same identity.
 The reserved arm is planned; registration does not mark a variant as tried.
 Admission verifies the stored object and compares a freshly built binding;
-returned documents are copies, not mutable views of registered bytes.
-Sweep seal reading consumes ops catalog `sql_text_budget`/`decode_bounded_text`, keeping its bound and R6 policy. Registration preparation/reservation and worker I/O/admission/error helpers remain in their owning modules; [README.md](README.md) lists their contracts and callers. Saved binding bytes and declared source roots are not rewritten.
+returned documents are copies of registered bytes, not views.
+Sweep seal reading consumes ops catalog `sql_text_budget`/`decode_bounded_text`, keeping its bound and R6 policy. Registration preparation/reservation and worker I/O/admission/error helpers: owning modules ([README.md](README.md) lists contracts, callers). Saved binding bytes, declared source roots are not rewritten.
 
-Optional `final_read` metadata creates a versioned native registration that seals recipe, completeness-bar and frozen-model artifact references.`prepare_final_holdout_request` verifies that original registration and derives an immutable request keyed by experiment ID; missing declarations or malformed request metadata refuse `INVALID_EXPERIMENT_SPEC`, and changed catalog/artifact identity refuses `EXPERIMENT_IDENTITY_CONFLICT`.
-Preparation reads only registration metadata, performs no repository/head/population/result access or writes, and grants no authority. Foundation owns shared request decoding so ops and research need no peer import; later read admission must verify the referenced evidence and completeness before reading.
+Optional `final_read` metadata creates a versioned native registration that seals recipe, completeness-bar and frozen-model artifact references.`prepare_final_holdout_request` verifies the original, deriving an immutable experiment-ID-keyed request; missing declarations or malformed request metadata refuse `INVALID_EXPERIMENT_SPEC`, and changed catalog/artifact identity refuses `EXPERIMENT_IDENTITY_CONFLICT`.
+Preparation reads only registration metadata: no repository/head/population/result access, writes or authority. Foundation owns shared request decoding, avoiding ops–research peer imports; later read admission must verify referenced evidence and completeness first.
 
 Optional `magnitude_training_start` binds v1.2 to a `computed_moves` spec;
 years come only from `spec.folds`, validated by pure `magnitude_window`.
@@ -41,8 +41,8 @@ Registration has no feature/label reads, fitting, aggregation or final-read auth
 
 Optional `magnitude_labels_before`, together with `magnitude_training_start`,
 creates v1.3 and seals a fixed `magnitude_execution.v1` contract. The explicit
-evaluation-label cutoff must be a canonical day strictly after every evaluation
-event; it is neither the forecast ceiling nor a training fit boundary.
+evaluation-label cutoff: canonical day strictly after every evaluation
+event; neither forecast ceiling nor training fit boundary.
 The contract declares a fold-local arithmetic-mean baseline, constant intercept,
 event-pooled RMSE with MAE, omitted skipped/unavailable/late training labels, and
 complete finite evaluation labels available strictly before that cutoff.
@@ -981,6 +981,7 @@ EXP-190 (`guides/size_quantile_move_design.md`; uncalled): `size_quantile_prereg
 `size_quantile_baselines.{pool,band,implied}_quantiles` (B0-B2): unscored `forecast_missing`/`refused_draw`/`non_finite_output`/`pool_too_small`/`implied_move_invalid`; bad input `ValueError`.
 `size_quantile_fits`: `panel_*`, `feature_*`, `selection_*`, `fixed_parameters_mismatch`, `training_label_invalid`, `fold_inputs_invalid`, `grid_invalid`, `RESOURCE_LIMIT_EXCEEDED`.
 `size_quantile_walk.fit_walk_forward` write-once `fit_<year>.json`: gap→`years_not_contiguous`; changed/invalid receipt→`fit_receipt_{changed,unreadable}`; memory/oversize-publish→`RESOURCE_LIMIT_EXCEEDED`; fit `ValueError`→`fit_failed`, stops.
+`size_quantile_calibration` (uncalled) calibrates/tails Q, Q_raw: unscored `non_finite_output`/`calibration_burn_in`/`tail_pool_thin`; bad input `ValueError`; memory `RESOURCE_LIMIT_EXCEEDED`.
 `size_quantile_arm_s.fit_arm_s` write-once `arm_s_fit_<year>.json`: `raw_receipt_mismatch`, walk receipt refusals, `RESOURCE_LIMIT_EXCEEDED`; `fit_failed` year continues; `scale_burn_in`.
 
 ## Fill model F
