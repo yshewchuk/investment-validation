@@ -133,7 +133,7 @@ Every arm's primary P&L (production, A-E, the anchor, C's draws, `fallback`) is 
 
 The machinery is unchanged; F's entry cost goes in.
 
-- `exp_pnl_sim = (simulated exit value - debit_F) / debit_F`. **F enters through the entry cost only.** The **simulated exit uses neither F's concession nor F's fair value**: it stays the current European, zero-rate Black-Scholes mean (`put_means`). `experiments/size_pnl_pool.py`'s `structure_pnl` already takes the entry cost as an argument, so `engine/pnl_sim.py`, `size_pnl_*` and every v14-closure file are unchanged. F design section 8's rule that a selection model's target includes F's exit and the conservative exits is for a fitted model; EXP-189 fits none, so `exp_pnl_sim` keeps this simulated exit, while A-D's account objective uses `proceeds_F` and the conservative exits.
+- `exp_pnl_sim = (simulated exit value - debit_F) / debit_F`. **F enters through the entry cost only.** The **simulated exit uses neither F's concession nor F's fair value**: it stays the current European, zero-rate Black-Scholes mean (`put_means`). `experiments/size_pnl_pool.py`'s `structure_pnl` already takes the entry cost as an argument, so `engine/pnl_sim.py`, `size_pnl_*` and every v14-closure file are unchanged. **Departure from F design section 8.** It says a selection model's target is the return on debit including the consumer's conservative exits, and arm E and the cutoff select on `exp_pnl_sim`. Amendment 1 does not apply that rule to them: they keep this simulated exit, following the user's 2026-11-25 instruction for selection, "the same machinery with F's entry cost" (reading it as keeping the simulated exit is mine; no waiver naming section 8 was given). F design section 11 records that this simulated exit has no concession. A-D's account objective uses `proceeds_F` and the conservative exits.
 - **Consequence:** the score is optimistic against F-scored exits, by amounts that differ by name and width (F design section 11); rank gating does not remove this. Arm E may therefore favour a `k` whose exit concession is large. The report gives, by arm and chosen `k`, the mean exit concession (exit value at `V` minus `proceeds_F`, over `debit_F`; rung-3 and `unpriceable` exits excluded and counted).
 - **Arm E** picks each event's `k` by `exp_pnl_sim` on `debit_F`, among widths that pass F's guard.
 - **The top-20% trailing cutoff** (`trailing_cutoff`) ranks each arm's own history of those scores. Only scored rows enter it, so F-skipped rows do not.
@@ -186,20 +186,25 @@ PR #2910 (open) amends the F design to use ORATS borrow and dividend inputs, con
 
 ### A1.9 Registration and run
 
-1. The last code slice adds one `amendments` entry to `spec.yaml` (this section; post-hoc flag and label; fill model F as primary and what it supersedes in `constraints`, `objective` and `success_rule`; the A1.7 R4 bindings, units taken from the re-ingest using no outcome). `preregistered_at` and the original fields stay. The hash changes. **F is selected only by this entry**; without it the code prices as before.
+1. Slice W7e adds one `amendments` entry to `spec.yaml` (this section; post-hoc flag and label; fill model F as primary and what it supersedes in `constraints`, `objective` and `success_rule`; the A1.7 R4 bindings, units taken from the re-ingest using no outcome). `preregistered_at` and the original fields stay. The hash changes. **F is selected only by this entry**; without it the code prices as before.
 2. The **supervisor registers a new PLANNED row** with the new hash (the guard then expects two EXP-189 PLANNED rows, the new one last). No agent writes `experiments/LEDGER.csv`. Until then every stage refuses.
 3. **Smoke, 50 tickers, with F timing** (`--no-ledger`, fresh `/tmp` out-dir): all admitted events of the 50 plan tickers with the smallest `sha256("<ticker>|exp189-a1")` (mine; no outcome used), all three stages. Record per stage wall time, peak RSS, F load and pricing time, quote rows priced and their rate, entry coverage, and a full-run estimate, before the full run. No smoke result tunes F or a rule; a rule change needs a new amendment.
 4. **Full rerun of all stages** (inner, outer, report) in a fresh out-dir. No earlier receipt, month file or tuning is reused or deleted.
 
 ### A1.10 Split list (code slices; none starts until this section and F4 and F5 are merged, plus F7 when A1.8 requires it)
 
-All edits are in `size_width_*`, EXP-189's directory, its tests, the runbook and the experiments docs. No EXP-188 file, F module (F's own slices own those) or v14-closure file changes. Sizes: non-test code / test lines / doc words.
+W7a1-W7d are code slices sized to skip CodeRabbit: 1-149 **changed** production lines (additions plus deletions in `.py` outside `tests/`); every other file is a test under `tests/` or an `ARCHITECTURE.md`/`README.md` outside `guides/` (at most 40 changed lines in total); no path contains "design" or "spec"; no renames. All `spec.yaml` and `guides/` changes are in W7e, which needs CodeRabbit. Code edits are in `size_width_*` and EXP-189's tests. No EXP-188 file, F module (F's own slices own those) or v14-closure file changes. Sizes: changed production lines / test lines / doc words.
 
 | Slice | Scope | Size | After |
 | --- | --- | --- | --- |
-| W7a | F adapter: bound loads, per-chunk leg tables, quote rows and `f_quote_mismatch`, widened seam with entry reasons and exit marks and flags; `CurrentFills` identical | ~150 / ~180 / 50 | F4, F5 |
-| W7b | F-primary rows with mid, harsh and sensitivity columns; accounts, objective, fallback, T8 and T9 inputs read F; A1.4 counts; breakeven on the `CurrentFills` ladder | ~150 / ~180 / 40 | W7a |
-| W7c | Report: labels, F-primary tables beside mid and harsh, sensitivities, coverage, counts, concession and F diagnostics | ~150 / ~150 / 60 | W7b |
-| W7d | `spec.yaml` amendment, spec-driven F selection and receipt bindings, driver and F timing, smoke ticker ids, runbook | ~120 / ~140 / 100 | W7c |
+| W7a1 | F quote adapter: bound loads, quote rows, `f_quote_mismatch`, per-chunk leg tables | ~120 / ~140 / 30 | F4, F5 |
+| W7a2 | Widened seam (event, resolved legs, reasons and flags); `CurrentFills` identical | ~100 / ~100 / 20 | F4, F5 |
+| W7a3 | F fills object: entry statuses and guard reasons, exit marks and flags | ~110 / ~140 / 30 | W7a1, W7a2 |
+| W7b1 | F-primary rows with mid, harsh and sensitivity columns | ~100 / ~120 / 20 | W7a3 |
+| W7b2 | Accounts, objective, fallback, T8 and T9 inputs read F; A1.4 counts; ladder breakeven and non-positive-debit counts | ~110 / ~140 / 30 | W7b1 |
+| W7c1 | Report: labels, F-primary tables beside mid, harsh and sensitivities | ~110 / ~110 / 30 | W7b2 |
+| W7c2 | Report: coverage, counts, concession and F diagnostics | ~110 / ~110 / 30 | W7c1 |
+| W7d | Spec-driven F selection code, receipt bindings, driver F timing, smoke ticker ids | ~110 / ~130 / 40 | W7c2 |
+| W7e | `spec.yaml` amendment and runbook (`guides/`); no production `.py` | 0 / ~50 / 150 | W7d |
 
-W7a-W7c are tested with F selected by injection on synthetic fixtures; only W7d lets a run select it. A slice that would exceed the size limit is split again.
+W7a1-W7d are tested with F selected by injection or a fixture spec on synthetic data; only W7e's `spec.yaml` entry lets a real run select it. A slice that would exceed 149 changed production lines or 40 doc lines is split again.
