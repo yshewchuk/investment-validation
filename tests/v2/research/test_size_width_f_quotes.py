@@ -542,3 +542,35 @@ def test_leg_prices_and_fills_match_a_closed_form_oracle(tmp_path, date, at_exit
         assert row["fill_buy"] == pytest.approx(p + c * (ask - p), abs=0.01)
         assert row["fill_sell"] == pytest.approx(p - c * (p - bid), abs=0.01)
         assert abs(row["V"] - mid) > 0.05
+
+
+@pytest.mark.parametrize("exit_", [False, True], ids=["entry", "exit"])
+def test_quote_rows_at_the_cap_build_and_one_more_is_refused_before_any_pricing(tmp_path, monkeypatch, exit_):
+    frames, seen = _frames(), []
+    read = _reader(_base(frames))
+
+    def counting(expiries):
+        seen.append(read(expiries))
+        return seen[-1]
+
+    fq, chunk = _setup(tmp_path, frames, DEFAULT_PLAN, read=counting)
+    fq.table(chunk, exit=exit_)
+    count = len(seen[-1])
+    monkeypatch.setattr(wf, "MAX_QUOTE_ROWS", count)
+    fq, chunk = _setup(tmp_path, frames, DEFAULT_PLAN, read=counting)
+    assert len(fq.table(chunk, exit=exit_)) == count  # exactly at the cap is allowed
+    monkeypatch.setattr(wf, "MAX_QUOTE_ROWS", count - 1)
+    calls, real = [], fvf.leg_fills
+
+    def spy(*args, **kwargs):
+        calls.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(fvf, "leg_fills", spy)
+    fq, chunk = _setup(tmp_path, frames, DEFAULT_PLAN, read=counting)
+    with pytest.raises(FairValueRefusal) as exc:
+        fq.table(chunk, exit=exit_)
+    assert exc.value.details["reason"] == "input_too_large"
+    assert exc.value.code == "RESOURCE_LIMIT_EXCEEDED"
+    assert not fq.counts
+    assert calls == []

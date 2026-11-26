@@ -16,6 +16,7 @@ _LOG = logging.getLogger("size_width_f_quotes")
 _EXPIRY = ["ticker", "obs_date", "expiry"]
 _KEY = _EXPIRY + ["right", "strike"]
 _LEG_COLS = fvf.OUT_COLUMNS + fvf.FILL_COLUMNS + ["bid", "ask"]
+MAX_QUOTE_ROWS = 5_000_000  # per chunk side; read at call time
 
 
 def ladder_rows(rows, *, entry):
@@ -31,8 +32,7 @@ def ladder_rows(rows, *, entry):
     key = ordered[_KEY].assign(obs_date=pd.to_datetime(ordered["obs_date"], errors="coerce"),
                                expiry=pd.to_datetime(ordered["expiry"], errors="coerce"),
                                strike=pd.to_numeric(ordered["strike"], errors="coerce"))
-    ok = ordered[_KEY].notna().all(axis=1) & key.notna().all(axis=1)
-    drop = (key.duplicated(keep="first") & ok).to_numpy()
+    drop = (key.duplicated(keep="first") & ordered[_KEY].notna().all(axis=1) & key.notna().all(axis=1)).to_numpy()
     return rows.iloc[np.sort(order[~drop])].reset_index(drop=True), int(drop.sum())
 
 
@@ -65,8 +65,7 @@ def _price(rows, vols, side):
 
 
 class FQuotes:
-    """`read_quotes(expiries)` must return every listed row (fvi.QUOTE_COLUMNS) of each requested (ticker, obs_date,
-    expiry) from the pinned snapshot."""
+    """read_quotes(expiries) must return every listed row (fvi.QUOTE_COLUMNS) of each requested (ticker, obs_date, expiry)."""
 
     def __init__(self, plan, read_quotes, *, tables_root, pins, snapshot_id, expected_snapshot_id, vol_scale, rate_scale,
                  rate_rules=None):
@@ -95,7 +94,10 @@ class FQuotes:
         expiries = pd.DataFrame({"ticker": plan_rows["ticker"].astype(str).to_numpy(), "obs_date": dates.to_numpy(),
                                  "expiry": chunk["expiry"]}).drop_duplicates().reset_index(drop=True)
         _LOG.info("F quotes %s start: events=%d expiries=%d", side, len(events), len(expiries))
-        rows, dropped = ladder_rows(self._read(expiries), entry=side == "entry")
+        if len(raw := self._read(expiries)) > MAX_QUOTE_ROWS:
+            raise fvi.FairValueRefusal("input_too_large", "quote rows exceed MAX_QUOTE_ROWS", code="RESOURCE_LIMIT_EXCEEDED",
+                                       side=side, rows=len(raw), max_rows=MAX_QUOTE_ROWS)
+        rows, dropped = ladder_rows(raw, entry=side == "entry")
         self.counts[f"{side}_duplicates"] += dropped
         rows = fvi.bind_quotes(rows, snapshot_id=self._ids[0], expected_snapshot_id=self._ids[1]).reset_index(drop=True)
         rows[fvi.VOL_KEYS] = fvi._norm(rows, fvi.VOL_KEYS)
@@ -104,14 +106,12 @@ class FQuotes:
         lagged = pd.concat([obs, obs - pd.Timedelta(days=fvi.RATE_LOOKBACK_DAYS)])
         rels = sorted({f"quotes/year={d.year}/month={d.month:02d}.parquet" for d in obs}
                       | {f"rates/year={d.year}/month={d.month:02d}.parquet" for d in lagged})
-        missing = [r for r in rels if r not in self._pins["files"]]
-        if missing:
+        if missing := [r for r in rels if r not in self._pins["files"]]:
             raise fvi.FairValueRefusal("table_absent", "no pin for a needed table", paths=missing)
         tables = fvi.load_tables(self._root, manifest_sha256=self._pins["manifest_sha256"], vol_scale=self._scales[0],
                                  rate_scale=self._scales[1], file_sha256={r: self._pins["files"][r] for r in rels}, **self._rules)
         self.table_hashes.update(tables.hashes)
-        rows = rows.join(fvi.lookup_inputs(rows, tables.rates))
-        priced = _price(rows, tables.vols, side)
+        priced = _price(rows.join(fvi.lookup_inputs(rows, tables.rates)), tables.vols, side)
         priced["bid"], priced["ask"] = (pd.to_numeric(rows[c], errors="coerce") for c in ("bid", "ask"))
         priced.index = pd.MultiIndex.from_arrays([priced[c].to_numpy() for c in _KEY])
         without = len(expiries) - len(rows[_EXPIRY].drop_duplicates())
