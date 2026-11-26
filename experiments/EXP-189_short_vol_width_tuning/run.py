@@ -35,6 +35,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--sources-config", default=None, help="JSON config read by the --sources factory")
     parser.add_argument("--f-pins", default=None, help="F spec only, inner and outer: JSON with manifest_sha256 and files (the pinned tables)")
     parser.add_argument("--f-quotes", default=None, help="F spec only, inner and outer: MODULE:FUNC, called with the parsed args, returns (read_quotes, snapshot_id)")
+    parser.add_argument("--f-max-object-bytes", type=int, default=None, help="F spec only: per-fragment byte cap of the experiments.size_width_f_chains reader (default 256 MiB)")
     parser.add_argument("--no-ledger", action="store_true", required=True, help="required: every non-recorded run uses --no-ledger")
     return parser
 
