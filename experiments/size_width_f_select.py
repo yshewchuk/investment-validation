@@ -1,5 +1,7 @@
 """EXP-189 A1: the spec selects model F via its one amendment carrying ``fill_model``, id "F" (A1.7 R4/R5, A1.9)."""
 import collections
+import json
+from hashlib import sha256
 from pathlib import Path
 
 from experiments import fair_value_inputs as fvi
@@ -35,6 +37,8 @@ def open_run(fill, inputs, plan, expected_snapshot_id, *, root=Path(__file__).re
         return None
     if inputs is None:
         raise fvi.FairValueRefusal("f_inputs_missing", "the spec selects F but no F inputs were given")
+    if not callable(inputs.read_quotes):
+        raise fvi.FairValueRefusal("f_quotes_invalid", "the quote reader is not callable")
     try:
         mode, fvf, rules = fill["carry_dividend_mode"], fill["fvf_id"], fill["rate_rules"]
         vol, rate, reingest = fill["vol_scale"], fill["rate_scale"], fill["reingest"]
@@ -53,8 +57,10 @@ def open_run(fill, inputs, plan, expected_snapshot_id, *, root=Path(__file__).re
     if not (isinstance(pins, dict) and isinstance(pins.get("manifest_sha256"), str) and isinstance(pins.get("files"), dict)
             and pins["files"] and all(isinstance(k, str) and isinstance(v, str) for k, v in pins["files"].items())):
         raise fvi.FairValueRefusal("pins_invalid", "pins need a manifest_sha256 string and a non-empty files dict of strings")
-    if pins["manifest_sha256"] != sha:
-        raise fvi.FairValueRefusal("manifest_hash", "pins' manifest_sha256 differs from the spec's reingest hash")
+    manifest = Path(root) / path / "manifest.json"
+    blob = fvi._read_capped(manifest, fvi.MAX_MANIFEST_BYTES, "manifest.json") if manifest.is_file() else b""
+    if not (pins["manifest_sha256"] == sha == sha256(blob).hexdigest() and json.loads(blob).get("units") == units):
+        raise fvi.FairValueRefusal("manifest_binding", "the pins or manifest.json differ from the spec's hash or units")
     scales = {"vol_scale": fvi._unit_scale(vol, "vol_scale"), "rate_scale": fvi._unit_scale(rate, "rate_scale")}
     quotes = size_width_f_quotes.FQuotes(plan, inputs.read_quotes, tables_root=Path(root) / path, pins=pins,
                                          snapshot_id=inputs.snapshot_id, expected_snapshot_id=expected_snapshot_id,

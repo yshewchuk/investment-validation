@@ -1,7 +1,10 @@
 """EXP-189 Amendment 1, slice W7d: F selection from the spec and the receipt binding.
 
 Synthetic only: fixture spec dicts and tmp_path spec files, never the real spec.yaml selection, never data/."""
+import hashlib
+import json
 import types
+from pathlib import Path
 
 import pytest
 
@@ -22,18 +25,27 @@ from tests.v2.research.test_size_width_driver import bounded, m0, pricing  # noq
 UNITS = {"borrow30": "percent", "borrow2yr": "percent", "divAmt": "dollars_per_share"}
 RULES = {"rate_out_of_range": "missing", "rate_empty_row": "rate_unknown"}
 PIN_FILES = {"quotes/year=2024/month=01.parquet": "Q1", "rates/year=2024/month=01.parquet": "R1"}
+MANIFEST = json.dumps({"units": UNITS}).encode("utf-8")  # the manifest.json bytes that the spec's reingest hash pins
+MANIFEST_SHA = hashlib.sha256(MANIFEST).hexdigest()
+
+
+def _write_manifest(root, blob=MANIFEST):
+    """Write ``blob`` as ``<root>/tables/manifest.json`` and return the sha256 hex of its bytes."""
+    (Path(root) / "tables").mkdir(parents=True, exist_ok=True)
+    (Path(root) / "tables" / "manifest.json").write_bytes(blob)
+    return hashlib.sha256(blob).hexdigest()
 
 
 def _fill(**changes):
     fill = {"id": "F", "fvf_id": fvr.fvf_id(), "carry_dividend_mode": sel.MODE, "rate_rules": dict(RULES),
-            "vol_scale": 0.01, "rate_scale": 0.01,
-            "reingest": {"path": "tables", "manifest_sha256": "MANIFEST", "manifest_units": UNITS}}
+            "vol_scale": 1.0, "rate_scale": 0.01,
+            "reingest": {"path": "tables", "manifest_sha256": MANIFEST_SHA, "manifest_units": UNITS}}
     fill.update(changes)
     return fill
 
 
 def _pins(**changes):
-    pins = {"manifest_sha256": "MANIFEST", "files": dict(PIN_FILES)}
+    pins = {"manifest_sha256": MANIFEST_SHA, "files": dict(PIN_FILES)}
     pins.update(changes)
     return pins
 
@@ -46,6 +58,7 @@ def _refused(reason, call):
     with pytest.raises(fvi.FairValueRefusal) as caught:
         call()
     assert caught.value.details["reason"] == reason
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 def _spec(*amendments):
@@ -53,9 +66,12 @@ def _spec(*amendments):
 
 
 @pytest.fixture
-def f_pricing(monkeypatch):
-    """F's load returns a copy of the driver's (already stubbed) PRICING, so the fixture stubs stay in force for F."""
+def f_pricing(monkeypatch, tmp_path):
+    """F's load returns a copy of the driver's (already stubbed) PRICING, so the fixture stubs stay in force for F.
+    The driver's open_run takes its default root from tmp_path, where the spec's manifest.json is written."""
     made = []
+    _write_manifest(tmp_path)
+    monkeypatch.setitem(sel.open_run.__kwdefaults__, "root", tmp_path)
 
     def load(fills=None):
         copy = types.SimpleNamespace(**{k: v for k, v in vars(driver.PRICING).items() if not k.startswith("__")})
@@ -112,9 +128,10 @@ def _receipt(tmp_path, spec, ledger):
 
 
 def test_an_f_amendment_with_two_rows_puts_its_fill_model_in_the_receipt(tmp_path):
-    spec, ledger = _prereg_case(tmp_path, [{"id": "A1", "fill_model": {"id": "F", "fvf_id": "X"}}])
+    fill = _fill()
+    spec, ledger = _prereg_case(tmp_path, [{"id": "A1", "fill_model": fill}])
     receipt = _receipt(tmp_path, spec, ledger)
-    assert receipt["fill_model"]["id"] == "F" and receipt["spec_hash_checked"] is True
+    assert receipt["fill_model"] == fill and receipt["spec_hash_checked"] is True
 
 
 def test_no_fill_model_amendment_leaves_the_receipt_without_the_key(tmp_path):
@@ -153,11 +170,39 @@ def test_empty_pin_files_refuse_pins_invalid(tmp_path):
     _refused("pins_invalid", lambda: sel.open_run(_fill(), _inputs(_pins(files={})), PLAN_FRAME, "snap-1", root=tmp_path))
 
 
-def test_a_pinned_manifest_other_than_the_spec_refuses_manifest_hash(tmp_path):
-    _refused("manifest_hash", lambda: sel.open_run(_fill(), _inputs(_pins(manifest_sha256="OTHER")), PLAN_FRAME, "snap-1", root=tmp_path))
+def test_a_none_quote_reader_refuses_f_quotes_invalid(tmp_path):
+    _refused("f_quotes_invalid", lambda: sel.open_run(_fill(), sel.FInputs(_pins(), None, "snap-1"), PLAN_FRAME, "snap-1", root=tmp_path))
+
+
+def test_a_pinned_manifest_sha_other_than_the_spec_refuses_manifest_binding(tmp_path):
+    _write_manifest(tmp_path)  # the file matches the spec; only the pins differ
+    _refused("manifest_binding", lambda: sel.open_run(_fill(), _inputs(_pins(manifest_sha256="OTHER")), PLAN_FRAME, "snap-1", root=tmp_path))
+
+
+def test_an_absent_manifest_json_refuses_manifest_binding(tmp_path):
+    _refused("manifest_binding", lambda: sel.open_run(_fill(), _inputs(), PLAN_FRAME, "snap-1", root=tmp_path))
+
+
+def test_manifest_bytes_that_hash_differently_from_the_spec_refuse_manifest_binding(tmp_path):
+    _write_manifest(tmp_path, blob=b'{"units": {}}')  # pins and spec agree on MANIFEST_SHA, the file does not
+    _refused("manifest_binding", lambda: sel.open_run(_fill(), _inputs(), PLAN_FRAME, "snap-1", root=tmp_path))
+
+
+def test_manifest_units_differing_from_the_spec_refuse_manifest_binding(tmp_path):
+    _write_manifest(tmp_path)  # the file's bytes hash to the spec's and the pins' sha; only the spec's units differ
+    units = {**UNITS, "borrow30": "dollars_per_share"}
+    fill = _fill(reingest={"path": "tables", "manifest_sha256": MANIFEST_SHA, "manifest_units": units})
+    _refused("manifest_binding", lambda: sel.open_run(fill, _inputs(), PLAN_FRAME, "snap-1", root=tmp_path))
+
+
+def test_an_extra_manifest_unit_key_the_spec_lacks_refuses_manifest_binding(tmp_path):
+    sha = _write_manifest(tmp_path, blob=json.dumps({"units": {**UNITS, "extra": "percent"}}).encode("utf-8"))
+    fill = _fill(reingest={"path": "tables", "manifest_sha256": sha, "manifest_units": UNITS})
+    _refused("manifest_binding", lambda: sel.open_run(fill, _inputs(_pins(manifest_sha256=sha)), PLAN_FRAME, "snap-1", root=tmp_path))
 
 
 def test_a_reader_snapshot_other_than_expected_refuses_snapshot_binding(tmp_path):
+    _write_manifest(tmp_path)
     _refused("snapshot_binding", lambda: sel.open_run(_fill(), _inputs(), PLAN_FRAME, "snap-2", root=tmp_path))
 
 
@@ -173,20 +218,26 @@ def test_an_extra_rate_rule_refuses_fill_model_invalid(tmp_path):
 
 
 def test_an_absolute_table_path_refuses_fill_model_invalid(tmp_path):
-    fill = _fill(reingest={"path": "/abs", "manifest_sha256": "MANIFEST", "manifest_units": UNITS})
+    fill = _fill(reingest={"path": "/abs", "manifest_sha256": MANIFEST_SHA, "manifest_units": UNITS})
     _refused("fill_model_invalid", lambda: sel.open_run(fill, _inputs(), PLAN_FRAME, "snap-1", root=tmp_path))
 
 
 def test_a_valid_selection_binds_every_id_unit_and_pin_and_builds_the_f_seam(tmp_path):
-    fill = _fill()
+    _write_manifest(tmp_path)
+    fill = _fill(rate_rules={"rate_out_of_range": "row_unknown", "rate_empty_row": "earlier_row"})
     run = sel.open_run(fill, _inputs(), PLAN_FRAME, "snap-1", root=tmp_path)
     assert run.binding == {
-        "fill_model_id": "F", "fvf_id": fill["fvf_id"], "reingest_manifest_sha256": "MANIFEST",
-        "every_table_file_sha256": dict(sorted(PIN_FILES.items())), "quote_snapshot_id": "snap-1",
-        "units": {"vol_scale": 0.01, "rate_scale": 0.01, "manifest_units": UNITS},
-        "rate_out_of_range": "missing", "rate_empty_row": "rate_unknown", "carry_dividend_mode": sel.MODE}
+        "fill_model_id": "F", "fvf_id": fill["fvf_id"], "reingest_manifest_sha256": MANIFEST_SHA,
+        "every_table_file_sha256": {"quotes/year=2024/month=01.parquet": "Q1", "rates/year=2024/month=01.parquet": "R1"},
+        "quote_snapshot_id": "snap-1",
+        "units": {"vol_scale": 1.0, "rate_scale": 0.01, "manifest_units": UNITS},
+        "rate_out_of_range": "row_unknown", "rate_empty_row": "earlier_row", "carry_dividend_mode": sel.MODE}
     assert isinstance(run.pricing.fills, size_width_f_fills.FFills)
-    assert isinstance(run.pricing.fills._quotes, size_width_f_quotes.FQuotes)
+    quotes = run.pricing.fills._quotes
+    assert isinstance(quotes, size_width_f_quotes.FQuotes)
+    assert quotes._scales == (1.0, 0.01)
+    assert quotes._rules == {"rate_out_of_range": "row_unknown", "rate_empty_row": "earlier_row"}
+    assert quotes._root == tmp_path / "tables"
     assert run.pricing is not seam.PRICING
 
 
@@ -227,6 +278,14 @@ def test_an_f_spec_without_f_inputs_refuses_before_any_receipt(tmp_path, m0, pri
     with pytest.raises(fvi.FairValueRefusal) as caught:
         driver.run(sources(), "inner", out, event_ids=["E1", "E2"], prereg=_f_receipt)
     assert caught.value.details["reason"] == "f_inputs_missing"
+    assert not (out / "receipts").exists()
+
+
+def test_a_none_quote_reader_in_the_driver_refuses_before_any_receipt(tmp_path, m0, pricing, f_pricing):
+    out = tmp_path / "out"
+    with pytest.raises(fvi.FairValueRefusal) as caught:
+        driver.run(sources(), "inner", out, event_ids=["E1", "E2"], prereg=_f_receipt, f_inputs=sel.FInputs(_pins(), None, "snap-1"))
+    assert caught.value.details["reason"] == "f_quotes_invalid" and caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert not (out / "receipts").exists()
 
 

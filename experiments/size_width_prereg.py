@@ -105,7 +105,7 @@ def require_preregistration(spec_path=SPEC_PATH, ledger_path=None, run_log_path=
     Right after the spec loads, ``check_id_free(experiments_dir)`` refuses a second EXP-189 directory or
     spec, before the ledger is read. The ledger must hold exactly one PLANNED row for EXP-189 plus one per
     declared amendment (none are declared), equal to the spec hash. ``lib.LEDGER_PATH`` is read at call
-    time, so tests can monkeypatch it. A spec selecting F adds its ``fill_model`` entry to the receipt.
+    time, so tests can monkeypatch it.
     """
     spec_path = Path(spec_path)
     ledger = lib.LEDGER_PATH if ledger_path is None else ledger_path

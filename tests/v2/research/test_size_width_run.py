@@ -214,6 +214,21 @@ def test_one_f_flag_alone_refuses_before_the_sources_are_imported(tmp_path, monk
     assert calls == []
 
 
+def test_f_quotes_alone_refuses_f_inputs_incomplete_before_the_sources_are_built(tmp_path, monkeypatch, capsys):
+    run_py = _run_main()
+    _gates(monkeypatch)
+    calls = []
+
+    def make(args):
+        calls.append(args)
+        return pnl.sources()
+
+    _install(monkeypatch, make)
+    assert run_py.main(_argv(tmp_path, "--f-quotes", QUOTES, sources=FAKE)) == 2
+    assert json.loads(capsys.readouterr().out)["reason"] == "f_inputs_incomplete"
+    assert calls == []
+
+
 def test_both_f_flags_pass_finputs_built_from_the_pins_and_the_factory(tmp_path, monkeypatch):
     run_py = _run_main()
     _gates(monkeypatch)
