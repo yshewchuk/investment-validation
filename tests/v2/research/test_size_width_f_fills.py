@@ -574,6 +574,18 @@ def test_exit_value_at_v_weights_a_fallback_leg_at_its_effective_mid_not_v(tmp_p
     assert abs(got - (2 * frame["V"].iloc[0] - frame["V"].iloc[1])) > 1e-9  # the fallback is exercised, not a no-op
 
 
+def test_exit_value_at_v_weights_a_short_fallback_leg_at_its_effective_mid_not_v(tmp_path):
+    fq, chunk = _setup(tmp_path, _frames(), DEFAULT_PLAN)
+    pair = _pair(chunk)
+    trade = pair._replace(legs=(pair.legs[0], {**pair.legs[1], "qty": 2.0}))  # long 1 (V), short 2 (fallback)
+    frame = fq.legs(chunk, 0, list(trade.legs), exit=True)
+    v_long, v_short = float(frame["V"].iloc[0]), float(frame["V"].iloc[1])
+    mid_short = float(frame["eff_bid"].iloc[1] + frame["eff_ask"].iloc[1]) / 2
+    got = ff.FFills(StubQuotes(fq, _exit_status("ok", "rate_unknown"))).exit_value_at_v(trade)
+    assert got == pytest.approx(v_long - 2 * mid_short, abs=1e-12)
+    assert abs(got - (v_long - 2 * v_short)) > 1e-9  # the short's V is not its effective mid, so using V would differ
+
+
 def test_exit_value_at_v_never_reads_a_zero_quantity_reference_leg(tmp_path):
     fq, chunk = _setup(tmp_path, _frames(), DEFAULT_PLAN)
     trade, _ = _trade(chunk, 0)

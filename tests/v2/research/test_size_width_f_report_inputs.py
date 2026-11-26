@@ -93,7 +93,7 @@ def _leg_want():
 
 
 def _as_dict(frame):
-    return {(int(y), c, m, v): int(n) for y, c, m, v, n in
+    return {(int(y), c, m, v): n for y, c, m, v, n in
             zip(frame["year"], frame["chain_kind"], frame["metric"], frame["value"], frame["count"])}
 
 
@@ -105,13 +105,19 @@ def _sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _exit_dict(frame):
+    got = {}
+    for arm, structure, year, metric, count in zip(frame["arm"], frame["structure"], frame["year"], frame["metric"],
+                                                   frame["count"]):
+        got.setdefault((arm, structure, int(year)), {})[metric] = count
+    return got
+
+
 def test_exit_flag_counts_emits_every_metric_for_every_group_zeros_included():
     out = ri.exit_flag_counts(_rows())
     assert list(out.columns) == ["arm", "structure", "year", "metric", "count"]
-    got = {}
-    for arm, structure, year, metric, count in zip(out["arm"], out["structure"], out["year"], out["metric"], out["count"]):
-        got.setdefault((arm, structure, int(year)), {})[metric] = int(count)
-    assert got == EXIT_WANT
+    assert pd.api.types.is_integer_dtype(out["count"])
+    assert _exit_dict(out) == EXIT_WANT
     assert len(out) == 18
 
 
@@ -124,12 +130,22 @@ def test_leg_counts_hand_counts_with_null_keys_nan_and_better_than_mid():
     out = ri.leg_counts(_legs(), _inputs(), point="entry")
     assert set(out["point"]) == {"entry"}
     assert len(out) == len(_leg_want()) == 48
+    assert pd.api.types.is_integer_dtype(out["count"])
+    assert _as_dict(out) == _leg_want()
+
+
+def test_leg_counts_with_point_exit_gives_the_same_hand_counts_under_exit():
+    out = ri.leg_counts(_legs(), _inputs(), point="exit")
+    assert set(out["point"]) == {"exit"}
+    assert len(out) == len(_leg_want()) == 48
+    assert pd.api.types.is_integer_dtype(out["count"])
     assert _as_dict(out) == _leg_want()
 
 
 def test_leg_counts_refuses_a_missing_leg_column():
     with pytest.raises(FairValueRefusal) as caught:
         ri.leg_counts(_legs().drop(columns=["eff_bid"]), _inputs(), point="entry")
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.details["reason"] == "column_missing"
     assert caught.value.details["table"] == "legs"
     assert caught.value.details["columns"] == ["eff_bid"]
@@ -138,6 +154,7 @@ def test_leg_counts_refuses_a_missing_leg_column():
 def test_leg_counts_refuses_a_missing_input_column():
     with pytest.raises(FairValueRefusal) as caught:
         ri.leg_counts(_legs(), _inputs().drop(columns=["annIdiv"]), point="entry")
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.details["reason"] == "column_missing"
     assert caught.value.details["table"] == "inputs"
     assert caught.value.details["columns"] == ["annIdiv"]
@@ -147,6 +164,7 @@ def test_leg_counts_refuses_inputs_whose_index_differs_from_the_legs():
     inputs = _inputs().set_axis([10, 11, 12, 13], axis=0)
     with pytest.raises(FairValueRefusal) as caught:
         ri.leg_counts(_legs(), inputs, point="entry")
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.details["reason"] == "leg_inputs_misaligned"
 
 
@@ -166,6 +184,7 @@ def test_merging_two_halves_equals_counting_the_whole_leg_table():
                               ri.leg_counts(legs.iloc[2:], inputs.iloc[2:], point="entry")])
     whole = ri.leg_counts(legs, inputs, point="entry")
     pd.testing.assert_frame_equal(merged.reset_index(drop=True), whole.reset_index(drop=True), check_dtype=False)
+    assert pd.api.types.is_integer_dtype(merged["count"])
 
 
 def test_merging_two_halves_equals_counting_the_whole_exit_table():
@@ -173,13 +192,32 @@ def test_merging_two_halves_equals_counting_the_whole_exit_table():
     merged = ri.merge_counts([ri.exit_flag_counts(rows.iloc[:2]), ri.exit_flag_counts(rows.iloc[2:])])
     pd.testing.assert_frame_equal(merged.reset_index(drop=True), ri.exit_flag_counts(rows).reset_index(drop=True),
                                   check_dtype=False)
+    assert pd.api.types.is_integer_dtype(merged["count"])
+
+
+def test_merging_halves_that_share_group_keys_sums_them_to_the_hand_counts():
+    legs, inputs, rows = _legs(), _inputs(), _rows()
+    # Row 0 vs rows 1-3: legs 0 and 1 are both (2024, "A"); rows 0 and 1 are both arm 1.0, structure S, 2024.
+    merged_legs = ri.merge_counts([ri.leg_counts(legs.iloc[:1], inputs.iloc[:1], point="entry"),
+                                   ri.leg_counts(legs.iloc[1:], inputs.iloc[1:], point="entry")])
+    whole_legs = ri.leg_counts(legs, inputs, point="entry")
+    pd.testing.assert_frame_equal(merged_legs.reset_index(drop=True), whole_legs.reset_index(drop=True), check_dtype=False)
+    assert _as_dict(merged_legs) == _leg_want()
+    assert _as_dict(merged_legs)[(2024, "A", "rows", "")] == 2  # hand count: legs 0 and 1 are both (2024, "A")
+
+    merged_exits = ri.merge_counts([ri.exit_flag_counts(rows.iloc[:1]), ri.exit_flag_counts(rows.iloc[1:])])
+    whole_exits = ri.exit_flag_counts(rows)
+    pd.testing.assert_frame_equal(merged_exits.reset_index(drop=True), whole_exits.reset_index(drop=True), check_dtype=False)
+    assert pd.api.types.is_integer_dtype(merged_exits["count"])
+    assert _exit_dict(merged_exits) == EXIT_WANT
+    assert _exit_dict(merged_exits)[("1.0", "S", 2024)]["trades"] == 2  # hand count: rows 0 and 1 are both arm 1.0, 2024
 
 
 def test_merging_empty_frames_keeps_the_columns_and_an_empty_list_is_refused():
     empty = ri.leg_counts(_legs().iloc[0:0], _inputs().iloc[0:0], point="exit")
     merged = ri.merge_counts([empty, empty])
     assert merged.empty and list(merged.columns) == list(empty.columns)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="at least one frame"):
         ri.merge_counts([])
 
 
@@ -191,6 +229,8 @@ def test_write_publishes_each_table_then_one_receipt_bound_by_hashes(tmp_path):
     assert receipt["stage"] == "inner" and receipt["inputs_hash"] == "H1" and receipt["scope"] == "W"
     assert receipt["tables"] == {name: {"sha256": _sha(stage / f"{name}.parquet"), "rows": len(frame)}
                                  for name, frame in tables.items()}
+    for name, frame in tables.items():
+        pd.testing.assert_frame_equal(pd.read_parquet(stage / f"{name}.parquet"), frame)
     assert receipts.load_receipt(out / "receipts" / "report_inputs_inner.json") == receipt
 
 
@@ -221,6 +261,7 @@ def test_a_changed_inputs_hash_refuses_the_receipt(tmp_path):
     ri.write(out, "inner", "H", "W", _tables())
     with pytest.raises(Refusal) as caught:
         ri.write(out, "inner", "H2", "W", _tables())
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.details["reason"] == "tuning_receipt_changed"
 
 
@@ -248,7 +289,9 @@ def test_leg_counts_of_a_real_priced_table_counts_each_quote_row_once(tmp_path, 
     out = ri.leg_counts(priced, rows, point="entry")
 
     def total(metric):
-        return int(out.loc[out["metric"] == metric, "count"].sum())
+        return out.loc[out["metric"] == metric, "count"].sum()
+
+    assert pd.api.types.is_integer_dtype(out["count"])
 
     assert total("rows") == len(priced)
     assert set(rows["chain_kind"]) == {"fetch"}  # hand count: every synthetic quote row is chain_kind "fetch"
