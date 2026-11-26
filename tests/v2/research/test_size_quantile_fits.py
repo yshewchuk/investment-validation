@@ -114,6 +114,33 @@ def test_amended_fixed_parameters_refuse_before_any_fit(monkeypatch, change):
     assert calls == []
 
 
+BAD_LEVELS = [[], [0.1, 0.0], [0.1, 1.0], [0.5, 0.25], [0.25, 0.25], [0.1, True], [0.1, "0.5"]]
+
+
+@pytest.mark.parametrize("levels", BAD_LEVELS)
+def test_bad_level_set_refuses_in_arm_id_and_fit_fold_before_any_fit(monkeypatch, levels):
+    spec = {**SPEC, "levels": levels}
+    sealed = _fit_sealed()
+    refusal = ("EXPERIMENT_IDENTITY_CONFLICT", "grid_invalid")
+    with pytest.raises(OpsError) as exc:
+        fits.arm_id(spec, sealed, "Q_raw", (7, 300))
+    assert _refusal(exc) == refusal
+    calls = _patch_fit(monkeypatch)
+    with pytest.raises(OpsError) as exc:
+        fits.fit_fold(spec, sealed, TRAINING, EVALUATION)
+    assert _refusal(exc) == refusal
+    assert calls == []
+
+
+@pytest.mark.parametrize("spec", [_spec([7], [300, 5000]), _spec([7, 100], [300]), _spec([], [300])])
+def test_invalid_grid_cell_or_empty_axis_refuses_fit_fold_before_any_fit(monkeypatch, spec):
+    calls = _patch_fit(monkeypatch)
+    with pytest.raises(OpsError) as exc:
+        fits.fit_fold(spec, _fit_sealed(), TRAINING, EVALUATION)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "grid_invalid")
+    assert calls == []
+
+
 def test_no_earlier_outputs_returns_first_configuration():
     assert fits.select_configuration(SPEC, [], {}) == ((7, 300), {})
 

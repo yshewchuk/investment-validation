@@ -47,7 +47,7 @@ def q_raw(raw):
 
 
 def arm_id(spec, sealed, source, configuration):
-    params = recipe_for(spec, sealed, configuration, spec["levels"][0])["estimator"]["params"]  # admits the recipe
+    params = _recipes(spec, sealed, [configuration])[(configuration, spec["levels"][0])]["estimator"]["params"]
     cfg = {k: params[k] for k in ("max_leaf_nodes", "min_samples_leaf", *spec["grid"]["fixed"])}
     return content_hash({"source": source, "levels": list(spec["levels"]), "configuration": cfg})
 
@@ -64,6 +64,17 @@ def recipe_for(spec, sealed, configuration, level):
         if key not in params or (type(params[key]) is bool, params[key]) != (type(value) is bool, value):
             raise _refuse("fixed_parameters_mismatch", f"{key} is not the value fitted")
     return recipe
+
+
+def _recipes(spec, sealed, configs):
+    levels = list(spec["levels"])
+    real = all(isinstance(v, numbers.Real) and not isinstance(v, bool) and 0 < v < 1 for v in levels)
+    if not (levels and configs and real and all(a < b for a, b in zip(levels, levels[1:]))):
+        raise _refuse("grid_invalid", "levels must be real, in (0, 1), strictly increasing; axes non-empty")
+    try:
+        return {(c, level): recipe_for(spec, sealed, c, level) for c, level in itertools.product(configs, levels)}
+    except ValueError:
+        raise _refuse("grid_invalid", "a grid cell is not an admitted recipe") from None
 
 
 def _matrix(by_id, event_ids, columns):
@@ -120,12 +131,13 @@ def fit_fold(spec, sealed, training, evaluation_ids):
         train_x = _matrix(by_id, training_ids, columns)
         eval_x = _matrix(by_id, evaluation_ids, columns)
         configs = configurations(spec)
+        recipes = _recipes(spec, sealed, configs)
         progress = Progress("quantile fits", len(configs) * len(levels))
         with stage("quantile fold fits"):
             for c in configs:
                 cols = []
                 for level in levels:
-                    recipe = recipe_for(spec, sealed, c, level)
+                    recipe = recipes[(c, level)]
                     fit = fit_regression_predictions(recipe, train_x, y, eval_x, columns=columns)
                     cols.append(np.asarray(fit["predictions"], float))
                     progress.tick()
