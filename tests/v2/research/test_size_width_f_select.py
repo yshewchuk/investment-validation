@@ -357,6 +357,7 @@ def test_check_report_under_a_non_f_registration_refuses_inputs_that_bind_f(tmp_
 def test_check_report_refuses_an_f_report_whose_inputs_are_missing(tmp_path):
     with pytest.raises(shortvol.Refusal) as caught:
         sel.check_report(_f_receipt(), tmp_path)
+    assert caught.value.code == CONFLICT
     assert caught.value.details["reason"] == "tuning_receipt_missing"
 
 
@@ -414,7 +415,8 @@ def test_run_py_refuses_one_f_flag_without_the_other(tmp_path, monkeypatch, caps
     _install(monkeypatch, lambda args: pnl.sources())
     flags = ["--f-pins", _pins_file(tmp_path)] if only_pins else ["--f-quotes", "exp189_fake_quotes:make"]
     assert run_py.main(_argv(tmp_path, *flags, sources=FAKE)) == 2
-    assert json.loads(capsys.readouterr().out)["reason"] == "f_inputs_incomplete"
+    refused = json.loads(capsys.readouterr().out)
+    assert refused["refused"] == "INVALID_EXPERIMENT_SPEC" and refused["reason"] == "f_inputs_incomplete"
 
 
 def test_run_py_refuses_an_f_quotes_factory_that_does_not_resolve(tmp_path, monkeypatch, capsys):
@@ -438,7 +440,8 @@ def test_run_py_refuses_an_f_quotes_result_that_is_not_a_read_and_snapshot_pair(
     _install(monkeypatch, lambda args: pnl.sources())
     quotes = _quotes_factory(monkeypatch, result)
     assert run_py.main(_argv(tmp_path, "--f-pins", _pins_file(tmp_path), "--f-quotes", quotes, sources=FAKE)) == 2
-    assert json.loads(capsys.readouterr().out)["reason"] == "f_quotes_invalid"
+    refused = json.loads(capsys.readouterr().out)
+    assert refused["refused"] == "INVALID_EXPERIMENT_SPEC" and refused["reason"] == "f_quotes_invalid"
 
 
 @pytest.mark.parametrize("stage", ["inner", "outer"])
@@ -473,7 +476,8 @@ def test_run_py_report_of_an_f_spec_refuses_when_its_inputs_are_missing(tmp_path
 
     monkeypatch.setattr(size_width_report, "assemble", boom)
     assert run_py.main(_argv(tmp_path, sources=NO_SOURCES, stage="report")) == 2
-    assert json.loads(capsys.readouterr().out)["reason"] == "tuning_receipt_missing"
+    refused = json.loads(capsys.readouterr().out)
+    assert refused["refused"] == CONFLICT and refused["reason"] == "tuning_receipt_missing"
 
 
 def test_run_py_report_under_a_non_f_spec_refuses_an_out_dir_whose_inputs_bind_f(tmp_path, monkeypatch, capsys):
@@ -487,7 +491,8 @@ def test_run_py_report_under_a_non_f_spec_refuses_an_out_dir_whose_inputs_bind_f
 
     monkeypatch.setattr(size_width_report, "assemble", boom)
     assert run_py.main(_argv(tmp_path, sources=NO_SOURCES, stage="report")) == 2
-    assert json.loads(capsys.readouterr().out)["reason"] == "f_report_unbound"
+    refused = json.loads(capsys.readouterr().out)
+    assert refused["refused"] == CONFLICT and refused["reason"] == "f_report_unbound"
 
 
 # ---- 6. run.py maps the fair-value refusals to a JSON refusal and exit 2 ----------------

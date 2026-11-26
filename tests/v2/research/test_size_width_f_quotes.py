@@ -257,11 +257,11 @@ def test_table_is_built_once_per_side_and_rebuilt_for_a_new_chunk(tmp_path):
     first = fq.table(chunk)
     assert fq.table(chunk) is first
     assert len(calls) == 1 and set(calls[0]["obs_date"]) == {_ts(ENTRY)}  # entry never asks for exit dates
-    fq.table(chunk, exit=True)
-    fq.table(chunk, exit=True)
+    exit_first = fq.table(chunk, exit=True)
+    assert fq.table(chunk, exit=True) is exit_first
     assert len(calls) == 2 and set(calls[1]["obs_date"]) == {_ts(EXIT)}
     other = _chunk(frames, DEFAULT_PLAN)  # a new object with the same events and expiries reuses the tables
-    assert fq.table(other) is first and fq.table(other, exit=True) is not None
+    assert fq.table(other) is first and fq.table(other, exit=True) is exit_first
     assert len(calls) == 2
     subset = _chunk(frames, _plan(("E0", "AAA", ENTRY, EXIT)))  # other events build anew
     fq.table(subset)
@@ -515,7 +515,7 @@ def test_a_null_strike_in_a_requested_expiry_is_key_value(tmp_path):
     _refused(exc, "key_value")
 
 
-@pytest.mark.parametrize("column", ["bid", "ask", "ticker", "obs_date", "expiry", "right", "strike", "iv"])
+@pytest.mark.parametrize("column", fvi.QUOTE_COLUMNS)
 def test_a_quote_column_absent_from_the_read_is_refused_before_pricing(tmp_path, column):
     frames = _frames()
     read = _reader(_base(frames))

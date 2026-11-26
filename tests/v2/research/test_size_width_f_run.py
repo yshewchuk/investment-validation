@@ -337,12 +337,12 @@ def test_the_alpha_ladder_is_not_flat_and_matches_the_oracle_and_the_current_mar
         np.testing.assert_allclose(merged[f"{col}_f"].to_numpy(float), merged[f"{col}_c"].to_numpy(float), rtol=1e-12)
 
 
-def test_the_quote_reader_is_called_at_most_once_per_quarter_chunk_and_side(tmp_path, monkeypatch, m0, stubbed):
+def test_the_quote_reader_is_called_once_per_side_for_one_quarter_chunk(tmp_path, monkeypatch, m0, stubbed):
     frames, root, pins, src = _setup(tmp_path, monkeypatch)
     calls = []
     _f_run(src, tmp_path / "out", "inner", _fill(pins), sel.FInputs(pins, qt._reader(qt._base(frames), calls), "snap-1"))
     # one quarter chunk (2024Q1, both inner events) and two sides; the anchor and the fallback pass rebuild the chunk objects
-    assert 1 <= len(calls) <= 2
+    assert len(calls) == 2
 
 
 def test_two_draws_over_two_quarter_chunks_read_each_chunk_side_at_most_once(tmp_path, monkeypatch, m0, stubbed):
@@ -387,5 +387,6 @@ def test_outer_with_an_f_binding_other_than_the_inners_refuses_tuning_receipt_ch
     changed = qt._pins(root)
     with pytest.raises(Refusal) as caught:
         _f_run(src, out, "outer", _fill(changed), sel.FInputs(changed, qt._reader(qt._base(frames)), "snap-1"))
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.details["reason"] == "tuning_receipt_changed"
     assert not (out / "receipts" / "outer_summary.json").exists()
