@@ -537,7 +537,7 @@ def test_unpriced_and_expiring_rows_have_no_b_or_flags():
     extra = [
         quotes_frame([(90.0, "C", 0.0, 1000.0, 0.25, SPOT, False, RATE)], expiry=OBS),  # T = 0
         quotes_frame([(77.5, "P", np.nan, 1.5, 0.25, SPOT, False, RATE)]),              # unpriceable
-        quotes_frame([(77.5, "P", 0.0, 1000.0, 0.25, SPOT, False, np.nan)]),            # rate_unknown
+        quotes_frame([(77.5, "C", 0.0, 1000.0, 0.25, SPOT, False, np.nan)]),            # rate_unknown (call: distinct key)
     ]
     q = pd.concat([q] + extra, ignore_index=True)
     q["divAmt"], q["divDate"] = 0.5, OBS + pd.Timedelta(days=15)  # would apply if the row were priced

@@ -22,9 +22,10 @@ OK_R = {"files": 1, "rows": 2, "unreadable": 0, "unrecognized": 0, "extra_key": 
 UNITS = {"borrow30": "percent", "borrow2yr": "percent", "divAmt": "dollars_per_share"}
 
 
-def _carry(n):
-    """Carry columns for n loaded rate rows: borrow in percent (divided by 100 on load), no dividend."""
-    return {"borrow30": [10.0] * n, "borrow2yr": [10.0] * n, "divAmt": [0.0] * n, "divDate": pd.to_datetime([None] * n),
+def _carry(n, borrow=10.0):
+    """Carry columns for n rate rows, no dividend. Raw table files hold borrow in percent (divided by 100 on load);
+    frames passed directly to lookup_rate or entry_coverage hold decimals, so those callers pass borrow=0.10."""
+    return {"borrow30": [borrow] * n, "borrow2yr": [borrow] * n, "divAmt": [0.0] * n, "divDate": pd.to_datetime([None] * n),
             "annIdiv": [0.0] * n, "annActDiv": [0.0] * n, "assetType": [1.0] * n}
 
 
@@ -542,7 +543,7 @@ def test_lookup_rate_is_independent_of_row_order():
         "obs_date": pd.to_datetime(["2024-01-02", "2024-01-08", "2024-01-08", "2024-01-02"]),
         "iRate5wk": [0.02, 0.06, 0.07, 0.04],
         "iRateLt": [0.02, 0.05, 0.06, 0.03],
-        **_carry(4),
+        **_carry(4, borrow=0.10),
     })
     rows = pd.concat([_query("BBB", "2024-01-10", 200), _query("AAA", "2024-01-10", 0), _query("AAA", "2024-01-03", 0),
                       _query("BBB", "2024-01-10", 0), _query("AAA", "2024-01-09", 200), _query("AAA", "2024-01-10", 365)],
@@ -676,7 +677,8 @@ def test_lookup_rate_missing_rate_column_refused(column):
 
 def _rate_table(obs, r5=0.05, rl=0.04):
     n = len(obs)
-    return pd.DataFrame({"ticker": ["AAA"] * n, "obs_date": obs, "iRate5wk": [r5] * n, "iRateLt": [rl] * n, **_carry(n)})
+    return pd.DataFrame({"ticker": ["AAA"] * n, "obs_date": obs, "iRate5wk": [r5] * n, "iRateLt": [rl] * n,
+                         **_carry(n, borrow=0.10)})
 
 
 @pytest.mark.parametrize("rows", ["one-row", "empty-rows"])
@@ -757,7 +759,7 @@ def _coverage_tables():
     vols = pd.DataFrame({"ticker": ["AAA"], "obs_date": pd.to_datetime(["2024-01-02"]),
                          "expiry": pd.to_datetime(["2024-02-16"]), "strike": [100.0], "smvVol": [0.25]})
     rates = pd.DataFrame({"ticker": ["AAA"], "obs_date": pd.to_datetime(["2024-01-02"]),
-                          "iRate5wk": [0.05], "iRateLt": [0.04], **_carry(1)})
+                          "iRate5wk": [0.05], "iRateLt": [0.04], **_carry(1, borrow=0.10)})
     return fvi.InputTables(vols=vols, rates=rates, hashes={}, rate_rules={})
 
 
