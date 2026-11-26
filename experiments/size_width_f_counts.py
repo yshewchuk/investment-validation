@@ -1,6 +1,4 @@
-"""EXP-189 Amendment 1 (A1.4, A1.5): F views and counted non-trades, added in place to an F sweep's evaluate() result.
-Keys: ``views``, ``nontrades`` (any_k_f_skipped_share on E), ``nonpositive_debit`` (ladder sweeps: NaN-return trades per alpha).
-"""
+"""EXP-189 A1.4/A1.5: F views and non-trade counts added to an F sweep's evaluate() result (keys in README)."""
 import pandas as pd
 
 from experiments import size_width_account as account
@@ -25,12 +23,12 @@ def views(rows, names):
                 "mean_ret": None if rows.empty else float((rows[pair[v][1]] / rows[pair[v][0]] - 1.0).mean())} for v in names}
 
 
-def nontrades(sweep, name, arm, window):
+def nontrades(sweep, name, arm, window, production=None):
     """Counts of the candidates of (name, arm) by event date in ``window``, against production (name, 1.0)."""
-    key, prod = (name, arm), (name, 1.0)
+    key, prod, p = (name, arm), (name, 1.0), (sweep if production is None else production)
     cands = _in(sweep.scored.get(key, []), window)
-    skip, has = _skipped(cands), prod in sweep.scored
-    prod_skip = _skipped(_in(sweep.scored[prod], window)) if has else set()
+    skip, has = _skipped(cands), prod in p.scored
+    prod_skip = _skipped(_in(p.scored[prod], window)) if has else set()
     out = {"candidates": len(cands), "f_skipped": len(skip),
            "reasons": {str(r): int(c) for r, c in _in(sweep.declined_frames.get(key, []), window).get("reason", pd.Series(dtype=object)).fillna("none").value_counts().items()},
            "only_arm_f_skipped": len(skip - prod_skip) if has else None,
@@ -42,11 +40,11 @@ def nontrades(sweep, name, arm, window):
     return out
 
 
-def add(result, sweep, pairs, window):
+def add(result, sweep, pairs, window, production=None):
     """Adds the views and counts of ``pairs`` over ``window`` to ``result`` (evaluate's dict), in place."""
     for name, arm in pairs:
         result["structures"][name].update(views=views(sweep.rows([(name, arm)], window), ("F", "mid", "harsh")),
-                                          nontrades=nontrades(sweep, name, arm, window))
+                                          nontrades=nontrades(sweep, name, arm, window, production))
     rows = sweep.rows(pairs, window)
     result["account"]["views"] = views(rows, ("F", "mid", "harsh", *VARIANTS))
     if getattr(sweep, "ladder", False):  # a ladder return is NaN exactly when the repriced debit is not positive

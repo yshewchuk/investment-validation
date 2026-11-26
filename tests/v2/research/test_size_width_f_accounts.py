@@ -178,7 +178,7 @@ def _cand(rows):
 
 def test_nontrades_count_by_event_date_and_compare_each_arm_with_production():
     scored = {(NAME, 1.0): [_cand([("E0", "2024-01-05", None), ("E1", "2024-01-06", F_SKIP), ("E2", "2023-06-01", None)])],
-              (NAME, 0.5): [_cand([("E0", "2024-01-05", F_SKIP), ("E1", "2024-01-06", None)])],
+              (NAME, 0.5): [_cand([("E0", "2024-01-05", F_SKIP), ("E1", "2024-01-06", F_SKIP)])],
               (NAME, E_ARM): [_cand([("E0", "2024-01-05", None), ("E1", "2024-01-06", F_SKIP)])]}
     declined = {(NAME, 1.0): [_cand([("E1", "2024-01-06", F_SKIP), ("E3", "2024-01-07", np.nan),
                                      ("E2", "2023-06-01", "below_cutoff")])]}
@@ -187,7 +187,7 @@ def test_nontrades_count_by_event_date_and_compare_each_arm_with_production():
     assert prod == {"candidates": 2, "f_skipped": 1, "reasons": {F_SKIP: 1, "none": 1},
                     "only_arm_f_skipped": 0, "only_production_f_skipped": 0}
     half = counts.nontrades(sweep, NAME, 0.5, WINDOW)
-    assert half == {"candidates": 2, "f_skipped": 1, "reasons": {}, "only_arm_f_skipped": 1, "only_production_f_skipped": 1}
+    assert half == {"candidates": 2, "f_skipped": 2, "reasons": {}, "only_arm_f_skipped": 1, "only_production_f_skipped": 0}
     e = counts.nontrades(sweep, NAME, E_ARM, WINDOW)
     assert e == {"candidates": 2, "f_skipped": 1, "reasons": {}, "only_arm_f_skipped": 0, "only_production_f_skipped": 0,
                  "any_k_f_skipped_share": 1.0}
@@ -213,6 +213,21 @@ def test_evaluate_on_an_f_sweep_carries_the_views_and_is_json_safe(tmp_path):
     assert res["account"]["views"]["F"]["total_return"] == pytest.approx(res["account"]["total_return"], rel=1e-12)
     assert res["structures"][NAME]["nontrades"]["candidates"] == 2
     assert "nonpositive_debit" not in res["account"]
+
+    def expect(rows, v):
+        entry, exit_ = ("entry_cost", "exit_value") if v == "F" else (f"entry_cost_{v}", f"exit_value_{v}")
+        return _total_return(_plain(rows, entry, exit_)), float((rows[exit_] / rows[entry] - 1.0).mean())
+
+    acct_rows = sweep.rows([(n, 1.0) for n in sv.NAMES], WINDOW)
+    for v in ("F", "mid", "harsh", *VARIANTS):
+        tr, mr = expect(acct_rows, v)
+        assert res["account"]["views"][v]["total_return"] == pytest.approx(tr, rel=1e-12)
+        assert res["account"]["views"][v]["mean_ret"] == pytest.approx(mr, rel=1e-12)
+    rows = sweep.rows([(NAME, 1.0)], WINDOW)
+    for v in ("F", "mid", "harsh"):
+        tr, mr = expect(rows, v)
+        assert res["structures"][NAME]["views"][v]["total_return"] == pytest.approx(tr, rel=1e-12)
+        assert res["structures"][NAME]["views"][v]["mean_ret"] == pytest.approx(mr, rel=1e-12)
     json.dumps(res, allow_nan=False)
 
 
@@ -255,9 +270,9 @@ def test_t9_trades_and_stats_read_f_on_an_f_sweep(tmp_path):
 
 
 def test_fallback_accounts_carry_f_only_on_an_f_fallback(monkeypatch):
-    def fake(sweep, by, window):
+    def fake(sweep, by, window, production=None):
         acc = {"total_return": 0.1 if sweep.name == "fb" else 0.2, "views": {"F": {"total_return": 0.3}}}
-        return {"account": acc}
+        return {"account": acc, "structures": {n: {"nontrades": {"from": sweep.name, "production": getattr(production, "name", None)}} for n in sv.NAMES}}
 
     monkeypatch.setattr(fallback, "evaluate", fake)
     fb = types.SimpleNamespace(name="fb", f=True, factors={n: 1.0 for n in sv.NAMES})
@@ -265,6 +280,31 @@ def test_fallback_accounts_carry_f_only_on_an_f_fallback(monkeypatch):
     got = fallback.accounts(fb, other, {"jun": WINDOW})["jun"]
     assert got["fallback"] == 0.1 and got["base"] == 0.2
     assert got["f"]["fallback"]["views"]["F"]["total_return"] == 0.3
-    assert got["f"]["base"] == {"views": {"F": {"total_return": 0.3}}}
+    assert got["f"]["fallback"]["nontrades"][NAME] == {"from": "fb", "production": "base"}
+    assert got["f"]["base"] == {"views": {"F": {"total_return": 0.3}},
+                                "nontrades": {n: {"from": "base", "production": None} for n in sv.NAMES}}
     fb.f = False
     assert "f" not in fallback.accounts(fb, other, {"jun": WINDOW})["jun"]
+
+
+def _stub(name, scored, declined, ks):
+    """An F sweep stand-in with no taken rows (flat accounts); the non-trade counts read ``scored`` and ``declined``."""
+    empty = _f_trades().iloc[:0]
+    return types.SimpleNamespace(name=name, f=True, ladder=False, ks=ks, scored=scored, declined_frames=declined,
+                                 factors={n: 1.0 for n in sv.NAMES}, rows=lambda pairs, window: empty)
+
+
+def test_fallback_nontrades_reach_the_receipted_summary_with_base_as_production():
+    """Real tuning.evaluate: the fallback's and base's non-trade counts survive accounts(), and the production is base, not fb."""
+    fb = _stub(NAME, {(NAME, E_ARM): [_cand([("E0", "2024-01-05", None), ("E1", "2024-01-06", F_SKIP), ("E4", "2024-01-08", None)])]},
+               {(NAME, E_ARM): [_cand([("D1", "2024-01-10", "below_cutoff"), ("D2", "2024-01-11", np.nan)])]}, (1.0,))
+    base = _stub("base", {(NAME, 1.0): [_cand([("E0", "2024-01-05", None), ("E2", "2024-01-06", F_SKIP),
+                                              ("E3", "2024-01-07", F_SKIP), ("E4", "2024-01-08", None)])]},
+                 {(NAME, 1.0): [_cand([("D9", "2024-01-09", "below_cutoff")])]}, (1.0,))
+    got = fallback.accounts(fb, base, {"jun": WINDOW})["jun"]
+    assert got["f"]["fallback"]["nontrades"][NAME] == {"candidates": 3, "f_skipped": 1, "reasons": {"below_cutoff": 1, "none": 1},
+                                                       "only_arm_f_skipped": 1, "only_production_f_skipped": 2, "any_k_f_skipped_share": None}
+    assert got["f"]["base"]["nontrades"][NAME] == {"candidates": 4, "f_skipped": 2, "reasons": {"below_cutoff": 1},
+                                                   "only_arm_f_skipped": 0, "only_production_f_skipped": 0}
+    assert set(got["f"]["fallback"]["nontrades"]) == set(sv.NAMES)
+    json.dumps(got, allow_nan=False)

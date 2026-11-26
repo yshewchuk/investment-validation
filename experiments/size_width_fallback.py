@@ -134,11 +134,12 @@ def t9(fb, base, phi, window):
 
 
 def accounts(fb, base, windows):
-    """{label: {"fallback", "base"}} total returns (E_ARM everywhere; base at fb.factors); on an F sweep also "f": views and nonpositive_debit."""
+    """{label: {"fallback", "base"}} total returns (E_ARM everywhere; base at fb.factors); on an F sweep also "f": views, nonpositive_debit, nontrades."""
     out, keep = {}, ("views", "nonpositive_debit")
     for label, w in windows.items():
-        fb_acc, base_acc = evaluate(fb, {n: E_ARM for n in sv.NAMES}, w)["account"], evaluate(base, fb.factors, w)["account"]
-        out[label] = {"fallback": fb_acc["total_return"], "base": base_acc["total_return"]}
+        fb_res, base_res = evaluate(fb, {n: E_ARM for n in sv.NAMES}, w, production=base), evaluate(base, fb.factors, w)
+        out[label] = {"fallback": fb_res["account"]["total_return"], "base": base_res["account"]["total_return"]}
         if fb.f:
-            out[label]["f"] = {"fallback": {k: fb_acc[k] for k in keep if k in fb_acc}, "base": {k: base_acc[k] for k in keep if k in base_acc}}
+            out[label]["f"] = {side: {**{k: res["account"][k] for k in keep if k in res["account"]}, "nontrades": {n: res["structures"][n]["nontrades"] for n in sv.NAMES}}
+                               for side, res in (("fallback", fb_res), ("base", base_res))}
     return out

@@ -91,7 +91,7 @@ def e_summary(sweep, window=INNER):
     return out
 
 
-def evaluate(sweep, by_structure, window):
+def evaluate(sweep, by_structure, window, production=None):
     """Seven-structure $200,000 account and each structure's own account in ``window``, at the deciding marks; ``by_structure``: structure -> k or E_ARM."""
     pairs = [(n, by_structure[n] if by_structure[n] == E_ARM else admit_k(by_structure[n])) for n in NAMES]
     per = {}
@@ -101,7 +101,7 @@ def evaluate(sweep, by_structure, window):
     rows = sweep.rows(pairs, window)
     result = {"account": {**account.simulate_account(rows, account.deciding_mark(rows)), "trades": int(len(rows))}, "structures": per}
     if getattr(sweep, "f", False):
-        size_width_f_counts.add(result, sweep, pairs, window)
+        size_width_f_counts.add(result, sweep, pairs, window, production)
     return result
 
 
