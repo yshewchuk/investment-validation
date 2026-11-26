@@ -43,7 +43,7 @@ Per quote row, with `S` the row's curated `spot` (the one strike resolution uses
 - **Puts:** American, by a Cox-Ross-Rubinstein tree with **200 steps** (mine), vectorised over rows, early exercise at every step. Vol is floored at 0.01; a tree probability outside (0, 1) is `no_fair_value`.
 - **Rate `r`:** `iRate5wk` up to 35 calendar days to expiry, linear to `iRateLt` at 365, flat beyond; if one of the two is missing, the other is used (mine). The row is the ticker's for `obs_date`, else its latest earlier one within 7 calendar days; none: `rate_unknown`.
 - **Carry rate `b` (F7):** ORATS borrow, from that same row. By the leg's calendar days to expiry: `borrow30` up to 30, linear to `borrow2yr` at 730, flat beyond; if one is missing or out of range, the other is used (interpolation mine). The underlying drifts at `b` (forward `S*e^(bT)`) and cash flows discount at `r`: in the tree `p = (e^(b*dt) - d)/(u - d)`. This is a yield of `r - b`, and rests on the unconfirmed reading in section 3 (using it this way is mine). **Both missing: `b = r`**, flagged `carry_fallback` and counted. No further search back.
-- **Dividend (F7):** at most one discrete cash dividend, `D = divAmt` on `t_D = divDate`, read as the ex-date (unconfirmed), by the escrowed method: the tree runs on `S - D*e^(-r*t_D)`, and exercise values before `t_D` add back `D*e^(-r*(t_D - t))`. `k` and the fit set keep `S`. The first case that holds decides:
+- **Dividend (F7):** at most one discrete cash dividend, `D = divAmt` on `divDate`, read as the ex-date (unconfirmed), at `t_D = (divDate - obs_date) / 365` years (calendar days, as `T`; the tree's node times `t` are years from `obs_date` too), by the escrowed method: the tree runs on `S - D*e^(-r*t_D)`, and exercise values before `t_D` add back `D*e^(-r*(t_D - t))`. `k` and the fit set keep `S`. The first case that holds decides:
 
 | Case | Dividend |
 | --- | --- |
@@ -139,7 +139,7 @@ New constants are a **new constants id**. A consumer needs a new spec hash and P
 | R1 inputs | snapshot, manifest or table hash does not bind; manifest absent or reporting unread payloads; required column absent; duplicate quote, vol or rate key; vol unit check fails | refuse `EXPERIMENT_IDENTITY_CONFLICT` with a `details.reason`; no partial output; nothing imputed except the rules written above |
 | R1 per row | missing vol, rate or quote | section 7 statuses, counted; never silent or zero |
 | R1 per row (F7) | missing carry or dividend input | section 4's fallbacks (`b = r`; no dividend), flagged and counted; not a status. A column absent from the bound table, or section 3's `input_unit` refusal, is `R1 inputs` |
-| R2 resources | put tree on unique rows | quarter chunks, each row priced once per run, under the consumer's `bounded_run` limit; over it refuses `RESOURCE_LIMIT_EXCEEDED`, no partial report. Smoke first |
+| R2 resources | American tree (puts, and from F7 the calls routed to it) on unique rows | quarter chunks, each row priced once per run, under the consumer's `bounded_run` limit; over it refuses `RESOURCE_LIMIT_EXCEEDED`, no partial report. Smoke first |
 | R3 determinism | no randomness or clock | values never depend on row order, chunking or requested structures |
 | R4 replay | stored leg tables | atomic writes with a receipt binding input hashes and F id; replay read-only; changed input refuses |
 | R5 identity | `fvf_id` | content hash of F's source files and constants (pricer steps, rate, carry, dividend and smile rules, concession, guard); a consumer's spec binds it, and a mismatch refuses |
@@ -165,7 +165,7 @@ Estimates: non-test code lines / test lines / doc words, excluding the re-ingest
 | Slice | Scope | Size | After |
 | --- | --- | --- | --- |
 | F1 | Table and snapshot binding, unit and rate rules, closure-hash tests, entry **input** coverage report | ~130 / ~140 / 50 | re-ingest merged |
-| F2 | American put tree, European call, pricer reference tests | ~100 / ~140 / 30 | this PR |
+| F2 | American put tree, European call, pricer reference tests | ~100 / ~140 / 30 | design merge |
 | F3 | Fit set, smile, source choice, leg table values | ~120 / ~150 / 40 | F2 |
 | F4 | Concession, repaired and unknown rules, sensitivities, structure entry, guard, exit | ~150 / ~180 / 50 | F3 |
 | F5 | `fvf_id`, receipts, diagnostics (with status and source coverage), chunked smoke | ~130 / ~130 / 60 | F1, F4, F7 |
