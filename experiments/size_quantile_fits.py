@@ -1,10 +1,10 @@
 """EXP-190 Q3a (design sections 4, 7): one fold's quantile fits, walk-forward configuration selection, the
-non-crossing sort and arm ids. Pure: reads and writes no files and no labels. No production caller yet. The
-year-by-year loop, label reads, `bind_grid` and the fit receipts are the next slice; real-data fits also need
-`size_quantile_prereg.require_preregistration` first. Uses v14's fit path (`fit_regression_predictions`: signed
-domain so raw outputs are not clipped, native NaN, all-empty training columns zeroed, one thread). Row masks are
-v14's: every training pair the caller passes, no feature filter. A `ValueError` from a fit propagates: the caller
-records the fold's arm as `fit_failed` and does not retry."""
+non-crossing sort and arm ids. Pure: reads and writes no files; labels are supplied by the caller. No production
+caller yet. The year-by-year loop, label reads, `bind_grid` and the fit receipts are the next slice; real-data
+fits also need `size_quantile_prereg.require_preregistration` first. Uses v14's fit path
+(`fit_regression_predictions`: signed domain so raw outputs are not clipped, native NaN, all-empty training columns
+zeroed, one thread). Row masks are v14's: every training pair the caller passes, no feature filter. A `ValueError`
+from a fit propagates: the caller records the fold's arm as `fit_failed` and does not retry."""
 import itertools
 
 import numpy as np
@@ -36,18 +36,25 @@ def q_raw(raw):
     return np.maximum(np.sort(np.asarray(raw, float), axis=1), 0.0)
 
 
-def arm_id(source, levels, configuration, fixed):
+def arm_id(spec, sealed, source, configuration):
+    recipe_for(spec, sealed, configuration, spec["levels"][0])  # admission: refuses unless the fixed grid is bound
+    fixed = spec["grid"]["fixed"]
     cfg = {"max_leaf_nodes": configuration[0], "min_samples_leaf": configuration[1], **fixed}
-    return content_hash({"source": source, "levels": list(levels), "configuration": cfg})
+    return content_hash({"source": source, "levels": list(spec["levels"]), "configuration": cfg})
 
 
 def recipe_for(spec, sealed, configuration, level):
     fixed = spec["grid"]["fixed"]
-    return regression_recipe(target_domain="signed", model="history_hgb", columns=sealed["model_columns"],
-                             feature_dictionary_hash=sealed["dictionary_hash"], max_leaf_nodes=configuration[0],
-                             min_samples_leaf=configuration[1], learning_rate=fixed["learning_rate"],
-                             l2_regularization=fixed["l2_regularization"], loss="quantile", quantile=level,
-                             max_iter=fixed["max_iter"])
+    recipe = regression_recipe(target_domain="signed", model="history_hgb", columns=sealed["model_columns"],
+                               feature_dictionary_hash=sealed["dictionary_hash"], max_leaf_nodes=configuration[0],
+                               min_samples_leaf=configuration[1], learning_rate=fixed["learning_rate"],
+                               l2_regularization=fixed["l2_regularization"], loss="quantile", quantile=level,
+                               max_iter=fixed["max_iter"])
+    params = recipe["estimator"]["params"]
+    for key, value in fixed.items():
+        if key not in params or (type(params[key]) is bool, params[key]) != (type(value) is bool, value):
+            raise _refuse("fixed_parameters_mismatch", f"{key} is not the value fitted")
+    return recipe
 
 
 def _matrix(by_id, event_ids, columns):
@@ -89,16 +96,17 @@ def select_configuration(spec, outputs, labels):
 
 def fit_fold(spec, sealed, training, evaluation_ids):
     """`training`: [(event_id, y)] label-qualified before the fold cutoff by the caller."""
-    by_id = {r["event_id"]: r for r in sealed["rows"]}
-    if len(by_id) != len(sealed["rows"]):
-        raise _refuse("panel_row_duplicate", "an event has more than one lead-1 row")
-    columns, levels = sealed["model_columns"], list(spec["levels"])
-    train_x = _matrix(by_id, [e for e, _ in training], columns)
-    y = np.asarray([v for _, v in training], dtype=float)
-    eval_x = _matrix(by_id, evaluation_ids, columns)
-    configs = configurations(spec)
-    progress, raw = Progress("quantile fits", len(configs) * len(levels)), {}
+    raw = {}
     try:
+        by_id = {r["event_id"]: r for r in sealed["rows"]}
+        if len(by_id) != len(sealed["rows"]):
+            raise _refuse("panel_row_duplicate", "an event has more than one lead-1 row")
+        columns, levels = sealed["model_columns"], list(spec["levels"])
+        train_x = _matrix(by_id, [e for e, _ in training], columns)
+        y = np.asarray([v for _, v in training], dtype=float)
+        eval_x = _matrix(by_id, evaluation_ids, columns)
+        configs = configurations(spec)
+        progress = Progress("quantile fits", len(configs) * len(levels))
         with stage("quantile fold fits"):
             for c in configs:
                 cols = []
@@ -109,5 +117,5 @@ def fit_fold(spec, sealed, training, evaluation_ids):
                     progress.tick()
                 raw[_key(c)] = np.column_stack(cols).tolist()
     except MemoryError:
-        raise fail("RESOURCE_LIMIT_EXCEEDED", "a quantile fit ran out of memory") from None
+        raise fail("RESOURCE_LIMIT_EXCEEDED", "a quantile fold ran out of memory") from None
     return {"event_ids": list(evaluation_ids), "raw": raw}

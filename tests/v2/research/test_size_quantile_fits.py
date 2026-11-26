@@ -2,6 +2,7 @@
 import numpy as np
 import pytest
 
+from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import OpsError
 from experiments import size_quantile_fits as fits
 from experiments.size_quantile_prereg import load_spec
@@ -66,11 +67,41 @@ def test_recipe_for_binds_fixed_grid_quantile_loss_and_signed_domain():
     assert recipe["features"] == ["f_a", "f_b", "f_empty"]
 
 
-def test_arm_id_differs_by_configuration_and_source():
-    fixed = SPEC["grid"]["fixed"]
-    arm = fits.arm_id("Q_raw", LEVELS, (7, 300), fixed)
-    assert arm != fits.arm_id("Q_raw", LEVELS, (15, 300), fixed)
-    assert arm != fits.arm_id("Q", LEVELS, (7, 300), fixed)
+def test_arm_id_is_hash_of_fitted_payload_and_differs_by_configuration_and_source():
+    sealed = _fit_sealed()
+    expected = {"source": "Q_raw", "levels": [0.1, 0.25, 0.4, 0.5, 0.6, 0.75, 0.9],
+                "configuration": {"max_leaf_nodes": 7, "min_samples_leaf": 300, "learning_rate": 0.03,
+                                  "l2_regularization": 10.0, "max_iter": 3000, "early_stopping": True,
+                                  "validation_fraction": 0.1, "n_iter_no_change": 10, "tol": 1e-07,
+                                  "random_state": 0}}
+    arm = fits.arm_id(SPEC, sealed, "Q_raw", (7, 300))
+    assert arm == content_hash(expected)
+    assert arm != fits.arm_id(SPEC, sealed, "Q_raw", (15, 300))
+    assert arm != fits.arm_id(SPEC, sealed, "Q", (7, 300))
+
+
+AMENDED_FIXED = [
+    {"random_state": 1}, {"validation_fraction": 0.2}, {"n_iter_no_change": 5}, {"tol": 1e-3},
+    {"early_stopping": False}, {"early_stopping": 1}, {"max_bins": 127}, {"nope": 1},
+]
+
+
+@pytest.mark.parametrize("change", AMENDED_FIXED)
+def test_amended_fixed_parameters_refuse_before_any_fit(monkeypatch, change):
+    spec = {**SPEC, "grid": {**SPEC["grid"], "fixed": {**SPEC["grid"]["fixed"], **change}}}
+    sealed = _fit_sealed()
+    refusal = ("EXPERIMENT_IDENTITY_CONFLICT", "fixed_parameters_mismatch")
+    with pytest.raises(OpsError) as exc:
+        fits.recipe_for(spec, sealed, (7, 300), 0.1)
+    assert _refusal(exc) == refusal
+    with pytest.raises(OpsError) as exc:
+        fits.arm_id(spec, sealed, "Q_raw", (7, 300))
+    assert _refusal(exc) == refusal
+    calls = _patch_fit(monkeypatch)
+    with pytest.raises(OpsError) as exc:
+        fits.fit_fold(spec, sealed, TRAINING, EVALUATION)
+    assert _refusal(exc) == refusal
+    assert calls == []
 
 
 def test_no_earlier_outputs_returns_first_configuration():
@@ -174,6 +205,16 @@ def test_memory_error_refuses_resource_limit(monkeypatch):
         raise MemoryError
 
     _patch_fit(monkeypatch, fit=out_of_memory)
+    with pytest.raises(OpsError) as exc:
+        fits.fit_fold(SPEC, _fit_sealed(), TRAINING, EVALUATION)
+    assert exc.value.problem.code == "RESOURCE_LIMIT_EXCEEDED"
+
+
+def test_memory_error_while_building_matrices_refuses_resource_limit(monkeypatch):
+    def out_of_memory(*args):
+        raise MemoryError
+
+    monkeypatch.setattr(fits, "_matrix", out_of_memory)
     with pytest.raises(OpsError) as exc:
         fits.fit_fold(SPEC, _fit_sealed(), TRAINING, EVALUATION)
     assert exc.value.problem.code == "RESOURCE_LIMIT_EXCEEDED"
