@@ -2,6 +2,7 @@
 
 Every sweep is built on the run's pricing: ``PRICING`` (current marks), or the F copy an F spec opens. The inner stage holds every quarter chunk in memory (W3's contract:
 the fake and the anchor re-use the months). The outer stage freezes each 2025 month before its labels are read (R6)."""
+import functools
 import math
 import os
 import sys
@@ -148,6 +149,11 @@ def _load(src, stage, ids, receipt, f=None):
             "exits": base._exits(src), "inputs_hash": inputs_hash, "inputs": inputs, "pricing": f.pricing if f is not None else PRICING}
 
 
+def _tap(store, arm):
+    """The on_sweep hook of a fake or anchor call: the store's count_sweep for ``arm``; None when the stage has no store."""
+    return None if store is None else functools.partial(store.count_sweep, arm)
+
+
 def _inner(src, out, loaded):
     """The inner stage. It materialises every inner quarter chunk (``months``), which the fake and the anchor re-use (W3's contract)."""
     ids, plan, table, labels = loaded["ids"], loaded["plan"], loaded["table"], loaded["labels"]
@@ -175,9 +181,9 @@ def _inner(src, out, loaded):
             raise
         model, c = None, {"status": "smoke_no_fake", "calibration": None}
     else:
-        c = fake.run_fake(months, table, printed, model, sessions, out, inputs_hash, pricing=loaded.get("pricing", PRICING))
+        c = fake.run_fake(months, table, printed, model, sessions, out, inputs_hash, pricing=loaded.get("pricing", PRICING), on_sweep=_tap(sweep.store, "C"))
     _log(f"c_status={c['status']}")
-    anchor = {name: {str(k): v for k, v in row.items()} for name, row in fake.run_anchor(months, table, printed, sessions, pricing=loaded.get("pricing", PRICING)).items()}
+    anchor = {name: {str(k): v for k, v in row.items()} for name, row in fake.run_anchor(months, table, printed, sessions, pricing=loaded.get("pricing", PRICING), on_sweep=_tap(sweep.store, "anchor")).items()}
     res = tuning.run_inner(sweep, out, inputs_hash)
     results = res["results"]
     by = {"production": {n: 1.0 for n in NAMES}, "A": tuning.factors("A", res["tuned"]["A"]), "B": tuning.factors("B", res["tuned"]["B"]),

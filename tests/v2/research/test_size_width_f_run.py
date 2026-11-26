@@ -8,6 +8,7 @@ Independent oracle: the 2025 F rows (debit, proceeds, mid pair, ladder returns, 
 account are checked against values computed IN THIS TEST from the stored synthetic quotes and the F design formulas
 (guides/fair_value_fill_design.md sections 5-6). Nothing from the experiments fair_value_*, size_width_f_* or
 size_width_pricing modules computes an expected value here; only the legs (strike resolution) come from resolve_priced."""
+import functools
 import hashlib
 import json
 import sys
@@ -26,13 +27,16 @@ from experiments import size_pnl_receipts as receipts
 from experiments import size_pnl_shortvol as sv
 from experiments import size_width_account as account
 from experiments import size_width_driver as driver
+from experiments import size_width_errmodel as errmodel
 from experiments import size_width_f_fills as ff
 from experiments import size_width_f_quotes as wf
 from experiments import size_width_f_select as sel
+from experiments import size_width_f_store as st
 from experiments import size_width_fake as fake
 from experiments import size_width_pricing as seam
 from experiments import size_width_report as report
 from experiments.size_pnl_shortvol import Refusal
+from experiments.size_width_sizing import GRID
 from tests.v2.research import test_size_pnl_driver as pnl
 from tests.v2.research import test_size_width_f_quotes as qt
 from tests.v2.research.test_size_width_run import OK
@@ -575,3 +579,43 @@ def test_a_structure_with_no_taken_trade_still_stores_its_entry_candidates_and_n
     assert len(k1) > 0
     expected = sorted((float(chunk["strike"][leg["idx"]]), leg["side"]) for leg in _traded(chunk, pos, eid, name))
     assert sorted(zip(k1["strike"].astype(float), k1["side"])) == expected
+
+
+def test_the_inner_receipt_lists_the_anchor_nontrade_counts_for_every_structure_and_grid_k(tmp_path, monkeypatch, m0, stubbed):
+    out, _pins, _src, _frames = _run_both(tmp_path, monkeypatch)
+    tables = receipts.load_receipt(out / "receipts" / "report_inputs_inner.json")["tables"]
+    assert "anchor_c_nontrades" in tables
+    counts = pd.read_parquet(out / "report_inputs" / "inner" / "anchor_c_nontrades.parquet")
+    anchor = counts[counts["arm"] == "anchor"]
+    assert set(anchor["draws"]) == {1}
+    cands = anchor[anchor["metric"] == "candidates"]
+    assert set(zip(cands["structure"], cands["k"].astype(float), cands["year"])) == {(n, float(k), y) for n in sv.NAMES for k in GRID for y in (2023, 2024)}
+    assert len(cands) == len(sv.NAMES) * len(GRID) * 2
+    # PLAN has two 2024 events (E1, E2) and none in 2023: each (structure, k) scores each 2024 event once, and 2023H2 holds no event.
+    assert set(cands.loc[cands["year"] == 2024, "count"]) == {2}
+    assert set(cands.loc[cands["year"] == 2023, "count"]) == {0}
+    assert "anchor_c_nontrades" not in receipts.load_receipt(out / "receipts" / "report_inputs_outer.json")["tables"]
+
+
+def test_an_f_inner_run_hands_the_anchor_and_c_sweeps_their_store_hooks(tmp_path, monkeypatch, m0, stubbed):
+    frames, root, pins, src = _setup(tmp_path, monkeypatch)
+    out, anchor_hooks, c_hooks = tmp_path / "out", [], []
+    real_anchor = fake.run_anchor
+
+    def anchor_spy(*args, **kwargs):  # calls through: the real anchor sweep runs with the hook it was given
+        anchor_hooks.append(kwargs.get("on_sweep"))
+        return real_anchor(*args, **kwargs)
+
+    def c_stub(*args, **kwargs):  # the 4-event fit is refused (smoke_no_fake), so the fit is given a model and run_fake only records its hook
+        c_hooks.append(kwargs.get("on_sweep"))
+        return {"status": "fake_not_calibrated", "calibration": None}
+
+    monkeypatch.setattr(errmodel, "fit", lambda forecast, label: {"L": 1.0, "b": 0.8, "s": 0.2, "mean_log_y": 1.0, "n": 300})
+    monkeypatch.setattr(fake, "run_fake", c_stub)
+    monkeypatch.setattr(fake, "run_anchor", anchor_spy)
+    _f_run(src, out, "inner", _fill(pins), sel.FInputs(pins, qt._reader(qt._base(frames)), "snap-1"))
+    assert len(anchor_hooks) == 1 and len(c_hooks) == 1
+    for hook, arm in ((anchor_hooks[0], "anchor"), (c_hooks[0], "C")):
+        assert isinstance(hook, functools.partial) and hook.func.__func__ is st.Store.count_sweep
+        assert hook.args == (arm,) and hook.keywords == {}
+        assert hook.func.__self__.out == out and hook.func.__self__.stage == "inner"
