@@ -131,6 +131,14 @@ def _rewrite(path, **changes):
     path.write_text(json.dumps({**document, "content_hash": content_hash(document)}, sort_keys=True))
 
 
+def _forge(path, mutate):
+    """Apply `mutate` to a receipt's body, then recompute its content hash: a forgery that verifies."""
+    document = json.loads(path.read_text())
+    document.pop("content_hash")
+    mutate(document)
+    path.write_text(json.dumps({**document, "content_hash": content_hash(document)}, sort_keys=True))
+
+
 def _edit_raw(path):
     document = json.loads(path.read_text())
     document["raw"]["7x300"][0][0] = 99.0
@@ -153,6 +161,43 @@ CORRUPTIONS = {
     "json_list": lambda path: path.write_text("[]"),
     "missing_hash": _drop_hash,
     "directory": _directory,
+}
+
+
+def _value(value):
+    def mutate(document):
+        document["raw"]["7x300"][0][0] = value
+    return mutate
+
+
+def _bump_raw(document):
+    document["raw"]["7x300"][0][0] = 99.0
+
+
+# Each forgery is applied to the last year's receipt with its content hash recomputed, so only the edit is wrong.
+FORGERIES = {
+    "ok_with_empty_raw": lambda d: d.update(raw={}),
+    "status_missing": lambda d: d.pop("status"),
+    "status_bogus": lambda d: d.update(status="bogus"),
+    "raw_missing_configuration": lambda d: d["raw"].pop("15x1000"),
+    "raw_extra_configuration": lambda d: d["raw"].update({"9x9": [[0.0] * 7] * 3}),
+    "one_row_short": lambda d: d["raw"]["7x300"].pop(),
+    "row_with_six_values": lambda d: d["raw"]["7x300"][0].pop(),
+    "value_is_string": _value("1.0"),
+    "value_is_bool": _value(True),
+    "value_is_null": _value(None),
+    "raw_is_list": lambda d: d.update(raw=[]),
+    "ok_with_failure": lambda d: d.update(failure="x"),
+    "fit_failed_with_raw": lambda d: d.update(status="fit_failed", failure="boom"),
+    "fit_failed_without_failure": lambda d: d.update(status="fit_failed", raw={}),
+    "fit_failed_overlong_failure": lambda d: d.update(status="fit_failed", raw={}, failure="x" * 201),
+    "wrong_schema_version": lambda d: d.update(schema_version="other"),
+    "wrong_levels": lambda d: d.update(levels=d["levels"][:-1]),
+    "wrong_event_ids": lambda d: d.update(event_ids=list(reversed(d["event_ids"]))),
+    "wrong_configuration": lambda d: d.update(configuration=[7, 300]),
+    "wrong_selection_losses": lambda d: d.update(selection_losses={}),
+    "wrong_arm_id": lambda d: d.update(arm_id="changed"),
+    "extra_top_level_key": lambda d: d.update(extra=1),
 }
 
 
@@ -245,7 +290,7 @@ def test_extending_a_run_replays_the_shared_years_and_fits_only_the_new_one(monk
     assert sorted(after) == [f"fit_{y}.json" for y in YEARS]
 
 
-@pytest.mark.parametrize("change", ["training_label", "selection_label", "binding", "sklearn", "earlier_receipt"])
+@pytest.mark.parametrize("change", ["training_label", "selection_label", "binding", "sklearn"])
 def test_changed_inputs_refuse_without_refit(monkeypatch, tmp_path, change):
     out = tmp_path / "walk"
     _install(monkeypatch, out)
@@ -257,10 +302,8 @@ def test_changed_inputs_refuse_without_refit(monkeypatch, tmp_path, change):
         labels["e23a"] = 9.0
     elif change == "binding":
         binding = OTHER
-    elif change == "sklearn":
-        monkeypatch.setattr(sklearn, "__version__", "0.0.0-test")
     else:
-        _rewrite(out / "fit_2023.json", arm_id="changed")
+        monkeypatch.setattr(sklearn, "__version__", "0.0.0-test")
     before = _snapshot(out)
     calls = _install(monkeypatch, out, labels=labels)
     with pytest.raises(OpsError) as exc:
@@ -281,6 +324,74 @@ def test_altered_receipt_refuses_as_unreadable_without_refit(monkeypatch, tmp_pa
         walk.fit_walk_forward(_sealed(), SPEC, YEARS, out)
     assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "fit_receipt_unreadable")
     assert calls["fits"] == []
+
+
+@pytest.mark.parametrize("name", list(FORGERIES))
+def test_forged_receipt_refuses_as_unreadable_without_refit(monkeypatch, tmp_path, name):
+    out = tmp_path / "walk"
+    _install(monkeypatch, out)
+    walk.fit_walk_forward(_sealed(), SPEC, YEARS, out)
+    _forge(out / "fit_2025.json", FORGERIES[name])
+    before = _snapshot(out)
+    calls = _install(monkeypatch, out)
+    with pytest.raises(OpsError) as exc:
+        walk.fit_walk_forward(_sealed(), SPEC, YEARS, out)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "fit_receipt_unreadable")
+    assert "fit_2025.json" in exc.value.problem.message
+    assert calls["fits"] == []
+    assert _snapshot(out) == before
+
+
+def test_link_race_refuses_a_forged_racing_receipt(monkeypatch, tmp_path):
+    other = tmp_path / "other"
+    _install(monkeypatch, other)
+    walk.fit_walk_forward(_sealed(), SPEC, ["2023"], other)
+    _forge(other / "fit_2023.json", FORGERIES["ok_with_empty_raw"])
+    written = (other / "fit_2023.json").read_bytes()
+    out = tmp_path / "walk"
+
+    def racing_link(_src, dst):
+        dst.write_bytes(written)
+        raise FileExistsError(str(dst))
+
+    _install(monkeypatch, out)
+    monkeypatch.setattr(walk.os, "link", racing_link)
+    with pytest.raises(OpsError) as exc:
+        walk.fit_walk_forward(_sealed(), SPEC, ["2023"], out)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "fit_receipt_unreadable")
+    assert "fit_2023.json" in exc.value.problem.message
+    assert sorted(p.name for p in out.iterdir()) == ["fit_2023.json"]
+
+
+def test_forged_arm_id_refuses_at_its_own_year(monkeypatch, tmp_path):
+    out = tmp_path / "walk"
+    _install(monkeypatch, out)
+    walk.fit_walk_forward(_sealed(), SPEC, YEARS, out)
+    _rewrite(out / "fit_2023.json", arm_id="changed")
+    before = _snapshot(out)
+    calls = _install(monkeypatch, out)
+    with pytest.raises(OpsError) as exc:
+        walk.fit_walk_forward(_sealed(), SPEC, YEARS, out)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "fit_receipt_unreadable")
+    assert "fit_2023.json" in exc.value.problem.message
+    assert calls["fits"] == []
+    assert _snapshot(out) == before
+
+
+def test_valid_forgery_of_an_earlier_year_refuses_at_a_later_year(monkeypatch, tmp_path):
+    out = tmp_path / "walk"
+    _install(monkeypatch, out)
+    walk.fit_walk_forward(_sealed(), SPEC, YEARS, out)
+    _forge(out / "fit_2023.json", _bump_raw)
+    before = _snapshot(out)
+    calls = _install(monkeypatch, out)
+    with pytest.raises(OpsError) as exc:
+        walk.fit_walk_forward(_sealed(), SPEC, YEARS, out)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "fit_receipt_changed")
+    assert "fit_2024.json" in exc.value.problem.message
+    assert calls["fits"] == []
+    assert all(c["before"] != "2025-01-01" for c in calls["labels"])
+    assert _snapshot(out) == before
 
 
 def test_fit_failure_stops_the_walk_and_replays_without_refit(monkeypatch, tmp_path, capsys):
