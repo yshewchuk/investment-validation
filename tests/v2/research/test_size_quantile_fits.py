@@ -90,6 +90,26 @@ def test_arm_id_uses_effective_recipe_parameters():
         fits.recipe_for(SPEC, sealed, (7, 300), 0.1)["estimator"]["params"]
 
 
+def test_arm_id_and_fit_fold_refuse_grid_cell_outside_recipe_bounds_before_any_fit(monkeypatch):
+    spec = _spec([7, 100], [300])
+    sealed = _fit_sealed()
+    refusal = ("EXPERIMENT_IDENTITY_CONFLICT", "grid_invalid")
+    calls = _patch_fit(monkeypatch)
+    with pytest.raises(OpsError) as exc:
+        fits.arm_id(spec, sealed, "Q_raw", (7, 300))
+    assert _refusal(exc) == refusal
+    with pytest.raises(OpsError) as exc:
+        fits.fit_fold(spec, sealed, TRAINING, EVALUATION)
+    assert _refusal(exc) == refusal
+    assert calls == []
+
+
+def test_arm_id_refuses_configuration_outside_grid():
+    with pytest.raises(OpsError) as exc:
+        fits.arm_id(SPEC, _fit_sealed(), "Q_raw", (31, 300))
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "grid_invalid")
+
+
 AMENDED_FIXED = [
     {"random_state": 1}, {"validation_fraction": 0.2}, {"n_iter_no_change": 5}, {"tol": 1e-3},
     {"early_stopping": False}, {"early_stopping": 1}, {"max_bins": 127}, {"nope": 1},

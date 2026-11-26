@@ -1,11 +1,11 @@
 """EXP-190 Q3a (design sections 4, 7): one fold's quantile fits, walk-forward configuration selection, the
-non-crossing sort and arm ids. Pure: reads and writes no files; labels are supplied by the caller. No production
-caller yet. The year-by-year loop, label reads, `bind_grid` and the fit receipts are the next slice; real-data
-fits also need `size_quantile_prereg.require_preregistration` first. Uses v14's fit path
-(`fit_regression_predictions`: signed domain so raw outputs are not clipped, native NaN, all-empty training columns
-zeroed, one thread). Row masks are v14's: every training pair the caller passes, no feature filter. A `ValueError`
-from the fit itself propagates: the caller records the fold's arm as `fit_failed` and does not retry. Input defects
-are typed refusals raised before any fit, so they are not recorded as `fit_failed`."""
+non-crossing sort and arm ids. No file I/O; the caller supplies labels. No production caller yet. The yearly loop,
+label reads, `bind_grid` and fit receipts are the next slice; real-data fits also need
+`size_quantile_prereg.require_preregistration` first. Uses v14's fit path (`fit_regression_predictions`: signed
+domain so raw outputs are not clipped, native NaN, all-empty training columns zeroed, one thread). Row masks are
+v14's: every training pair the caller passes, no feature filter. A `ValueError` from the fit itself propagates: the
+caller records the fold's arm as `fit_failed` and does not retry. Labels must be finite and non-negative; input
+defects refuse before any fit."""
 import itertools
 import math
 import numbers
@@ -47,7 +47,10 @@ def q_raw(raw):
 
 
 def arm_id(spec, sealed, source, configuration):
-    params = _recipes(spec, sealed, [configuration])[(configuration, spec["levels"][0])]["estimator"]["params"]
+    recipes = _recipes(spec, sealed, configurations(spec))
+    if configuration not in configurations(spec):
+        raise _refuse("grid_invalid", "the configuration is not in the grid")
+    params = recipes[(configuration, spec["levels"][0])]["estimator"]["params"]
     cfg = {k: params[k] for k in ("max_leaf_nodes", "min_samples_leaf", *spec["grid"]["fixed"])}
     return content_hash({"source": source, "levels": list(spec["levels"]), "configuration": cfg})
 
@@ -93,8 +96,7 @@ def _matrix(by_id, event_ids, columns):
 
 
 def select_configuration(spec, outputs, labels):
-    """`outputs`: fit_fold results of earlier out-of-sample years.
-    `labels`: {event_id: y} for those events labelled before the cutoff."""
+    """`outputs`: earlier years' `fit_fold` results; `labels`: {event_id: y} labelled before the cutoff."""
     configs = configurations(spec)
     if not outputs:
         if labels:
