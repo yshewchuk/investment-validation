@@ -47,6 +47,7 @@ def open_run(fill, inputs=None, plan=None, expected_snapshot_id=None, *, root=No
         return None
     _validate(fill)
     if inputs is None: raise fvi.FairValueRefusal("f_inputs_missing", "the spec selects F: pass its pinned inputs (--f-pins and --f-quotes)")
+    if not isinstance(inputs, FInputs): raise fvi.FairValueRefusal("f_inputs_invalid", "f_inputs is not a FInputs (pins, read_quotes, snapshot_id)")
     size_width_f_quotes.admit_inputs(inputs.pins, inputs.read_quotes)
     r = fill["reingest"] if isinstance(fill.get("reingest"), dict) else {}
     rules, pins = fill.get("rate_rules"), inputs.pins

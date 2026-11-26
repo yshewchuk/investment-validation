@@ -206,6 +206,17 @@ def test_open_run_with_a_valid_f_selection_and_no_inputs_refuses_f_inputs_missin
     _refused("f_inputs_missing", lambda: sel.open_run(_fill()))
 
 
+@pytest.mark.parametrize("make_inputs", [
+    lambda pins, calls: object(),
+    lambda pins, calls: {"pins": pins, "read_quotes": qt._reader(qt._base(qt._frames()), calls), "snapshot_id": "snap-1"},
+    lambda pins, calls: (pins, qt._reader(qt._base(qt._frames()), calls), "snap-1"),
+], ids=["object", "dict", "plain_tuple"])
+def test_open_run_with_inputs_that_are_not_f_inputs_refuses_f_inputs_invalid_before_any_read(tmp_path, make_inputs):
+    pins, calls = _tables(tmp_path), []
+    _refused("f_inputs_invalid", lambda: _open(_full(pins), make_inputs(pins, calls), tmp_path))
+    assert calls == []
+
+
 def test_open_run_with_a_valid_f_selection_returns_the_f_run(tmp_path):
     pins = _tables(tmp_path)
     run = _open(_full(pins), _inputs(pins), tmp_path)
