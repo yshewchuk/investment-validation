@@ -15,6 +15,7 @@ import yaml
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import OpsError
 from experiments import lib
+from experiments import size_pnl_readers as readers
 from experiments import size_quantile_fits as fits
 from experiments import size_quantile_prereg as prereg
 from experiments import size_quantile_stage_a as stage_a
@@ -83,13 +84,15 @@ def _world():
     frame = pd.DataFrame({"pred_move": [e["mu"] + (3.0 if e["date"] >= "2023-07-01" else 0.0) for e in events],
                           "pred_crush": 0.0,
                           "event_date": [pd.Timestamp(e["date"]) for e in events]}, index=ids)
-    production = {"frame": frame, "binding": _binding(TABLE_HASH, frame), "table_hash": TABLE_HASH}
     labels = pd.DataFrame({"abs_move": [e["y"] for e in events], "crush_pct_iv30": 0.0}, index=ids)
+    admitted = readers.Admitted({"events": pd.DataFrame({"event_id": ids, "event_date": [
+        pd.Timestamp(e["date"]) for e in events]}), "excluded": {}})
     return {"events": events, "mu": {e["id"]: e["mu"] for e in events}, "s": {e["id"]: e["s"] for e in events},
-            "y": {e["id"]: e["y"] for e in events}, "sealed": sealed, "production": production, "labels": labels}
+            "y": {e["id"]: e["y"] for e in events}, "sealed": sealed, "frame": frame, "labels": labels,
+            "dates": {e["id"]: e["date"] for e in events}, "admitted": admitted}
 
 
-PRODUCTION_BINDING = _binding(TABLE_HASH, _world()["production"]["frame"])
+PRODUCTION_BINDING = _binding(TABLE_HASH, _world()["frame"])
 
 
 def _fake_fit(boom=False):
@@ -148,9 +151,38 @@ def _guard(case, *, settled=True):
             "experiments_dir": case / "exps"}
 
 
-def _run(world, out, guard, *, years=YEARS, production=None):
-    return stage_a.run_stage_a(world["sealed"], years, production or world["production"], world["labels"], out,
-                               spec_path=guard["spec_path"], ledger_path=guard["ledger_path"],
+def _fake_fetch(world, out, calls, *, frame=None, avail=None, extra=None):
+    """The shared store as fetch(columns, ids), with literal column names and event_id plus the requested columns.
+    Each call is recorded with whether every fit_<year>.json exists yet. frame replaces the production forecasts,
+    avail overrides label availability by id, extra adds one unrequested row to the answer."""
+    def fetch(columns, ids):
+        calls.append({"columns": tuple(columns), "ids": list(ids),
+                      "fits": all((out / "fits" / f"fit_{year}.json").exists() for year in YEARS)})
+        if "pred_abs_move" in columns:
+            src = world["frame"] if frame is None else frame
+            got = {"pred_abs_move": src.loc[ids, "pred_move"].to_numpy(float),
+                   "pred_iv_crush_30": src.loc[ids, "pred_crush"].to_numpy(float), "horizon_sessions": [1] * len(ids)}
+        else:
+            got = {"abs_move": world["labels"].loc[ids, "abs_move"].to_numpy(float),
+                   "crush_pct_iv30": world["labels"].loc[ids, "crush_pct_iv30"].to_numpy(float),
+                   "available_as_of_date": [(avail or {}).get(e) or (date.fromisoformat(world["dates"][e])
+                                                                     + timedelta(days=1)).isoformat() for e in ids]}
+        answer = pd.DataFrame({"event_id": ids, **{column: got[column] for column in columns}})
+        if extra is not None:
+            answer = pd.concat([answer, pd.DataFrame({"event_id": [extra], **{column: [0.0] for column in columns}})])
+        return answer
+    return fetch
+
+
+def _label_fetches(calls):
+    return [call for call in calls if "abs_move" in call["columns"]]
+
+
+def _run(world, out, guard, *, calls=None, years=YEARS, production_hash=TABLE_HASH, table_hash=TABLE_HASH, **store):
+    """Stage A on the fake shared store; calls records every fetch and store goes to _fake_fetch."""
+    fetch = _fake_fetch(world, out, [] if calls is None else calls, **store)
+    return stage_a.run_stage_a(world["sealed"], years, world["admitted"], fetch, out, production_hash=production_hash,
+                               table_hash=table_hash, spec_path=guard["spec_path"], ledger_path=guard["ledger_path"],
                                run_log_path=guard["run_log_path"], experiments_dir=guard["experiments_dir"])
 
 
@@ -344,30 +376,62 @@ def test_replay_is_identical_and_a_changed_binding_refuses_without_touching_the_
     before = (out / REPORT).read_bytes()
     assert _run(world, out, guard) == first
     assert (out / REPORT).read_bytes() == before
-    changed = {**world["production"], "table_hash": ALT_TABLE}
-    changed["binding"] = _binding(ALT_TABLE, world["production"]["frame"])
     with pytest.raises(OpsError) as exc:
-        _run(world, out, guard, production=changed)
+        _run(world, out, guard, production_hash=ALT_TABLE, table_hash=ALT_TABLE)
     assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "stage_a_report_changed")
     assert (out / REPORT).read_bytes() == before
     assert not list(out.glob("*.tmp"))
 
 
-@pytest.mark.parametrize("change", ["frame", "table_hash"])
-def test_production_binding_mismatch_refuses_before_any_label_read_or_fit(monkeypatch, tmp_path, change):
+def test_production_hash_mismatch_refuses_before_any_label_read_or_fit(monkeypatch, tmp_path):
     world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
-    calls = _spy(monkeypatch, world)
-    production = dict(world["production"])
-    if change == "frame":
-        frame = world["production"]["frame"].copy()
-        frame.loc[frame.index[0], "pred_move"] += 1.0
-        production["frame"] = frame
-    else:
-        production["table_hash"] = ALT_TABLE
+    reads, fetched = _spy(monkeypatch, world), []
     with pytest.raises(OpsError) as exc:
-        _run(world, out, guard, production=production)
-    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "production_binding_mismatch")
-    assert calls == [] and not out.exists()
+        _run(world, out, guard, calls=fetched, table_hash=ALT_TABLE)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "production_hash_mismatch")
+    assert reads == [] and not _label_fetches(fetched) and not out.exists()
+
+
+def test_non_finite_production_prediction_refuses_before_any_fit_or_label_read(monkeypatch, tmp_path):
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    reads, fetched = _spy(monkeypatch, world), []
+    frame = world["frame"].copy()
+    frame.loc[frame.index[0], "pred_move"] = np.nan
+    with pytest.raises(OpsError) as exc:
+        _run(world, out, guard, calls=fetched, frame=frame)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "production_series_failed")
+    assert reads == [] and not _label_fetches(fetched) and not out.exists()
+
+
+def test_unrequested_production_key_refuses_as_holdout_access_denied(monkeypatch, tmp_path):
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    reads, fetched = _spy(monkeypatch, world), []
+    with pytest.raises(OpsError) as exc:
+        _run(world, out, guard, calls=fetched, extra="not-admitted-event")
+    assert _refusal(exc) == ("HOLDOUT_ACCESS_DENIED", "unrequested_key_returned")
+    assert reads == [] and not _label_fetches(fetched) and not out.exists()
+
+
+def test_b0_label_not_available_after_its_event_date_refuses_and_publishes_nothing(monkeypatch, tmp_path):
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    _install(monkeypatch, world)
+    event = next(e["id"] for e in world["events"] if e["date"] == "2024-03-05")
+    with pytest.raises(OpsError) as exc:
+        _run(world, out, guard, avail={event: "2024-03-05"})
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "label_availability_missing")
+    assert not (out / REPORT).exists() and not list(out.glob("*.tmp"))
+
+
+def test_production_is_read_before_fits_and_labels_only_after_every_fit(monkeypatch, tmp_path):
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    _install(monkeypatch, world)
+    fetched = []
+    _run(world, out, guard, calls=fetched)
+    production = [call for call in fetched if "pred_abs_move" in call["columns"]]
+    assert len(production) == 1 and not production[0]["fits"]
+    labels = _label_fetches(fetched)
+    assert labels and all(call["fits"] for call in labels)
+    assert fetched.index(production[0]) < fetched.index(labels[0])
 
 
 def test_unsettled_stage_b_refuses_before_any_label_read_or_fit(monkeypatch, tmp_path):
@@ -436,11 +500,13 @@ def test_unlabelled_event_outside_the_periods_is_recorded_not_refused(monkeypatc
 def test_fit_failure_publishes_a_not_testable_report(monkeypatch, tmp_path):
     world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
     _install(monkeypatch, world, regress=_fake_fit(boom=True))
-    doc = _run(world, out, guard)
+    fetched = []
+    doc = _run(world, out, guard, calls=fetched)
     assert doc["status"] == "not_testable"
     assert doc["reasons"] == ["Q:fit_failed", "Q_raw:fit_failed"]
     assert doc["arm_verdicts"] == {"Q": "not_testable", "Q_raw": "not_testable"}
     assert doc["inputs"]["unlabelled_outside_periods"] is None
+    assert doc["inputs"]["b0_labels_hash"] is None and not _label_fetches(fetched)
     assert doc["arms"] == {} and doc["fit_status"] == {"2022": "fit_failed"} and doc["floor_report"] == []
     assert json.loads((out / REPORT).read_text(encoding="utf-8")) == doc
 

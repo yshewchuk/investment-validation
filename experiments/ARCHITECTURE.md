@@ -985,7 +985,7 @@ EXP-190 (`guides/size_quantile_move_design.md`): `size_quantile_prereg` never wr
 `size_quantile_calibration`: unscored `non_finite_output`/`calibration_burn_in`/`tail_pool_thin`; bad input `ValueError`; memory `RESOURCE_LIMIT_EXCEEDED`.
 `size_quantile_arm_s.fit_arm_s` write-once `arm_s_fit_<year>.json`: `raw_receipt_mismatch`, walk receipt refusals, `RESOURCE_LIMIT_EXCEEDED`; `fit_failed` year continues; `scale_burn_in`.
 `size_quantile_arm_{tables.evaluate_arm,verdict.{judge_arm,stage_a_verdict}}`: `scored_share_below_floor`/`period_no_paired_events`/`bootstrap_too_few_groups`/`no_usable_cell`/`conditional_bootstrap_too_few_groups`/`calibration_failed`(Q-arm-only)/`fit_failed`(also-Stage-A)→`not_testable`; bad input `ValueError`; memory `RESOURCE_LIMIT_EXCEEDED`.
-`size_quantile_stage_a.run_stage_a` (uncalled): `stage_a_{years_invalid,report_changed}`, `spec_changed`, `production_binding_mismatch`, `admitted_label_missing`; atomic report.
+`size_quantile_stage_a.run_stage_a` (uncalled): `stage_a_{years_invalid,report_changed}`, `spec_changed`, reader-refusals, `admitted_label_missing`; atomic report.
 
 ## Fill model F
 

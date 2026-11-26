@@ -16,7 +16,7 @@ from engine.v2.ops.errors import fail
 from engine.v2.research.progress import Progress, decision, stage
 from experiments.size_pnl_contrast import RESAMPLES, SEED
 from experiments.size_pnl_prereg import _read_bounded
-from experiments.size_pnl_readers import _production_binding
+from experiments.size_pnl_readers import read_labels, read_production
 from experiments.size_quantile_arm_verdict import judge_arm, stage_a_verdict
 from experiments.size_quantile_baselines import pool_quantiles
 from experiments.size_quantile_calibration import QCOLS, calibrate, predictions_from_receipts, quantile_points
@@ -37,7 +37,7 @@ def _plain(value):
     return json.loads(json.dumps(value, default=lambda item: item.to_dict("records") if isinstance(item, pd.DataFrame)
                                  else item.tolist()), parse_constant=lambda _: None)
 
-def _score(sealed, walk, production, labels):
+def _score(sealed, walk, production, fetch, admitted):
     """Step 5, after an all-ok walk: admitted labels, calibration, CRPS and the verdicts."""
     predictions = predictions_from_receipts(walk)
     targets = pd.DataFrame(sealed["context"]["target_events"]).set_index("event_id")
@@ -58,6 +58,8 @@ def _score(sealed, walk, production, labels):
         pred_move=production["frame"]["pred_move"].reindex(ids).to_numpy(float), m0=lambda d: d["pred_move"], m3=np.nan)
     arms, pools, floors = calibrate(predictions, events)
     with stage("stage A CRPS and verdicts"):
+        labels = read_labels(fetch, admitted)  # after the walk: predictions are written before outcomes are read
+        b0_hash = content_hash(sorted(_plain(labels[["abs_move", "crush_pct_iv30"]].reset_index().values.tolist())))
         b0 = pool_quantiles(production["frame"], labels, events)
         raw = pd.concat([pd.DataFrame(np.asarray(r["raw"]["{}x{}".format(*r["configuration"])], float),
                                       index=r["event_ids"], columns=QCOLS) for r in walk.values()])
@@ -74,7 +76,7 @@ def _score(sealed, walk, production, labels):
                 events["label_end"].reindex(af.index)[ok]) + pd.Timedelta(days=1)).to_numpy()})
             results[arm] = judge_arm(arm, af.assign(crps=crps), b0, events, history, raw=raw)
         verdict = stage_a_verdict(results["Q"], results["Q_raw"])
-    return verdict, results, floors, labels_hash, unlabelled
+    return verdict, results, floors, labels_hash, unlabelled, b0_hash
 
 def _publish(out_dir, body):
     """Atomic and immutable (os.link never overwrites): identical existing bytes are a replay; returns the document."""
@@ -103,8 +105,8 @@ def _publish(out_dir, body):
         os.unlink(tmp)
     return json.loads(data)
 
-def run_stage_a(sealed, years, production, labels, out_dir, *, spec_path=SPEC_PATH, ledger_path=None,
-                run_log_path=None, experiments_dir=None):
+def run_stage_a(sealed, years, admitted, fetch, out_dir, *, production_hash, table_hash, spec_path=SPEC_PATH,
+                ledger_path=None, run_log_path=None, experiments_dir=None):
     """Run Stage A and publish its report; returns the parsed document (schema in the module docstring)."""
     try:
         with stage("quantile stage A"):
@@ -116,14 +118,12 @@ def run_stage_a(sealed, years, production, labels, out_dir, *, spec_path=SPEC_PA
             if not (isinstance(years, (list, tuple)) and all(isinstance(y, str) for y in years)
                     and {"2023", "2024", "2025"} <= set(years) and years[-1] == "2025"):
                 raise fail("INVALID_EXPERIMENT_SPEC", "years invalid", details={"reason": "stage_a_years_invalid"})
-            if _production_binding(production["table_hash"], production["frame"]) != production["binding"]:
-                raise _refuse("production_binding_mismatch", "the production frame does not match its binding")
+            production = read_production(fetch, admitted, expected_hash=production_hash, table_hash=table_hash)
             walk = fit_walk_forward(sealed, spec, years, Path(out_dir) / "fits")
             scoring = all(receipt["status"] == "ok" for receipt in walk.values())
             decision("quantile stage A", "branch=scoring" if scoring else "branch=fit_failed: no arm scored")
-            verdict, results, floors, eval_hash, unlabelled = (_score(sealed, walk, production, labels) if scoring
-                                                               else (FIT_FAILED, {}, [], None, None))
-            b0_hash = content_hash(sorted(_plain(labels[["abs_move", "crush_pct_iv30"]].reset_index().values.tolist())))
+            verdict, results, floors, eval_hash, unlabelled, b0_hash = (_score(sealed, walk, production, fetch,
+                admitted) if scoring else (FIT_FAILED, {}, [], None, None, None))
             inputs = {"sealed_binding": sealed["binding"], "spec_hash": guard["spec_hash"],
                       "preregistered_at": guard["preregistered_at"], "years": list(years),
                       "sklearn_version": sklearn.__version__, "production_binding": production["binding"],
