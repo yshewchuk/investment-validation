@@ -111,12 +111,12 @@ failure_semantics:
   abstention: "burn-in, thin tail pool, non-finite output: unscored (an abstention, not 'no'), counted; leaves paired population"
   baseline_abstention: "B1 pool_too_small; B2 under 500 donors or invalid own implied_move: that baseline is unscored for the event, counted; its common-subset tables drop it. B2 donor with null, zero, negative or non-finite implied_move: dropped from the pool and counted"
   level_width: "burn-in or empty bin: no L, counted; only conditional tests"
-  R2: "quarter or year chunks. Memory limit: one run process wrapped whole in experiments.memory_guard.rss_watchdog(5 * 2**30): VmRSS sampled every 50 ms above 5 GiB raises MemoryError, refused RESOURCE_LIMIT_EXCEEDED; no stage report, complete fit receipts stay. bounded_run --heavy --max-rss-gb 5.5 is an untyped backstop. No wall-clock limit; receipt byte caps are separate."
+  R2: "quarter or year chunks. Memory limit (owner's proposal, the user may change it until the PLANNED row): the real-data entry point (not yet built, #3047) must wrap the whole one-process run in experiments.memory_guard.rss_watchdog(5 * 2**30): VmRSS sampled every 50 ms above 5 GiB raises MemoryError, refused RESOURCE_LIMIT_EXCEEDED; no stage report, complete fit receipts stay. bounded_run --heavy --max-rss-gb 5.5 is an untyped backstop. No wall-clock limit; receipt byte caps are separate."
   R3_R4: "fixed seeds; receipts atomic, immutable, bound to inputs; changed input refuses"
   R5: "arm ids hash source, level set and configuration"
   R6: "causality: fits, selection, calibration, tail, level-width and baseline pools use data available before fold or month; month's predictions written before its labels are read"
 
-real_data_order: "SB0, then PLANNED row, then 50-ticker smoke (a real-data fit), then full run. Before the row: sealed-record binding, panel and chain counts, Y0 report and training-id parity (with the label reads they need) are allowed; no model fit on real data and no computing of any arm's or baseline's score against realised moves (showing v14's stored metrics is allowed)"
+real_data_order: "SB0, then PLANNED row, then 50-ticker smoke (a real-data fit), then full run. Before the row (owner's proposal, the user may change it until the PLANNED row): sealed-record binding, panel and chain counts, Y0 report and training-id parity (with the label reads they need) are allowed; no model fit on real data and no computing of any arm's or baseline's score against realised moves (showing v14's stored metrics is allowed)"
 
 stage_b:
   status: pending_part_2
