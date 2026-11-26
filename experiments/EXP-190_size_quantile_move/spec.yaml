@@ -14,7 +14,7 @@ constraints:
 
 target: {column: abs_move, units: percent_points, lead: 1}
 levels: [0.1, 0.25, 0.4, 0.5, 0.6, 0.75, 0.9]
-note: "every quantile uses numpy's default linear method; no coverage guarantee"
+note: "every quantile uses numpy's default linear method; no coverage guarantee. The 500-event minima (calibration, S z_q, level_width_L, B2 donors), the 50 tail donors and min(20, n // 100) L bins are pre-registered judgement values: no derivation or study supports them; fixed before any quantile-model run"
 features:
   panel: "sealed v14 SIZE panel"
   set: HMOSXLP
@@ -67,7 +67,17 @@ baselines:
 
 stage_a:
   min_scored_share: 0.80  # per period/arm; below: not_testable (scored_share_below_floor); always reported
-  settlements: "design section 5, settlements 1-9, apply"
+  settlements:
+    status: "design section 5, settlements 1-9, apply (accepted by the user as proposed, 2026-11-25); compact copy below"
+    s1: "Spearman bootstrap: in a used cell of n events with rank residuals rW, re, each event gets n * rW * re / sqrt(sum(rW^2) * sum(re^2)), 0 in a zero-W cell (L alike); size_pnl_contrast ticker bootstrap on these and on the W minus L per-event difference; ranks and residuals fixed across resamples; seed a parameter, default 188"
+    s2: "tercile difference within each cell (top minus bottom tercile mean e), weighted by cell event count; zero-residual cell counts 0; ordered by residual, ties by event id, np.array_split; pooled-event tercile table report only"
+    s3: "level-width burn-in removes an event only from conditional tests (W, L, B0 comparison); it stays in accuracy and coverage"
+    s4: "min_scored_share per period and arm; denominator all admitted events in the period; numerator admitted events scored by both arm and B0; below: not_testable (scored_share_below_floor); always reported"
+    s5: "a period with no paired event or no usable cell, or a bootstrap with under two groups: arm not_testable; a missing quarter does not count towards a quarter requirement, which stays of 10"
+    s6: "cell where e varies but its residual is all zero: skipped for both W and L, own count"
+    s7: "L edges: numpy linear quantiles with duplicates removed; a value on an edge goes to the lower bin, earlier and current alike; if ties leave the event's bin with no earlier y: no L (level_width_empty_bin), treated as s3"
+    s8: "CRPS uses the distribution_tails rule for every arm; the metric integrates each event's piecewise-linear (u, x) quantile function exactly"
+    s9: "crossing rate: share of events where any neighbouring pair of raw quantiles is strictly out of order"
   population: "events where judged arm and B0 both have output; drops counted by reason and year; B1-B3 on common subsets"
   periods: ["2023H2", "2024", "2025"]
   quarters: 10
@@ -97,14 +107,16 @@ stage_a:
 
 failure_semantics:
   R1: "panel, folds, dictionary, M0 or M3 series do not bind: refuse EXPERIMENT_IDENTITY_CONFLICT; nothing rebuilt or imputed. A merely absent M3 year is B3 not_testable."
-  fit_failed: "fold's arm is fit_failed, no retry. Q_raw fit failure makes Stage A not_testable; calibration failure affects Q only."
+  fit_failed: "fold's arm is fit_failed, no retry. One failed fit (any level or configuration) fails the whole year. The Q walk runs years in order and stops at the first fit_failed year: later years are neither selected nor fitted, so no grid selection reads a failed year; none is skipped or substituted. Stage A is then not_testable, even for a year before the judged periods. Receipts are published whole or not at all; a rerun replays published ones, fit_failed included. Calibration failure affects Q only."
   abstention: "burn-in, thin tail pool, non-finite output: unscored (an abstention, not 'no'), counted; leaves paired population"
   baseline_abstention: "B1 pool_too_small; B2 under 500 donors or invalid own implied_move: that baseline is unscored for the event, counted; its common-subset tables drop it. B2 donor with null, zero, negative or non-finite implied_move: dropped from the pool and counted"
   level_width: "burn-in or empty bin: no L, counted; only conditional tests"
-  R2: "quarter or year chunks; over-limit refuses RESOURCE_LIMIT_EXCEEDED, no partial report"
+  R2: "quarter or year chunks. Memory limit: one run process wrapped whole in experiments.memory_guard.rss_watchdog(5 * 2**30): VmRSS sampled every 50 ms above 5 GiB raises MemoryError, refused RESOURCE_LIMIT_EXCEEDED; no stage report, complete fit receipts stay. bounded_run --heavy --max-rss-gb 5.5 is an untyped backstop. No wall-clock limit; receipt byte caps are separate."
   R3_R4: "fixed seeds; receipts atomic, immutable, bound to inputs; changed input refuses"
   R5: "arm ids hash source, level set and configuration"
   R6: "causality: fits, selection, calibration, tail, level-width and baseline pools use data available before fold or month; month's predictions written before its labels are read"
+
+real_data_order: "SB0, then PLANNED row, then 50-ticker smoke (a real-data fit), then full run. Before the row: sealed-record binding, panel and chain counts, Y0 report and training-id parity (with the label reads they need) are allowed; no model fit on real data and no computing of any arm's or baseline's score against realised moves (showing v14's stored metrics is allowed)"
 
 stage_b:
   status: pending_part_2
