@@ -49,7 +49,7 @@ def test_fill_model_is_none_without_amendments_or_without_the_key():
 
 
 def test_fill_model_returns_the_one_f_entry_among_others():
-    f = {"id": "F", "x": 1}
+    f = _fill(x=1)
     assert sel.fill_model(_spec({"id": "A0"}, {"id": "A1", "fill_model": f})) == f
 
 
@@ -64,6 +64,20 @@ def test_non_dict_fill_model_refuses_fill_model_invalid():
 def test_two_entries_carrying_fill_model_are_ambiguous_whatever_their_ids():
     _refused("fill_model_ambiguous", lambda: sel.fill_model(_spec({"fill_model": {"id": "F"}}, {"fill_model": {"id": "F"}})))
     _refused("fill_model_ambiguous", lambda: sel.fill_model(_spec({"fill_model": {"id": "G"}}, {"fill_model": None})))
+
+
+@pytest.mark.parametrize("fvf_id", [None, ""], ids=["missing", "empty"])
+def test_fill_model_without_a_non_empty_fvf_id_refuses_fill_model_invalid(fvf_id):
+    fill = _fill()
+    if fvf_id is None:
+        del fill["fvf_id"]
+    else:
+        fill["fvf_id"] = fvf_id
+    _refused("fill_model_invalid", lambda: sel.fill_model(_spec({"id": "A1", "fill_model": fill})))
+
+
+def test_fill_model_with_a_wrong_fvf_id_refuses_fvf_id_mismatch():
+    _refused("fvf_id_mismatch", lambda: sel.fill_model(_spec({"id": "A1", "fill_model": _fill(fvf_id="0" * 64)})))
 
 
 # ---- 2. require_preregistration carries the selection into the receipt ------------------
@@ -96,6 +110,22 @@ def test_no_fill_model_amendment_leaves_the_receipt_without_the_key(tmp_path):
 def test_an_amendment_with_id_g_refuses_fill_model_id_through_the_guard(tmp_path):
     spec, ledger = _prereg_case(tmp_path, [{"id": "A1", "fill_model": {"id": "G"}}])
     assert ptest.refusal(lambda: _receipt(tmp_path, spec, ledger)) == "fill_model_id"
+
+
+@pytest.mark.parametrize("fvf_id", [None, ""], ids=["missing", "empty"])
+def test_an_f_amendment_without_a_non_empty_fvf_id_refuses_fill_model_invalid(tmp_path, fvf_id):
+    fill = _fill()
+    if fvf_id is None:
+        del fill["fvf_id"]
+    else:
+        fill["fvf_id"] = fvf_id
+    spec, ledger = _prereg_case(tmp_path, [{"id": "A1", "fill_model": fill}])
+    assert ptest.refusal(lambda: _receipt(tmp_path, spec, ledger)) == "fill_model_invalid"
+
+
+def test_an_f_amendment_with_a_wrong_fvf_id_refuses_fvf_id_mismatch(tmp_path):
+    spec, ledger = _prereg_case(tmp_path, [{"id": "A1", "fill_model": _fill(fvf_id="0" * 64)}])
+    assert ptest.refusal(lambda: _receipt(tmp_path, spec, ledger)) == "fvf_id_mismatch"
 
 
 # ---- 3. open_run: the public run boundary --------------------------------------------
