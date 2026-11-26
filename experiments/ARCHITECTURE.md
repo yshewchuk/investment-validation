@@ -978,7 +978,7 @@ EXP-188: `size_pnl_{inputs,outer_inputs}` bind v14 and 2025 forecasts; `size_pnl
 EXP-190 (`guides/size_quantile_move_design.md`; uncalled): `size_quantile_prereg` never writes ledger; refuses `stage_b_pending` pre-settlement (`planned_row_*`, `spec_*`, `preregistered*`, `experiment_id_conflict`, `ledger_malformed`, `run_log_malformed`). `size_quantile_binding.{bind_grid,bind_b3}` check unverified v14: `v14_{grid,selection,report}_mismatch`, `m3_unbound`, `b3_unbound`.
 `size_quantile_sources.load_sealed_panel`: content-hash v14 reads; admission precedes rows (`registration_schema_unknown`, `panel_binding_mismatch`, `dictionary_mismatch`, `panel_mismatch`, `admission_empty`, `sealed_malformed`; `size_pnl_sources`/resource errors propagate). `training_labels`: admitted ids only (`HOLDOUT_ACCESS_DENIED`, `event_ids_invalid`), before-cutoff.
 `size_quantile_folds.annual_folds`: sealed parity (`fold_parity_mismatch`, `sealed_malformed`, `years_invalid`, `POPULATION_COLLAPSED`).
-`size_quantile_baselines.pool_quantiles` (B0): unscored `forecast_missing`/`refused_draw`/`non_finite_output`; bad input `ValueError`.
+`size_quantile_baselines.{pool,band,implied}_quantiles` (B0-B2): unscored `forecast_missing`/`refused_draw`/`non_finite_output`/`pool_too_small`/`implied_move_invalid`; bad input `ValueError`.
 `size_quantile_fits`: `panel_*`, `feature_*`, `selection_*`, `fixed_parameters_mismatch`, `training_label_invalid`, `fold_inputs_invalid`, `grid_invalid`, `RESOURCE_LIMIT_EXCEEDED`.
 `size_quantile_walk.fit_walk_forward` write-once `fit_<year>.json`: gap→`years_not_contiguous`; changed/invalid receipt→`fit_receipt_{changed,unreadable}`; memory/oversize-publish→`RESOURCE_LIMIT_EXCEEDED`; fit `ValueError`→`fit_failed`, stops.
 
