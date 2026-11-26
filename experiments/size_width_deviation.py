@@ -5,6 +5,7 @@ import pandas as pd
 from engine.forecast_sizing import forecast_params
 from engine.structures import STRUCTURES
 from experiments import size_pnl_shortvol as sv
+from experiments import size_width_account as account
 from experiments.size_width_band import tier
 from experiments.size_width_sweep import Sweep, in_window
 
@@ -39,6 +40,7 @@ class DeviationSweep(Sweep):
             return
         pos = {str(e): i for i, e in enumerate(chunk["event_id"])}
         info = {str(r["event_id"]): r for r in events.to_dict("records")}
+        exit_col = account.deciding_columns(self.taken[(name, arm)][-1])[0]
         for row in self.taken[(name, arm)][-1].to_dict("records"):
             eid, ev = str(row["event_id"]), info[str(row["event_id"])]
             ratio = realised_ratio(chunk, pos[eid], name, ev["pred_move"], self.pricing)
@@ -46,7 +48,7 @@ class DeviationSweep(Sweep):
             self.deviation.append({"structure": name, "event_id": eid, "event_date": row["event_date"],
                                    "mcap_usd": float("nan") if pd.isna(ev["mcap_usd"]) else float(ev["mcap_usd"]),
                                    "ratio": float("nan") if ratio is None else ratio,
-                                   "ret": row["exit_value_mid"] / row["entry_cost"] - 1.0})
+                                   "ret": row[exit_col] / row["entry_cost"] - 1.0})
 
 
 def _cells(sweep, windows, column):
