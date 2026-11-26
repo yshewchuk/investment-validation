@@ -136,6 +136,12 @@ def test_b1_pool_too_small_matches_v14_status(case):
         assert status == "ok" and out.reason is None
     expected = {"n99": "pool_too_small", "n100": "ok", "tied": "pool_too_small"}[case]
     assert status == expected
+    if out.reason is None:
+        want, n = band_oracle(pred, y, 2.0)
+        np.testing.assert_allclose(out[QCOLS].to_numpy(float), want)
+        assert out.n_rows == n
+    else:
+        assert out[QCOLS].isna().all()
 
 
 def test_b1_month_cut_and_pool_shared_within_month():
@@ -164,6 +170,11 @@ def test_b1_full_history_uses_both_eras():
     want, n = band_oracle(*arrays(rows), 2.0)
     assert out.reason is None and out.n_rows == n
     np.testing.assert_allclose(out[QCOLS].to_numpy(float), want)
+    edges = np.quantile(arrays(rows)[0], [0.2, 0.4, 0.6, 0.8])
+    assert out.bucket == np.digitize(2.0, edges)
+    for forecast, bucket in ((100.0, 4), (0.0, 0)):
+        other = band_quantiles(table, labels, events(["ev"], [EVENT], [forecast], "pred_move")).iloc[0]
+        assert other.reason is None and other.bucket == bucket
 
 
 def test_b1_invalid_donors_dropped_and_logged(capsys):
@@ -215,10 +226,13 @@ def test_b2_happy_path_matches_oracle():
 @pytest.mark.parametrize("count, expected", [(MIN_IMPLIED_DONORS - 1, "pool_too_small"),
                                              (MIN_IMPLIED_DONORS, None)])
 def test_b2_threshold_is_500(count, expected):
-    table, labels = frames(b2_rows(count), "implied_move")
+    rows = b2_rows(count)
+    table, labels = frames(rows, "implied_move")
     out = implied_quantiles(table, labels, events(["ev"], [EVENT], [2.0], "implied_move")).iloc[0]
     assert out.reason == expected
     assert out.n_rows == (0 if expected else count)
+    if expected is None:
+        np.testing.assert_allclose(out[QCOLS].to_numpy(float), implied_oracle(*arrays(rows), 2.0))
 
 
 @pytest.mark.parametrize("day, avail", [("2023-05-31", "2023-05-31"),   # one day before the window
@@ -303,6 +317,38 @@ def test_b2_non_finite_output_blanks_quantiles():
     assert row[QCOLS].isna().all() and row.n_rows == 0 and row.n_dropped == 0
 
 
+# ---------------------------------------------------------------- refusal precedence and invalid-donor logs
+
+
+def test_b1_forecast_missing_takes_precedence_over_empty_pool():
+    table, labels = frames(b1_rows(200, avail="2025-01-01"), "pred_move")
+    out = band_quantiles(table, labels, events(["ev"], [EVENT], [np.nan], "pred_move")).iloc[0]
+    assert out.reason == "forecast_missing"
+
+
+@pytest.mark.parametrize("bad", [np.nan, 0.0, -1.0])
+def test_b2_implied_move_invalid_takes_precedence_over_small_pool(bad):
+    table, labels = frames(b2_rows(10), "implied_move")
+    out = implied_quantiles(table, labels, events(["ev"], [EVENT], [bad], "implied_move")).iloc[0]
+    assert out.reason == "implied_move_invalid"
+    assert out.reason != "pool_too_small"
+
+
+def test_b1_invalid_donor_log_counts_distinct_donors_across_months(capsys):
+    table, labels = frames(b1_rows(200) + [("bad_pred", "2010-01-01", "2010-01-01", None, 1.0)], "pred_move")
+    band_quantiles(table, labels, events(["a", "b"], ["2024-06-15", "2024-07-15"], [2.0, 2.0], "pred_move"))
+    err = capsys.readouterr().err
+    assert "invalid_donors=1\n" in err
+    assert "invalid_donors=2" not in err
+
+
+def test_b2_invalid_donor_log_counts_distinct_donors_across_months(capsys):
+    table, labels = frames(b2_rows(500) + [("bad_implied", "2023-09-01", "2023-09-01", 0.0, 1.0)], "implied_move")
+    implied_quantiles(table, labels, events(["a", "b"], ["2024-06-15", "2024-07-15"], [2.0, 2.0], "implied_move"))
+    err = capsys.readouterr().err
+    assert "invalid_implied_donors=1" in err and "invalid_implied_donors=2" not in err
+
+
 # ---------------------------------------------------------------- shared B1 / B2 contract
 
 SHARED = [(band_quantiles, "pred_move", "B1", B1_COLS, lambda: b1_rows(200)),
@@ -345,18 +391,18 @@ def test_shared_shuffled_donors_same_result(fn, model, name, cols, rows_fn):
 def test_shared_duplicate_index_raises(fn, model, name, cols, rows_fn):
     table, labels = frames(rows_fn(), model)
     ev = events(["ev", "ev2"], [EVENT] * 2, [2.0, 2.0], model)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="table has a duplicate index"):
         fn(_dup(table), labels, ev)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="labels has a duplicate index"):
         fn(table, _dup(labels), ev)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="events has a duplicate index"):
         fn(table, labels, _dup(ev))
 
 
 @pytest.mark.parametrize("fn, model, name, cols, rows_fn", SHARED, ids=SHARED_IDS)
 def test_shared_null_event_date_raises(fn, model, name, cols, rows_fn):
     table, labels = frames(rows_fn(), model)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="events event_date must not be null"):
         fn(table, labels, events(["ev"], [pd.NaT], [2.0], model))
 
 
@@ -366,7 +412,7 @@ def test_shared_null_donor_event_date_raises(fn, model, name, cols, rows_fn):
     rid, _, avail, x, y = rows[0]
     rows[0] = (rid, None, avail, x, y)
     table, labels = frames(rows, model)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="donor event_date must not be null"):
         fn(table, labels, events(["ev"], [EVENT], [2.0], model))
 
 

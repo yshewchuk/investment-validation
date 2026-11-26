@@ -62,18 +62,22 @@ def _score(pool, pred, cutoff, forecast, cache):
     return quant, float(bucket), bool(fallback), int(move.size), reason
 
 
+def _validate(table, labels, events):
+    for label, frame in (("table", table), ("labels", labels), ("events", events)):
+        if frame.index.has_duplicates:
+            raise ValueError(f"{label} has a duplicate index")
+    if pd.to_datetime(events["event_date"]).isna().any():
+        raise ValueError("events event_date must not be null")
+
+
 def pool_quantiles(table, labels, events, *, name="B0"):
     """Per-event quantile forecast of ``events`` from the earlier donors in ``table`` and ``labels``.
 
     Returns a frame indexed like ``events`` with one column per level (q10, q25, ...), then bucket, fallback,
     n_rows and reason. Unscored rows have NaN quantiles.
     """
-    for label, frame in (("table", table), ("labels", labels), ("events", events)):
-        if frame.index.has_duplicates:
-            raise ValueError(f"{label} has a duplicate index")
+    _validate(table, labels, events)
     dates = pd.to_datetime(events["event_date"])
-    if dates.isna().any():
-        raise ValueError("events event_date must not be null")
     forecasts = [np.nan if v is None else float(v) for v in events["pred_move"]]
     cols = [f"q{round(a * 100)}" for a in LEVELS] + _EXTRA
     rows, reasons, counts, fallbacks = [], [], Counter(), 0
@@ -95,14 +99,6 @@ def pool_quantiles(table, labels, events, *, name="B0"):
     out = out.astype({"bucket": float, "fallback": bool, "n_rows": int})
     out["reason"] = pd.Series(reasons, index=events.index, dtype=object)
     return out
-
-
-def _validate(table, labels, events):
-    for label, frame in (("table", table), ("labels", labels), ("events", events)):
-        if frame.index.has_duplicates:
-            raise ValueError(f"{label} has a duplicate index")
-    if pd.to_datetime(events["event_date"]).isna().any():
-        raise ValueError("events event_date must not be null")
 
 
 def _floats(series):
