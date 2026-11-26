@@ -12,6 +12,8 @@ import time
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from experiments import fair_value_inputs as fvi
 from experiments import size_pnl_decisions as decisions
@@ -117,6 +119,17 @@ def publish(out, stage, name, frame):
     return {"sha256": _publish(directory, name, frame), "rows": len(frame), "bytes": (directory / f"{name}.parquet").stat().st_size}
 
 
+def _carried_matches(path, part):
+    """True only if ``path`` is a regular file whose sha256 and bytes match ``part`` before any parquet parsing, and whose footer row count completes ``part`` exactly."""
+    if not path.is_file(): return False
+    try:
+        sha = decisions._file_sha256(path)
+        if sha != part.get("sha256") or path.stat().st_size != part.get("bytes"): return False
+        rows = pq.read_metadata(path).num_rows
+    except (Refusal, pa.ArrowException, OSError): return False
+    return part == {"sha256": sha, "rows": rows, "bytes": path.stat().st_size}
+
+
 def write(out, stage, inputs_hash, scope, tables, parts=None):
     """Publish each table, name the already published ``parts`` too, then write the stage's receipt once (failure rules: docstring)."""
     if stage not in ("inner", "outer"): raise ValueError(f"stage must be 'inner' or 'outer', got {stage!r}")
@@ -125,7 +138,7 @@ def write(out, stage, inputs_hash, scope, tables, parts=None):
     started, out = time.monotonic(), Path(out)
     for name, part in (parts or {}).items():  # a carried part is bound only if its published file holds exactly this metadata
         f = Path(out) / "report_inputs" / stage / f"{name}.parquet"
-        if not f.is_file() or part != {"sha256": decisions._file_sha256(f), "rows": len(pd.read_parquet(f)), "bytes": f.stat().st_size}:
+        if not _carried_matches(f, part):
             raise Refusal("EXPERIMENT_IDENTITY_CONFLICT", f"report input {name} differs", {"reason": "report_input_changed"})
     entries = {**(parts or {}), **{n: publish(out, stage, n, tables[n]) for n in sorted(tables)}}
     body = {"stage": stage, "inputs_hash": inputs_hash, "scope": scope, "tables": entries,

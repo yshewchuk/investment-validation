@@ -289,6 +289,48 @@ def test_a_carried_part_is_bound_only_if_its_published_file_holds_exactly_its_me
     assert not receipt_path.exists()
 
 
+def test_writing_a_correct_carried_part_never_decodes_it(tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    published = ri.publish(out, "inner", "carried", _rows())
+
+    def no_decode(*args, **kwargs):
+        raise AssertionError("carried part must not be decoded")
+
+    monkeypatch.setattr(ri.pd, "read_parquet", no_decode)
+    receipt = ri.write(out, "inner", "H", "W", {"exits": ri.exit_flag_counts(_rows())}, parts={"carried": published})
+    assert receipt["tables"]["carried"] == published
+
+
+def test_a_non_parquet_carried_file_with_matching_sha_and_bytes_is_refused_without_a_receipt(tmp_path):
+    out = tmp_path / "out"
+    stage = out / "report_inputs" / "inner"
+    stage.mkdir(parents=True)
+    data = b"not a parquet file"
+    (stage / "carried.parquet").write_bytes(data)
+    part = {"sha256": hashlib.sha256(data).hexdigest(), "rows": 1, "bytes": len(data)}
+    receipt_path = out / "receipts" / "report_inputs_inner.json"
+    with pytest.raises(Refusal) as caught:
+        ri.write(out, "inner", "H", "W", {"exits": ri.exit_flag_counts(_rows())}, parts={"carried": part})
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.details["reason"] == "report_input_changed"
+    assert not receipt_path.exists()
+
+
+def test_a_wrong_carried_sha_is_refused_before_any_footer_is_read(tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    published = ri.publish(out, "inner", "carried", _rows())
+
+    def no_footer(*args, **kwargs):
+        raise AssertionError("footer must not be read when the sha256 differs")
+
+    monkeypatch.setattr(ri.pq, "read_metadata", no_footer)
+    part = {**published, "sha256": "0" * 64}
+    with pytest.raises(Refusal) as caught:
+        ri.write(out, "inner", "H", "W", {"exits": ri.exit_flag_counts(_rows())}, parts={"carried": part})
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.details["reason"] == "report_input_changed"
+
+
 def test_a_bad_stage_or_no_tables_is_refused_before_anything_is_written(tmp_path):
     out = tmp_path / "out"
     with pytest.raises(ValueError, match="stage"):
