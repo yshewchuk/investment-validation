@@ -37,6 +37,8 @@ def predictions_from_receipts(receipts):
 
 
 def _inputs(predictions, events):
+    if not set(QCOLS) <= set(predictions.columns) or not {"event_date", "y", "label_end"} <= set(events.columns):
+        raise ValueError("predictions need the seven QCOLS; events need event_date, y and label_end")
     if predictions.index.has_duplicates or events.index.has_duplicates:
         raise ValueError("predictions and events must have unique indexes")
     if not set(predictions.index) <= set(events.index):

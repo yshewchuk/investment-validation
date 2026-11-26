@@ -210,6 +210,7 @@ def test_q_delta_uses_unfloored_errors_then_sorts_then_floors():
     ("2020-02-29", "2020-03-10", "calibration_burn_in"),  # one day before the window: out, 499 rows
     ("2020-06-01", "2021-02-27", "tail_pool_thin"),       # label_end + 1 = 2021-02-28 < m: available, 500 rows
     ("2020-06-01", "2021-02-28", "calibration_burn_in"),  # label_end + 1 = m: not available, 499 rows
+    ("2020-06-01", "2021-03-01", "calibration_burn_in"),  # label_end = m: not available, 499 rows
     ("2021-03-01", "2021-02-27", "calibration_burn_in"),  # dated in month m: never in its own pool, 499 rows
 ])
 def test_pool_window_and_label_availability_at_the_499_500_boundary(extra_date, extra_label, expected):
@@ -338,6 +339,13 @@ def test_zero_crossing_adds_exact_breakpoint_and_floors_the_function():
     assert np.all(np.diff(u) >= 0) and np.all(np.diff(x) >= 0)
 
 
+def test_crps_of_flat_quantiles_with_width_floor_matches_hand_value():
+    # Q(u) = 9.5 on [0, 0.1), 10 on [0.1, 0.9], 10.5 on (0.9, 1]. For y = 10:
+    # CRPS = 2 * (int_0^0.1 0.5u du + int_0.9^1 0.5(1-u) du) = 2 * (0.0025 + 0.0025) = 0.01.
+    u, x = calib.quantile_points([10.0] * 7, [-1.0, -1.0], [1.0, 1.0])
+    assert crps_quantile(10.0, u, x) == pytest.approx(0.01, abs=1e-12)
+
+
 @pytest.mark.parametrize("y", [0.0, 1.0, 2.2, 3.7, 9.5])
 def test_points_give_the_floored_crps_of_the_true_function(y):
     u, x = calib.quantile_points(Q_CROSS, D_LO_CROSS, D_HI_CROSS)
@@ -414,6 +422,20 @@ def test_extra_events_outside_the_predictions_are_ignored():
 def test_refusals_on_identity_dates_and_labels(pred_ids, ev_ids, dates, labels, y):
     preds = pd.DataFrame([_qrow(0)] * len(pred_ids), index=pred_ids, columns=calib.QCOLS)
     events = pd.DataFrame({"event_date": dates, "y": y, "label_end": labels}, index=ev_ids)
+    with pytest.raises(ValueError):
+        calib.calibrate(preds, events)
+
+
+@pytest.mark.parametrize("drop_pred, drop_event", [
+    (["q40"], []),
+    ([], ["event_date"]),
+    ([], ["y"]),
+    ([], ["label_end"]),
+])
+def test_missing_columns_raise_value_error(drop_pred, drop_event):
+    preds = pd.DataFrame([_qrow(0)], index=["a"], columns=calib.QCOLS).drop(columns=drop_pred)
+    events = pd.DataFrame({"event_date": ["2020-01-10"], "y": [1.0], "label_end": ["2020-01-20"]},
+                          index=["a"]).drop(columns=drop_event)
     with pytest.raises(ValueError):
         calib.calibrate(preds, events)
 
