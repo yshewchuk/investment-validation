@@ -49,7 +49,7 @@ def _admit(plan, pins):
 
 
 def _price(rows, vols, side):
-    """leg_fills over whole-expiry batches of fvr.BATCH_ROWS rows (an expiry is never split); input row order kept."""
+    """batches start about every fvr.BATCH_ROWS rows and never split an expiry (a batch may exceed it); input order kept."""
     if not len(rows):
         return fvf.leg_fills(rows, vols)
     grouped = rows.groupby(_EXPIRY)

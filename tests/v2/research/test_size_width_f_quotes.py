@@ -5,6 +5,7 @@ Synthetic chains feed both the ladder chunk (through a fake index) and F's snaps
 import hashlib
 import json
 import logging
+import math
 
 import numpy as np
 import pandas as pd
@@ -49,6 +50,15 @@ def _ts(value):
 
 def _mid(k):
     return 1.0 + 0.01 * (k - 100.0) ** 2
+
+
+def _bs_put(k, t, *, s=SPOT, v=0.25):
+    """Closed-form Black-Scholes put at zero rate and no dividend (equals the American put here)."""
+    def N(x):
+        return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+    d1 = (math.log(s / k) + 0.5 * v * v * t) / (v * math.sqrt(t))
+    d2 = d1 - v * math.sqrt(t)
+    return k * N(-d2) - s * N(-d1)
 
 
 def _row(ticker, obs, right, strike, bid, ask, *, expiry=EXPIRY, dte=30):
@@ -115,12 +125,12 @@ def _idx(chunk, i, right, strike):
                 if chunk["right"][j] == code and chunk["strike"][j] == strike)
 
 
-def _write(tmp_path, base):
+def _write(tmp_path, base, rates=(5.0, 4.0)):
     """Pinned tables root: quotes and rates split by month of obs_date (Jan and Feb 2024), plus a manifest."""
     root = tmp_path / "root"
     vols = base[fvi.VOL_KEYS].drop_duplicates().assign(smvVol=25.0)
-    rates = base[["ticker", "obs_date"]].drop_duplicates().assign(iRate5wk=5.0, iRateLt=4.0)
-    for kind, frame in (("quotes", vols), ("rates", rates)):
+    rate_frame = base[["ticker", "obs_date"]].drop_duplicates().assign(iRate5wk=rates[0], iRateLt=rates[1])
+    for kind, frame in (("quotes", vols), ("rates", rate_frame)):
         for month in (1, 2):
             path = root / kind / "year=2024" / f"month={month:02d}.parquet"
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -147,9 +157,10 @@ def _reader(snap, calls=None):
     return read
 
 
-def _setup(tmp_path, frames, plan, *, snap=None, read=None, calls=None, pins_edit=None, expected="snap-1"):
+def _setup(tmp_path, frames, plan, *, snap=None, read=None, calls=None, pins_edit=None, expected="snap-1",
+           rates=(5.0, 4.0)):
     base = _base(frames)
-    root = _write(tmp_path, base)
+    root = _write(tmp_path, base, rates)
     pins = _pins(root)
     if pins_edit is not None:
         pins_edit(pins)
@@ -492,3 +503,36 @@ def test_table_prices_with_unit_scaled_vol_and_rate(tmp_path):
     put = got.loc[("P", 100.0)]
     assert put["bid"] <= put["V"] <= put["ask"]
     assert put["rate"] == pytest.approx(rate)
+
+
+@pytest.mark.parametrize("date,at_exit", [(ENTRY, False), (EXIT, True)], ids=["entry", "exit"])
+def test_leg_prices_and_fills_match_a_closed_form_oracle(tmp_path, date, at_exit):
+    strikes = (95.0, 100.0, 105.0)
+    frames, oracle = _frames(), {}
+    for day in (ENTRY, EXIT):
+        t = (_ts(EXPIRY) - _ts(day)).days / 365
+        quotes = {}
+        for k in strikes:
+            p = _bs_put(k, t)
+            bid, ask = round(p - 0.40, 2), round(p + 0.60, 2)
+            assert bid > 0
+            quotes[("P", k)] = (bid, ask)
+            oracle[(day, k)] = p
+        frames[("AAA", _ts(day))] = _listing("AAA", day, quotes=quotes)
+    fq, chunk = _setup(tmp_path, frames, DEFAULT_PLAN, rates=(0.0, 0.0))
+    out = fq.legs(chunk, 0, [_leg(chunk, 0, "P", k) for k in strikes], exit=at_exit)
+    day = EXIT if at_exit else ENTRY
+    if not at_exit:
+        assert oracle[(ENTRY, 100.0)] == pytest.approx(3.26, abs=0.01)  # hard literal: ATM 39-day put at 25% vol
+    assert out["status"].tolist() == ["ok"] * len(strikes)
+    for i, k in enumerate(strikes):
+        p = oracle[(day, k)]
+        bid, ask = round(p - 0.40, 2), round(p + 0.60, 2)
+        mid = (bid + ask) / 2
+        s = (ask - bid) / mid
+        c = min(1.0, 0.25 + 0.50 * min(s / 0.50, 1.0))
+        row = out.iloc[i]
+        assert row["V"] == pytest.approx(p, abs=0.01)
+        assert row["fill_buy"] == pytest.approx(p + c * (ask - p), abs=0.01)
+        assert row["fill_sell"] == pytest.approx(p - c * (p - bid), abs=0.01)
+        assert abs(row["V"] - mid) > 0.05
