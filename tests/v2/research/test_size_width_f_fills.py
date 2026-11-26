@@ -581,7 +581,8 @@ def test_exit_value_at_v_never_reads_a_zero_quantity_reference_leg(tmp_path):
     assert len(traded) < len(trade.legs)
     stub = StubQuotes(fq)
     got = ff.FFills(stub).exit_value_at_v(trade)
-    assert stub.calls == [(0, True, [leg["idx"] for leg in traded])]
+    positive = [leg["idx"] for leg in traded]
+    assert stub.calls and all(call == (0, True, positive) for call in stub.calls)
     frame = fq.legs(chunk, 0, traded, exit=True)
     want = sum(leg["qty"] * (1.0 if leg["side"] == "buy" else -1.0) * frame["V"].iloc[pos] for pos, leg in enumerate(traded))
     assert got == pytest.approx(float(want), abs=1e-9)
@@ -591,3 +592,34 @@ def test_exit_value_at_v_is_nan_when_a_leg_is_unpriceable(tmp_path):
     fq, chunk = _setup(tmp_path, _frames(), DEFAULT_PLAN)
     got = ff.FFills(StubQuotes(fq, _exit_status("unpriceable"))).exit_value_at_v(_pair(chunk))
     assert math.isnan(got)
+
+
+def _invalid_side_trade(chunk):
+    """_pair with the positive buy leg's side set to "hold": not a side F can close."""
+    pair = _pair(chunk)
+    return pair._replace(legs=({**pair.legs[0], "side": "hold"}, pair.legs[1]))
+
+
+def _zero_qty_trade(chunk):
+    """_pair with every leg at quantity 0: no positive-quantity leg is traded."""
+    pair = _pair(chunk)
+    return pair._replace(legs=tuple({**leg, "qty": 0.0} for leg in pair.legs))
+
+
+def _empty_legs_trade(chunk):
+    return _pair(chunk)._replace(legs=())
+
+
+@pytest.mark.parametrize("build", [_invalid_side_trade, _zero_qty_trade, _empty_legs_trade],
+                         ids=["invalid_side", "zero_qty", "empty_legs"])
+def test_exit_result_and_exit_value_at_v_refuse_alike(tmp_path, build):
+    fq, chunk = _setup(tmp_path, _frames(), DEFAULT_PLAN)
+    trade = build(chunk)
+    with pytest.raises(fvf.FairValueRefusal) as via_result:
+        ff.FFills(fq).exit_result(trade)
+    with pytest.raises(fvf.FairValueRefusal) as via_value:
+        ff.FFills(fq).exit_value_at_v(trade)
+    assert type(via_value.value) is type(via_result.value)
+    assert via_value.value.code == via_result.value.code
+    assert via_value.value.details["reason"] == via_result.value.details["reason"] == "leg_invalid"
+    assert str(via_value.value) == str(via_result.value)

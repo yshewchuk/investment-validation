@@ -79,9 +79,9 @@ class FFills:
     def exit_value_at_v(self, trade):
         """Closing the positive-quantity legs at V (a no_fair_value / rate_unknown leg at its effective mid, as F's exit does),
         with no concession. NaN when any such leg is unpriceable."""
+        if self.exit_result(trade).outcome == "unpriceable": return float("nan")
         legs = [leg for leg in trade.legs if leg["qty"] > 0]
         table = self._quotes.legs(trade.chunk, trade.i, legs, exit=True)
-        if (table["status"] == "unpriceable").any(): return float("nan")
         mid = (table["eff_bid"] + table["eff_ask"]) / 2
         v = table["V"].where(~table["status"].isin(fvf.FALLBACK_STATUSES), mid).to_numpy(dtype=float)
         return float(sum(leg["qty"] * (1.0 if leg["side"] == "buy" else -1.0) * x for leg, x in zip(legs, v)))
