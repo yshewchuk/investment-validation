@@ -83,6 +83,11 @@ def _reason(exc):
     return exc.value.problem.details.get("reason")
 
 
+def _refusal(exc, reason):
+    assert exc.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert _reason(exc) == reason
+
+
 def test_candidate_binds_all_years_from_lead_one_predictions():
     plan = _plan()
     out = _run(plan, _store(plan))
@@ -184,7 +189,7 @@ def test_plan_mismatch_refuses():
     plan = _plan()
     with pytest.raises(OpsError) as exc:
         bind_series(plan, _store(plan).get, _binding(plan_id="other"), _admit)
-    assert _reason(exc) == "b3_plan_mismatch"
+    _refusal(exc, "b3_plan_mismatch")
 
 
 @pytest.mark.parametrize("binding", [_binding(kind="other"), _binding(kind="blend", cid="zz")])
@@ -192,14 +197,28 @@ def test_unknown_kind_or_unknown_blend_refuses_as_unbound(binding):
     plan = _plan()
     with pytest.raises(OpsError) as exc:
         bind_series(plan, _store(plan).get, binding, _admit)
-    assert _reason(exc) == "b3_series_unbound"
+    _refusal(exc, "b3_series_unbound")
+
+
+def test_unknown_candidate_id_refuses_before_any_read():
+    plan = _plan()
+    store, calls = _store(plan), []
+
+    def read(slot):
+        calls.append(slot)
+        return store.get(slot)
+
+    with pytest.raises(OpsError) as exc:
+        bind_series(plan, read, _binding(cid="zz"), _admit)
+    _refusal(exc, "b3_series_unbound")
+    assert calls == []
 
 
 def test_blend_with_no_components_refuses_as_unbound():
     plan = _plan(blends=[{"blend_id": "b1", "component_candidate_ids": []}])
     with pytest.raises(OpsError) as exc:
         bind_series(plan, _store(plan).get, _binding(kind="blend", cid="b1"), _admit)
-    assert _reason(exc) == "b3_series_unbound"
+    _refusal(exc, "b3_series_unbound")
 
 
 def test_malformed_trial_record_refuses_as_unbound():
@@ -208,7 +227,7 @@ def test_malformed_trial_record_refuses_as_unbound():
     store[_key(plan, 2023)] = {"status": "succeeded"}
     with pytest.raises(OpsError) as exc:
         bind_series(plan, store.get, _binding(), _admit)
-    assert _reason(exc) == "b3_series_unbound"
+    _refusal(exc, "b3_series_unbound")
 
 
 def test_event_id_repeated_across_years_refuses():
@@ -217,7 +236,7 @@ def test_event_id_repeated_across_years_refuses():
                                    {"year": 2024, "evaluation_event_ids": ["a1", "b2"]}]}])
     with pytest.raises(OpsError) as exc:
         bind_series(plan, _store(plan).get, _binding(), _admit)
-    assert _reason(exc) == "duplicate_event_id"
+    _refusal(exc, "duplicate_event_id")
 
 
 def test_nonfinite_prediction_propagates_bind_conflict_unchanged():
@@ -226,8 +245,7 @@ def test_nonfinite_prediction_propagates_bind_conflict_unchanged():
     store[_key(plan, 2023)] = _record({**_vals(E23, 1.0), "a1": float("nan")})
     with pytest.raises(OpsError) as exc:
         bind_series(plan, store.get, _binding(), _admit)
-    assert exc.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
-    assert _reason(exc) == "nonfinite_prediction"
+    _refusal(exc, "nonfinite_prediction")
 
 
 # b3_quantiles: B0's construction over donors whose pred_move is the bound M3 series.
@@ -317,5 +335,70 @@ def test_no_bound_year_makes_every_event_not_testable():
 def test_duplicate_table_index_still_raises():
     table, labels = _world()
     dup = pd.concat([table, table.iloc[[0]]])
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="table has a duplicate index"):
         b3_quantiles(dup, labels, _events(table), _bound())
+
+
+def test_binding_changes_when_one_inner_prediction_changes():
+    plan = _plan()
+    base = _run(plan, _store(plan))["binding"]
+    store = _store(plan)
+    store[_key(plan, 2023)] = _record({**_vals(E23, 1.0), "a1": 7.0})
+    assert _run(plan, store)["binding"] != base
+
+
+def test_binding_changes_when_one_outer_prediction_changes():
+    plan = _plan()
+    base = _run(plan, _store(plan))["binding"]
+    store, key = _store(plan), _outer_key(plan)
+    forecasts = [dict(f) for f in store["outer-forecasts:" + key]]
+    forecasts[0][PRED] = 7.0
+    store["outer-forecasts:" + key] = forecasts
+    store["outer-execution:" + key] = {"status": "succeeded", "forecasts_id": content_hash(forecasts)}
+    assert _run(plan, store)["binding"] != base
+
+
+def test_binding_changes_when_a_year_status_changes():
+    plan = _plan()
+    base = _run(plan, _store(plan))["binding"]
+    store = _store(plan)
+    del store[_key(plan, 2024)]
+    out = _run(plan, store)
+    assert out["years"]["2024"] == "missing"
+    assert out["binding"] != base
+
+
+# Hand-computed oracle for scored B3 quantiles; does not call pool_quantiles.
+# Donor M3 predictions are 10.0 + 0.25 * i rather than one shared value: with a shared value every donor lands in
+# one bucket, so the pool is either refused or not a fallback. 600 donors is above MIN_POOL (250), so draw does not
+# refuse, and each of the ten buckets holds about 60 donors, below MIN_POOL, so the whole earlier pool is used.
+# Donor errors cycle through ORACLE_ERR (120 donors each); the scored event has M3 prediction 10.0.
+ORACLE_ERR = np.array([-4.0, -1.5, 0.0, 2.5, 6.0])
+ORACLE_COLS = ["q10", "q25", "q40", "q50", "q60", "q75", "q90"]
+ORACLE_LEVELS = [0.10, 0.25, 0.40, 0.50, 0.60, 0.75, 0.90]
+
+
+def _oracle_world():
+    n = 600
+    ids = [f"w{i:03d}" for i in range(n)]
+    pred, err = 10.0 + 0.25 * np.arange(n), ORACLE_ERR[np.arange(n) % 5]
+    dates = (pd.Timestamp("2023-01-01") + pd.to_timedelta(np.arange(n), unit="D")).to_numpy()
+    table = pd.DataFrame({"event_date": dates, "pred_move": 50.0, "pred_crush": 0.0}, index=ids)
+    labels = pd.DataFrame({"abs_move": pred + err, "crush_pct_iv30": 0.0}, index=ids)
+    series = pd.Series(np.append(pred, 10.0), index=pd.Index(ids + ["s1"], name="event_id"))
+    events = pd.DataFrame({"event_date": [pd.Timestamp("2025-01-02")], "pred_move": [0.0]}, index=["s1"])
+    return table, labels, events, {"series": series, "years": dict(ALL_BOUND)}, err
+
+
+def test_scored_b3_quantiles_match_hand_oracle_over_whole_earlier_pool():
+    table, labels, events, bound, err = _oracle_world()
+    out = b3_quantiles(table, labels, events, bound)
+    assert out.loc["s1", "reason"] is None
+    assert out.loc["s1", "fallback"]
+    assert out.loc["s1", "n_rows"] == len(err) == 600
+    expected = np.quantile(np.maximum(10.0 + err, 0.0), ORACLE_LEVELS)
+    np.testing.assert_allclose(out.loc["s1", ORACLE_COLS].to_numpy(dtype=float), expected)
+    # Literal values: sorted 10 + err holds 6.0, 8.5, 10.0, 12.5 and 16.0 in blocks of 120.
+    literal = dict(zip(ORACLE_COLS, [6.0, 8.5, 9.4, 10.0, 11.0, 12.5, 16.0]))
+    for col, value in literal.items():
+        assert out.loc["s1", col] == pytest.approx(value)

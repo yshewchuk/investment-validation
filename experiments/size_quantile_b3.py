@@ -60,7 +60,8 @@ def _bind(plan, read, binding, admit):
     if binding["plan_id"] != plan["plan_id"]:
         raise _refuse("b3_plan_mismatch", "the B3 binding names another plan")
     cid, kind = binding["b3_candidate_id"], binding["kind"]
-    cids = [cid] if kind == "candidate" else blend_components(plan, cid) if kind == "blend" else None
+    ids = {c["candidate_id"] for c in plan["candidates"]} if kind == "candidate" else set()
+    cids = [cid] if cid in ids else blend_components(plan, cid) if kind == "blend" else None
     if not cids:
         raise _refuse("b3_series_unbound", f"unknown or empty B3 model {kind!r}")
     results = [(str(y), *_inner(plan, read, cids, kind, y, admit)) for y in INNER_YEARS]
