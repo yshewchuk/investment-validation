@@ -127,16 +127,22 @@ def _frame(rows):
 
 
 def _sweep_one():
-    """Synthetic sweep one (CND-PS, grid k 1.0 and 1.5). x0 is burn-in (before 2023-07-01); the E keys must never be counted."""
+    """Synthetic sweep one (CND-PS and TWIN-P, grid k 1.0 and 1.5). x0 is burn-in (before 2023-07-01); the E keys must never be counted."""
     scored = {("CND-PS", 1.0): [_frame([("x0", "2023-06-15", "scored"), ("x1", "2023-09-10", "scored"), ("x2", "2024-03-01", "scored"),
                                         ("x3", "2024-07-20", "scored")])],
               ("CND-PS", 1.5): [_frame([("x2", "2024-03-01", "scored"), ("x3", "2024-07-20", "scored")])],
-              ("CND-PS", "E"): [_frame([("x1", "2023-09-10", "scored")])]}
+              ("CND-PS", "E"): [_frame([("x1", "2023-09-10", "scored")])],
+              ("TWIN-P", 1.0): [_frame([("x1", "2023-09-10", "scored"), ("x5", "2023-08-01", "scored"), ("x7", "2023-10-02", "scored"),
+                                        ("x2", "2024-03-01", "scored"), ("x3", "2024-07-20", "scored"), ("x4", "2024-11-05", "scored"),
+                                        ("x8", "2024-09-15", "scored")])],
+              ("TWIN-P", 1.5): [_frame([("x5", "2023-08-01", "scored"), ("x3", "2024-07-20", "scored")])]}
     declined = {("CND-PS", 1.0): [_frame([("x0", "2023-06-15", "f_no_fair_value"), ("x1", "2023-09-10", "ladder_too_coarse"),
                                           ("x2", "2024-03-01", "f_no_fair_value"), ("x3", "2024-07-20", "ladder_too_coarse")])],
                 ("CND-PS", 1.5): [_frame([("x3", "2024-07-20", "f_no_fair_value")])],
-                ("CND-PS", "E"): [_frame([("x1", "2023-09-10", "f_no_fair_value")])]}
-    return SimpleNamespace(names=("CND-PS",), ks=(1.0, 1.5), scored=scored, declined_frames=declined)
+                ("CND-PS", "E"): [_frame([("x1", "2023-09-10", "f_no_fair_value")])],
+                ("TWIN-P", 1.0): [_frame([("x1", "2023-09-10", "entry_quote_unusable"), ("x3", "2024-07-20", "entry_not_debit")])],
+                ("TWIN-P", 1.5): [_frame([("x5", "2023-08-01", "width_declined"), ("x3", "2024-07-20", None)])]}
+    return SimpleNamespace(names=("CND-PS", "TWIN-P"), ks=(1.0, 1.5), scored=scored, declined_frames=declined)
 
 
 def _sweep_two():
@@ -160,7 +166,17 @@ def test_count_sweep_sums_c_over_its_draws_and_counts_the_anchor_once(tmp_path):
     table = pd.read_parquet(file)
     assert list(table.columns) == ["arm", "draws", "structure", "k", "year", "metric", "reason", "count"]
     # By hand. C = sweep one + sweep two (draws 2); anchor = sweep one (draws 1). 2023H2 starts 2023-07-01, so x0 is out of both windows.
+    # TWIN-P is in sweep one only, so its C rows are sweep one's alone (draws still 2); its declined x3 at 1.5 has reason None -> "none".
+    assert ("C", 2, "TWIN-P", 1.5, 2024, "nontrade", "none", 1) in set(table.itertuples(index=False, name=None))
     expected = [
+        ("C", 2, "TWIN-P", 1.0, 2023, "candidates", "", 3), ("C", 2, "TWIN-P", 1.0, 2023, "nontrade", "entry_quote_unusable", 1),
+        ("C", 2, "TWIN-P", 1.0, 2024, "candidates", "", 4), ("C", 2, "TWIN-P", 1.0, 2024, "nontrade", "entry_not_debit", 1),
+        ("C", 2, "TWIN-P", 1.5, 2023, "candidates", "", 1), ("C", 2, "TWIN-P", 1.5, 2023, "nontrade", "width_declined", 1),
+        ("C", 2, "TWIN-P", 1.5, 2024, "candidates", "", 1), ("C", 2, "TWIN-P", 1.5, 2024, "nontrade", "none", 1),
+        ("anchor", 1, "TWIN-P", 1.0, 2023, "candidates", "", 3), ("anchor", 1, "TWIN-P", 1.0, 2023, "nontrade", "entry_quote_unusable", 1),
+        ("anchor", 1, "TWIN-P", 1.0, 2024, "candidates", "", 4), ("anchor", 1, "TWIN-P", 1.0, 2024, "nontrade", "entry_not_debit", 1),
+        ("anchor", 1, "TWIN-P", 1.5, 2023, "candidates", "", 1), ("anchor", 1, "TWIN-P", 1.5, 2023, "nontrade", "width_declined", 1),
+        ("anchor", 1, "TWIN-P", 1.5, 2024, "candidates", "", 1), ("anchor", 1, "TWIN-P", 1.5, 2024, "nontrade", "none", 1),
         ("C", 2, "CND-PS", 1.0, 2023, "candidates", "", 2), ("C", 2, "CND-PS", 1.0, 2023, "nontrade", "f_no_fair_value", 1),
         ("C", 2, "CND-PS", 1.0, 2023, "nontrade", "ladder_too_coarse", 1),
         ("C", 2, "CND-PS", 1.0, 2024, "candidates", "", 3), ("C", 2, "CND-PS", 1.0, 2024, "nontrade", "f_no_fair_value", 1),

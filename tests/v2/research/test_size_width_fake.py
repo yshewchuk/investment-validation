@@ -16,6 +16,7 @@ from experiments import size_width_tuning as tuning
 from experiments.size_pnl_pool import build_pool, pool_history
 from experiments.size_pnl_shortvol import NAMES, Refusal
 from experiments.size_width_sizing import GRID
+from experiments.size_width_sweep import Sweep
 from tests.v2.research.test_size_pnl_shortvol import chunk_of, events_for
 from tests.v2.research.test_size_width_sweep import _small_window
 
@@ -734,8 +735,15 @@ def test_on_sweep_runs_once_per_draw_and_once_for_the_anchor_and_changes_no_scor
     plain = fake.run_fake(months, table, labels, model, sessions, tmp_path / "plain", "hash-1", n=2, draws=DRAW)
     assert hooked["status"] == plain["status"] == "ok"
     assert len(seen) == 2 and seen[0] is not seen[1]
+    assert all(isinstance(s, Sweep) and s.names == fake.NAMES and s.scored for s in seen)
     assert hooked["body"] == plain["body"] and hooked["pooled"] == plain["pooled"]
     anchor_seen = []
     anchor = fake.run_anchor(months, table, labels, sessions, draws=DRAW, on_sweep=anchor_seen.append)
     assert len(anchor_seen) == 1
+    assert isinstance(anchor_seen[0], Sweep) and anchor_seen[0].names == fake.NAMES and anchor_seen[0].scored
+    assert all(anchor_seen[0] is not s for s in seen)
+    for d in (0, 1):  # seen[d] is draw d's sweep: its rows equal those of a separate hooked run_draw for draw d
+        direct = []
+        fake.run_draw(months, table, labels, model, d, sessions, draws=DRAW, on_sweep=direct.append)
+        pd.testing.assert_frame_equal(seen[d].rows([("CND-PS", 1.0)], fake.INNER), direct[0].rows([("CND-PS", 1.0)], fake.INNER))
     assert anchor == fake.run_anchor(months, table, labels, sessions, draws=DRAW)
