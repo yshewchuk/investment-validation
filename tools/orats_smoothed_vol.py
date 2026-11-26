@@ -86,7 +86,7 @@ def _stage(name: str):
     LOG.info("[smvvol] %s start", name)
     t0 = time.monotonic()
     yield
-    LOG.info("[smvvol] %s end: %.1f s, rss %.0f MB", name, time.monotonic() - t0, _rss_mb())
+    LOG.info("[smvvol] %s end: %.1f s, peak rss %.0f MB", name, time.monotonic() - t0, _rss_mb())
 
 
 def _eta(done: int, total: int, start: float) -> float:
@@ -94,16 +94,17 @@ def _eta(done: int, total: int, start: float) -> float:
 
 
 @contextmanager
-def _heartbeat(table: str, month: str, completed: int, total: int, start: float):
+def _heartbeat(table: str, month: str, completed: int, total: int, start: float, rows: int):
     stop = threading.Event()
     interval, t0 = max(PROGRESS_S, 0.01), time.monotonic()
 
     def beat():
         while not stop.wait(interval):
             eta = f"{_eta(completed, total, start):.0f} s" if completed > 0 else "unknown"
-            LOG.info("[smvvol] merge %s %s: still merging, %d/%d months done, %.0f s on this month, "
-                     "ETA %s, rss %.0f MB", table, month, completed, total, time.monotonic() - t0,
-                     eta, _rss_mb())
+            rate = completed / max(time.monotonic() - start, 1e-9)
+            LOG.info("[smvvol] merge %s %s: still merging %d rows, %d/%d months done, %.2f months/s, "
+                     "%.0f s on this month, ETA %s, peak rss %.0f MB", table, month, rows, completed,
+                     total, rate, time.monotonic() - t0, eta, _rss_mb())
 
     thread = threading.Thread(target=beat, daemon=True)
     thread.start()
@@ -250,7 +251,7 @@ def _read_shards(work: Path, table: str, month: str, entry_keys: list, markers: 
         if now - last >= PROGRESS_S:
             last = now
             rate = done / max(now - start, 1e-9)
-            LOG.info("[smvvol] merge %s %s: shards %d/%d, %.1f shards/s, ETA %.0f s, rss %.0f MB",
+            LOG.info("[smvvol] merge %s %s: shards %d/%d, %.1f shards/s, ETA %.0f s, peak rss %.0f MB",
                      table, month, done, total, rate, _eta(done, total, start), _rss_mb())
     return shards
 
@@ -271,9 +272,9 @@ def merge_stage(work: Path, out: Path, markers: dict) -> dict:
         start = time.monotonic()
         for done, (month, entry_keys) in enumerate(sorted(index.items()), 1):
             shards = _read_shards(work, table, month, entry_keys, markers)
-            with _heartbeat(table, month, done - 1, len(index), start):
+            with _heartbeat(table, month, done - 1, len(index), start, sum(len(s) for s in shards)):
                 df = pd.concat(shards, ignore_index=True)
-                LOG.info("[smvvol] merge %s %s: dedupe %d rows, rss %.0f MB",
+                LOG.info("[smvvol] merge %s %s: dedupe %d rows, peak rss %.0f MB",
                          table, month, len(df), _rss_mb())
                 nc_cols = [*keys, *(v for v in values if v not in CARRY)]
                 conflicts = (df[nc_cols].drop_duplicates().groupby(keys, sort=False).size() > 1).sum()
@@ -286,7 +287,7 @@ def merge_stage(work: Path, out: Path, markers: dict) -> dict:
             totals.update({"rows_out": len(final), "conflicting_keys": int(conflicts),
                            "conflicting_keys_all_columns": int(conflicts_all)})
             non_null.update({v: int(final[v].notna().sum()) for v in values})
-            LOG.info("[smvvol] merge %s %s: %d/%d months, rows_out %d, %.1f months/s, ETA %.0f s, rss %.0f MB",
+            LOG.info("[smvvol] merge %s %s: %d/%d months, rows_out %d, %.1f months/s, ETA %.0f s, peak rss %.0f MB",
                      table, month, done, len(index), len(final),
                      done / max(time.monotonic() - start, 1e-9), _eta(done, len(index), start),
                      _rss_mb())

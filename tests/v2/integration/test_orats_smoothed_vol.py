@@ -556,9 +556,9 @@ def test_merge_heartbeat(tmp_path, monkeypatch, caplog):
     caplog.set_level("INFO", logger="smvvol")
     assert tool.main(_args(raw, out, tmp_path / "work")) == 0
     messages = [r.getMessage() for r in caplog.records]
-    assert any(re.match(r"^\[smvvol\] merge quotes 2025-01: shards 1/\d+, [\d.]+ shards/s, ETA \d+ s, rss \d+ MB$", m)
+    assert any(re.match(r"^\[smvvol\] merge quotes 2025-01: shards 1/\d+, [\d.]+ shards/s, ETA \d+ s, peak rss \d+ MB$", m)
                for m in messages)
-    assert any(re.match(r"^\[smvvol\] merge quotes 2025-01: dedupe \d+ rows, rss \d+ MB$", m) for m in messages)
+    assert any(re.match(r"^\[smvvol\] merge quotes 2025-01: dedupe \d+ rows, peak rss \d+ MB$", m) for m in messages)
 
 
 def test_month_heartbeat_logs_while_blocked(monkeypatch, caplog):
@@ -572,13 +572,49 @@ def test_month_heartbeat_logs_while_blocked(monkeypatch, caplog):
             assert time.monotonic() < deadline, f"no record containing {text!r}"
             time.sleep(0.01)
 
-    with tool._heartbeat("rates", "2025-01", 0, 3, time.monotonic()):
+    with tool._heartbeat("rates", "2025-01", 0, 3, time.monotonic(), 7):
         wait_for("still merging")
-    assert any(re.match(r"^\[smvvol\] merge rates 2025-01: still merging, 0/3 months done, \d+ s on this month, "
-                        r"ETA unknown, rss \d+ MB$", r.getMessage()) for r in caplog.records)
+    assert any(re.match(r"^\[smvvol\] merge rates 2025-01: still merging 7 rows, 0/3 months done, "
+                        r"0\.00 months/s, \d+ s on this month, ETA unknown, peak rss \d+ MB$", r.getMessage())
+               for r in caplog.records)
 
-    with tool._heartbeat("rates", "2025-01", 1, 3, time.monotonic()):
+    with tool._heartbeat("rates", "2025-01", 1, 3, time.monotonic() - 100, 7):
         wait_for("1/3 months done")
-    assert any(re.match(r"^\[smvvol\] merge rates 2025-01: still merging, 1/3 months done, \d+ s on this month, "
-                        r"ETA \d+ s, rss \d+ MB$", r.getMessage()) for r in caplog.records)
+    line = next(r.getMessage() for r in caplog.records if "1/3 months done" in r.getMessage())
+    m = re.match(r"^\[smvvol\] merge rates 2025-01: still merging 7 rows, 1/3 months done, ([\d.]+) months/s, "
+                 r"\d+ s on this month, ETA (\d+) s, peak rss \d+ MB$", line)
+    assert m, line
+    assert float(m.group(1)) == 0.01
+    assert 200 <= int(m.group(2)) <= 206
     assert threading.active_count() == before
+
+
+def test_slow_month_merge_heartbeat_from_main(tmp_path, monkeypatch, caplog):
+    raw = _world(tmp_path)
+    out = tmp_path / "out"
+    monkeypatch.setattr(tool, "PROGRESS_S", 0.01)
+    caplog.set_level("INFO", logger="smvvol")
+    real_atomic = tool._atomic
+
+    def slow_atomic(path, write):
+        time.sleep(0.2)
+        return real_atomic(path, write)
+
+    monkeypatch.setattr(tool, "_atomic", slow_atomic)
+    assert tool.main(_args(raw, out, tmp_path / "work")) == 0
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("merge quotes 2025-01: still merging" in m for m in messages)
+
+
+def test_divdate_unpadded_is_parsed(tmp_path):
+    raw = tmp_path / "raw"
+    _entry(raw, "hist/strikes", K_EARLY_BIG, _payload([_quote("SPY", 100.0, 0.2)]),
+           "2025-01-01T00:00:00+00:00")
+    _entry(raw, "hist/cores", K_RATES, _payload([
+        {"ticker": "SPY", "tradeDate": "2025-01-02", "iRate5wk": 0.04, "iRateLt": 0.045,
+         "divDate": "2025-4-3"}]),
+        "2025-01-02T00:00:00+00:00")
+    out = tmp_path / "out"
+    assert tool.main(_args(raw, out, tmp_path / "work")) == 0
+    r = pd.read_parquet(out / "rates" / "year=2025" / "month=01.parquet")
+    assert r.loc[0, "divDate"] == pd.Timestamp("2025-04-03")
