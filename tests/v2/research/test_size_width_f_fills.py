@@ -15,6 +15,7 @@ from experiments import size_pnl_shortvol as sv
 from experiments import size_width_f_fills as ff
 from experiments import size_width_pricing as seam
 from experiments.fair_value_inputs import FairValueRefusal
+from experiments.size_pnl_pool import structure_value
 from experiments.size_pnl_straddle import EXIT_UNQUOTED
 from experiments.size_width_fills import CurrentFills, Exit, Skip, Trade
 from tests.v2.research.test_size_width_f_quotes import (
@@ -448,6 +449,51 @@ def test_score_marks_exits_at_f_proceeds_with_bool_flag_columns(tmp_path):
         assert by.loc[eid, "pnl_per_share"] == pytest.approx(by.loc[eid, "exit_value"] - by.loc[eid, "entry_cost"])
 
 
+def test_score_path_matches_hand_set_fills_and_an_independent_simulated_return(tmp_path):
+    """Hand-set fills on the score path: every leg has V = _mid(strike) (the fixture's mid); entry buys fill at
+    V + 0.01 and sells at V - 0.01; exit sells fill at V - 0.02 and buys at V + 0.02, except E1 whose exit buys fill at
+    V + 5 and whose first exit leg has no rate. Expected costs, proceeds and simulated returns are computed here from
+    the strikes, sides and quantities of the resolved legs and the sims, never from a production fill column."""
+    fq, chunk = _setup(tmp_path, _tight_frames(), DEFAULT_PLAN)
+    stub = StubQuotes(fq)
+
+    def edit(frame, exit):
+        v = frame["strike"].map(_mid).to_numpy(float)
+        step, i = (0.02 if exit else 0.01), stub.calls[-1][0]
+        frame = frame.assign(V=v, eff_bid=v - 0.005, eff_ask=v + 0.005, fill_buy=v + step, fill_sell=v - step)
+        if exit and i == 1:
+            frame = frame.assign(fill_buy=v + 5.0, status=["rate_unknown"] + ["ok"] * (len(frame) - 1))
+        return frame
+
+    stub.edit = edit
+    model = seam.load(fills=ff.FFills(stub))
+    scored = model.score_events(chunk, EVENTS, SIMS, NAME, alpha=0.5).set_index("event_id")
+    rows = model.score(chunk, EVENTS, scored.reset_index().assign(status="taken"), NAME, 0.5).set_index("event_id")
+    for eid, i in (("E0", 0), ("E1", 1)):
+        trade, _ = _trade(chunk, i)
+        traded = [leg for leg in trade.legs if leg["qty"] > 0]
+        assert {leg["side"] for leg in traded} == {"buy", "sell"}
+        cost = sum(leg["qty"] * (_mid(leg["strike"]) + 0.01 if leg["side"] == "buy" else -(_mid(leg["strike"]) - 0.01))
+                   for leg in traded)
+        assert scored.loc[eid, "status"] == "scored"
+        assert scored.loc[eid, "entry_cost"] == pytest.approx(cost, abs=1e-12)
+        closes = [{"strike": leg["strike"], "side": "sell" if leg["side"] == "buy" else "buy", "qty": leg["qty"]}
+                  for leg in traded]
+        grid, means = SIMS[eid]
+        want = (structure_value(means, grid, closes) - cost) / cost
+        assert scored.loc[eid, "exp_pnl_sim"] == pytest.approx(want, rel=1e-12)
+        assert rows.loc[eid, "entry_cost"] == pytest.approx(cost, abs=1e-12)
+    trade, _ = _trade(chunk, 0)
+    traded = [leg for leg in trade.legs if leg["qty"] > 0]
+    proceeds = sum(leg["qty"] * (_mid(leg["strike"]) - 0.02 if leg["side"] == "buy" else -(_mid(leg["strike"]) + 0.02))
+                   for leg in traded)
+    assert rows.loc["E0", "exit_value"] == pytest.approx(proceeds, abs=1e-12)
+    assert rows.loc["E0", "pnl_per_share"] == pytest.approx(proceeds - scored.loc["E0", "entry_cost"], abs=1e-12)
+    assert not rows.loc["E0", "exit_fair_mid"] and not rows.loc["E0", "exit_negative"]
+    assert rows.loc["E1", "exit_fair_mid"] and rows.loc["E1", "exit_negative"]
+    assert rows.loc["E1", "exit_value"] < 0
+
+
 def test_f_unpriceable_exit_is_unquoted_for_its_event_only(tmp_path):
     fq, chunk = _setup(tmp_path, _tight_frames(), DEFAULT_PLAN)
     stub = StubQuotes(fq)
@@ -481,3 +527,4 @@ def test_a_changed_stored_entry_bid_is_refused_by_score_events(tmp_path):
     with pytest.raises(FairValueRefusal) as exc:
         model.score_events(chunk, EVENTS, SIMS, NAME, alpha=0.5)
     assert exc.value.details["reason"] == "f_quote_mismatch"
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
