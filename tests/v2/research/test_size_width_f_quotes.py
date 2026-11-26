@@ -395,6 +395,9 @@ BAD_PLANS = [
     pytest.param(_plan(("E0", "AAA", ENTRY, ENTRY)), id="exit-equal-entry"),
     pytest.param(_plan(("E0", "AAA", "2024-02-05 16:00", "2024-02-05 09:30")), id="exit-same-day-earlier-time"),
     pytest.param([1, 2], id="not-a-dataframe"),
+    pytest.param(DEFAULT_PLAN.assign(ticker=""), id="empty-ticker"),
+    pytest.param(DEFAULT_PLAN.assign(ticker="   "), id="blank-ticker"),
+    pytest.param(DEFAULT_PLAN.assign(ticker=123), id="non-string-ticker"),
 ]
 
 

@@ -44,8 +44,9 @@ def _admit(plan, pins):
     if not isinstance(plan, pd.DataFrame) or any(c not in plan.columns for c in cols):
         raise fvi.FairValueRefusal("plan_invalid", "plan must be a DataFrame with event_id, ticker, entry_date, exit_date")
     entry, exit_ = (pd.to_datetime(plan[c], errors="coerce").dt.normalize() for c in ("entry_date", "exit_date"))
-    if plan[cols].isna().any().any() or not plan["event_id"].astype(str).is_unique or not (entry < exit_).all():
-        raise fvi.FairValueRefusal("plan_invalid", "plan holds a null, a duplicate event_id, a bad date or dates out of order")
+    if (plan[cols].isna().any().any() or not plan["event_id"].astype(str).is_unique or not (entry < exit_).all()
+            or not all(isinstance(t, str) and t.strip() for t in plan["ticker"])):
+        raise fvi.FairValueRefusal("plan_invalid", "plan: null, duplicate event_id, bad ticker, bad date, or misordered dates")
 
 
 def _price(rows, vols, side):
@@ -114,10 +115,9 @@ class FQuotes:
         priced = _price(rows.join(fvi.lookup_inputs(rows, tables.rates)), tables.vols, side)
         priced["bid"], priced["ask"] = (pd.to_numeric(rows[c], errors="coerce") for c in ("bid", "ask"))
         priced.index = pd.MultiIndex.from_arrays([priced[c].to_numpy() for c in _KEY])
-        without = len(expiries) - len(rows[_EXPIRY].drop_duplicates())
         _LOG.info("F quotes %s end: events=%d expiries=%d without_rows=%d rows=%d duplicates_dropped=%d elapsed=%.1fs "
-                  "rss=%.0fMiB", side, len(events), len(expiries), without, len(priced), dropped,
-                  time.monotonic() - started, _rss_mib())
+                  "rss=%.0fMiB", side, len(events), len(expiries), len(expiries) - len(rows[_EXPIRY].drop_duplicates()),
+                  len(priced), dropped, time.monotonic() - started, _rss_mib())
         return priced
 
     def legs(self, chunk, i, resolved, *, exit=False):
