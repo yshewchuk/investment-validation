@@ -85,7 +85,8 @@ def _load(conn, store, spec, plan_ref, max_object_bytes):
     return {"plan": plan, "repository": repository, "snapshot": snapshot, "as_of_month": month, "events": events,
             "rows": rows, "excluded_events": len(context["target_events"]) - len(events),
             "model_columns": list(dictionary["model_columns"]), "dictionary_hash": dictionary["dictionary_hash"],
-            "binding": binding}
+            "binding": binding, "context": context, "fold_events": document["magnitude_plan"]["events"],
+            "evaluation_labels_before": document["magnitude_execution"]["evaluation_labels_before"]}
 
 
 def load_sealed_panel(conn, store, spec, plan_ref, *, max_object_bytes=MAX_OBJECT_BYTES):

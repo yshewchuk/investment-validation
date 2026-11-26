@@ -69,7 +69,9 @@ def world(monkeypatch):
         admitted=["e1", "e2", "e4"], panel_error=None, resolved={"snap-1": SNAP, "feat-1": FEAT},
         document={"schema_version": SCHEMA, "snapshot": SNAP, "holdouts": {"holdout_as_of_month": "2025-01-01"},
                   "size_panel": {"context": {"context_id": "ctx-1", "target_events": copy.deepcopy(TARGETS)},
-                                 "feature_snapshot": FEAT}})
+                                 "feature_snapshot": FEAT},
+                  "magnitude_plan": {"events": copy.deepcopy(TARGETS)},
+                  "magnitude_execution": {"evaluation_labels_before": CUTOFF}})
 
     def registration(conn, store, spec):
         st.calls.append("registration")
@@ -138,6 +140,22 @@ def test_none_values_stay_missing_through_the_derived_columns(world):
 def test_admission_runs_before_the_panel_read(world):
     _load()
     assert world.calls.index("admit") < world.calls.index("panel")
+
+
+def test_returns_context_fold_events_and_evaluation_cutoff(world):
+    sealed = _load()
+    assert sealed["context"] == world.document["size_panel"]["context"]
+    assert sealed["fold_events"] == world.document["magnitude_plan"]["events"]
+    assert sealed["evaluation_labels_before"] == CUTOFF
+
+
+@pytest.mark.parametrize("section", ["magnitude_plan", "magnitude_execution"])
+def test_missing_fold_or_execution_section_refuses_sealed_malformed(world, section):
+    del world.document[section]
+    with pytest.raises(OpsError) as exc:
+        _load()
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "sealed_malformed")
+    assert exc.value.problem.message.startswith("sealed_malformed: ")
 
 
 def test_binding_is_stable_and_follows_the_admitted_event_set(world):
@@ -337,7 +355,8 @@ def test_module_source_never_calls_the_rederiving_readers():
 
 def _patch_real(monkeypatch, data, panel, event_ids):
     document = {"schema_version": SCHEMA, "snapshot": to_document(data.panel_source),
-                "holdouts": {"holdout_as_of_month": "2024-07-01"}, "size_panel": panel}
+                "holdouts": {"holdout_as_of_month": "2024-07-01"}, "size_panel": panel,
+                "magnitude_plan": {"events": []}, "magnitude_execution": {"evaluation_labels_before": CUTOFF}}
     monkeypatch.setattr(qsrc, "read_native_registration", lambda conn, store, spec: types.SimpleNamespace(
         document=copy.deepcopy(document), binding_json=json.dumps({"size_panel": COMPACT})))
     monkeypatch.setattr(qsrc, "load_plan", lambda store, reg, ref: _plan())
