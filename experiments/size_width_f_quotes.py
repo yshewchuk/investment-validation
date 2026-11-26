@@ -110,7 +110,7 @@ class FQuotes:
         tables = fvi.load_tables(self._root, manifest_sha256=self._pins["manifest_sha256"], vol_scale=self._scales[0],
                                  rate_scale=self._scales[1], file_sha256={r: self._pins["files"][r] for r in rels}, **self._rules)
         self.table_hashes.update(tables.hashes)
-        rows["rate"] = fvi.lookup_rate(rows, tables.rates)
+        rows = rows.join(fvi.lookup_inputs(rows, tables.rates))
         priced = _price(rows, tables.vols, side)
         priced["bid"], priced["ask"] = (pd.to_numeric(rows[c], errors="coerce") for c in ("bid", "ask"))
         priced.index = pd.MultiIndex.from_arrays([priced[c].to_numpy() for c in _KEY])
@@ -142,8 +142,8 @@ class FQuotes:
                 pieces.append(table.iloc[[pos]])
             else:  # F's unlisted exit quote: unpriceable, unknown liquidity, thin terms at F's values
                 vals = dict.fromkeys(_LEG_COLS, np.nan) | dict(zip(_KEY, key)) | {
-                    "status": "unpriceable", "repaired": False, "clamp_side": None, "source": None,
-                    "unknown_bid_size": True, "unknown_ask_size": True, "unknown_oi": True,
-                    "thin_size_buy": fvf.UNKNOWN_THIN, "thin_size_sell": fvf.UNKNOWN_THIN, "thin_oi": fvf.UNKNOWN_THIN}
+                    "status": "unpriceable", "repaired": False, "clamp_side": None, "source": None, "carry_fallback": False,
+                    "dividend_fallback": False, "dividend_applied": False, "unknown_bid_size": True, "unknown_ask_size": True,
+                    "unknown_oi": True, "thin_size_buy": fvf.UNKNOWN_THIN, "thin_size_sell": fvf.UNKNOWN_THIN, "thin_oi": fvf.UNKNOWN_THIN}
                 pieces.append(pd.DataFrame([vals], columns=_LEG_COLS))
         return pd.concat(pieces or [table.iloc[:0]], ignore_index=True)[_LEG_COLS]

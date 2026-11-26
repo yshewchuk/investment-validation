@@ -26,6 +26,7 @@ SPOT = 100.0
 ENTRY, EXIT, EXPIRY = "2024-02-05", "2024-02-08", "2024-03-15"
 STRIKES = [float(k) for k in range(80, 121)]
 OK = {"files": 2, "rows": 0, "unreadable": 0, "unrecognized": 0}
+UNITS = {"borrow30": "percent", "borrow2yr": "percent", "divAmt": "dollars_per_share"}
 LADDER_CASES = [
     (True, [("z", "P", 100.0, 0.0, 0.5), ("t", "P", 100.0, 1.0, 1.2), ("u", "C", 105.0, 1.0, 1.2)], ["t", "u"]),
     (True, [("t", "P", 100.0, 1.0, 1.2), ("z", "P", 100.0, 0.0, 0.5), ("u", "C", 105.0, 1.0, 1.2)], ["t", "u"]),
@@ -129,13 +130,17 @@ def _write(tmp_path, base, rates=(5.0, 4.0)):
     """Pinned tables root: quotes and rates split by month of obs_date (Jan and Feb 2024), plus a manifest."""
     root = tmp_path / "root"
     vols = base[fvi.VOL_KEYS].drop_duplicates().assign(smvVol=25.0)
-    rate_frame = base[["ticker", "obs_date"]].drop_duplicates().assign(iRate5wk=rates[0], iRateLt=rates[1])
+    # Zero borrow (percent) and zero dividend: carry b = r when the rate is zero, and no dividend is applied.
+    carry = {"borrow30": 0.0, "borrow2yr": 0.0, "divAmt": 0.0, "divDate": pd.NaT, "annIdiv": 0.0, "annActDiv": 0.0,
+             "assetType": 1.0}
+    rate_frame = base[["ticker", "obs_date"]].drop_duplicates().assign(iRate5wk=rates[0], iRateLt=rates[1], **carry)
     for kind, frame in (("quotes", vols), ("rates", rate_frame)):
         for month in (1, 2):
             path = root / kind / "year=2024" / f"month={month:02d}.parquet"
             path.parent.mkdir(parents=True, exist_ok=True)
             frame[frame["obs_date"].dt.month == month].to_parquet(path, index=False)
-    (root / "manifest.json").write_bytes(json.dumps({"version": "3", "tables": {"quotes": OK, "rates": OK}}).encode())
+    manifest = {"version": "3", "tables": {"quotes": OK, "rates": OK}, "units": UNITS}
+    (root / "manifest.json").write_bytes(json.dumps(manifest).encode())
     return root
 
 
@@ -288,7 +293,8 @@ def test_legs_keep_leg_order_and_feed_structure_entry_and_exit(tmp_path):
     assert res.debit_F > res.debit_fair
     exit_ = _legs_frame(fq, chunk, legs, at_exit=True)
     assert fvf.structure_exit(exit_[exit_["qty"] > 0]).outcome == "ok"
-    for col in ("repaired", "unknown_bid_size", "unknown_ask_size", "unknown_oi"):
+    for col in ("repaired", "unknown_bid_size", "unknown_ask_size", "unknown_oi", "carry_fallback", "dividend_fallback",
+                "dividend_applied"):
         assert entry[col].dtype == bool and exit_[col].dtype == bool
     for i, leg in enumerate(legs):
         idx = leg["idx"]
@@ -488,7 +494,7 @@ def test_table_prices_with_unit_scaled_vol_and_rate(tmp_path):
     days = 39  # (EXPIRY - ENTRY).days, by hand
     assert (_ts(EXPIRY) - _ts(ENTRY)).days == days
     rate = 0.05 + (days - 35) / (365 - 35) * (0.04 - 0.05)  # by hand: 5wk and long rates blended on days
-    rows["rate"] = rate
+    rows = rows.assign(rate=rate, borrow30=0.0, borrow2yr=0.0, divAmt=0.0, divDate=pd.NaT)  # as _write pins them
     vols = rows[fvi.VOL_KEYS].drop_duplicates().assign(smvVol=0.25)
     want = fvf.leg_fills(rows, vols)
     got = got.set_index(["right", "strike"])
