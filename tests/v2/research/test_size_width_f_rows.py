@@ -17,7 +17,7 @@ from experiments import size_width_f_fills as ff
 from experiments import size_width_f_rows as fr
 from experiments import size_width_pricing as seam
 from experiments.size_pnl_straddle import EXIT_UNQUOTED
-from experiments.size_width_sweep import _TAKEN, Sweep
+from experiments.size_width_sweep import TAKEN_COLS, Sweep
 from tests.v2.research.test_size_width_f_fills import (
     EVENTS, NAME, SIMS, StubQuotes, _debits, _exit_status, _proceeds, _tight_frames, _trade)
 from tests.v2.research.test_size_width_f_quotes import (
@@ -117,7 +117,7 @@ def test_f_sweep_returns_taken_then_f_columns_then_arm(tmp_path):
     sweep = _sweep(fq)
     assert sweep.f is True
     out = _month(sweep, chunk)
-    assert list(out.columns) == _TAKEN + fr.F_COLS + ["arm"]
+    assert list(out.columns) == TAKEN_COLS + fr.F_COLS + ["arm"]
     assert set(out["arm"]) == {"1.0", "E"}
     assert len(out) == 4 and set(out["event_id"]) == set(EVENT_INDEX)
 
@@ -125,9 +125,9 @@ def test_f_sweep_returns_taken_then_f_columns_then_arm(tmp_path):
 def test_empty_month_and_empty_rows_carry_the_taken_columns(tmp_path):
     fq, chunk = _setup(tmp_path, _tight_frames(), DEFAULT_PLAN)
     sweep = _sweep(fq)
-    assert list(_month(sweep, chunk, output=False).columns) == _TAKEN + fr.F_COLS + ["arm"]
+    assert list(_month(sweep, chunk, output=False).columns) == TAKEN_COLS + fr.F_COLS + ["arm"]
     rows = sweep.rows([(NAME, 1.0)], WINDOW)
-    assert rows.empty and list(rows.columns) == sweep.taken_cols == _TAKEN + fr.F_COLS
+    assert rows.empty and list(rows.columns) == sweep.taken_cols == TAKEN_COLS + fr.F_COLS
 
 
 @pytest.mark.parametrize("make", [lambda: sv, lambda: seam.load()], ids=["shortvol", "current-fills"])
@@ -135,8 +135,8 @@ def test_non_f_pricing_adds_no_column(tmp_path, make):
     _, chunk = _setup(tmp_path, _tight_frames(), DEFAULT_PLAN)
     sweep = Sweep(ks=(1.0,), names=(NAME,), pricing=make())
     assert sweep.f is False
-    assert list(_month(sweep, chunk).columns) == _TAKEN + ["arm"]
-    assert list(sweep.rows([(NAME, 1.0)], WINDOW).columns) == _TAKEN
+    assert list(_month(sweep, chunk).columns) == TAKEN_COLS + ["arm"]
+    assert list(sweep.rows([(NAME, 1.0)], WINDOW).columns) == TAKEN_COLS
 
 
 def test_primary_columns_are_the_f_debit_proceeds_and_their_pnl(tmp_path):
@@ -232,11 +232,29 @@ def test_ladder_rung3_zeroes_primary_and_every_sensitivity_exit(tmp_path):
         assert row[f"pnl_dollars_{v}"] == pytest.approx(_pnl(0.0, sens[v]), rel=1e-9)
 
 
+def _negative_exit(frame, exit):
+    """Edit for exit calls only: a long sells at 0 and a short buys back at 1, so every traded row's proceeds are below
+    zero (each traded row has a short leg)."""
+    if not exit:
+        return frame
+    return frame.assign(fill_buy=1.0, fill_sell=0.0)
+
+
 def test_exit_flags_reach_the_taken_rows(tmp_path):
-    fq, chunk = _setup(tmp_path, _tight_frames(), DEFAULT_PLAN)
+    fq, chunk = _setup(tmp_path / "fair", _tight_frames(), DEFAULT_PLAN)
     out = _month(_sweep(StubQuotes(fq, _exit_status("rate_unknown"))), chunk)
     assert out["exit_fair_mid"].dtype == bool and out["exit_negative"].dtype == bool
     assert out["exit_fair_mid"].all()
+    assert out["exit_negative"].tolist() == (out["exit_value"] < 0).tolist()
+
+
+def test_negative_exit_flags_reach_the_taken_rows(tmp_path):
+    fq, chunk = _setup(tmp_path / "neg", _tight_frames(), DEFAULT_PLAN)
+    out = _month(_sweep(StubQuotes(fq, _negative_exit)), chunk)
+    assert len(out) == 4
+    assert (out["exit_value"] < 0).all()
+    assert out["exit_negative"].dtype == bool and out["exit_negative"].all()
+    assert out["exit_fair_mid"].dtype == bool and not out["exit_fair_mid"].any()
 
 
 def test_arm_e_choice_frame_carries_the_current_fills_mid_exit(tmp_path):
@@ -248,6 +266,27 @@ def test_arm_e_choice_frame_carries_the_current_fills_mid_exit(tmp_path):
     assert set(taken.index) == set(EVENT_INDEX)
     for eid, i in EVENT_INDEX.items():
         assert taken.loc[eid, "exit_value_mid"] == pytest.approx(_exit_value(chunk, _traded(chunk, i), False), abs=1e-9)
+
+
+def _none_taken(scored):
+    """Stands in for decide: no scored row is taken; every one is declined below the cutoff."""
+    out = scored.copy()
+    ok = (out["status"] == "scored").to_numpy()
+    out.loc[ok, "status"] = "not_taken"
+    out.loc[ok, "reason"] = "below_cutoff"
+    return out
+
+
+def test_output_month_with_no_f_trades_is_empty_and_declines_every_event(tmp_path):
+    fq, chunk = _setup(tmp_path, _tight_frames(), DEFAULT_PLAN)
+    sweep = _sweep(fq, decide=_none_taken)
+    out = _month(sweep, chunk)
+    assert out.empty and list(out.columns) == TAKEN_COLS + fr.F_COLS + ["arm"]
+    rows = sweep.rows([(NAME, 1.0)], WINDOW)
+    assert rows.empty and list(rows.columns) == sweep.taken_cols
+    declined = sweep.declined_rows()
+    assert set(declined["event_id"]) == set(EVENT_INDEX)
+    assert (declined["status"] == "not_taken").all() and (declined["reason"] == "below_cutoff").all()
 
 
 def test_f_taken_and_declined_rows_write_as_decisions(tmp_path):
@@ -262,3 +301,17 @@ def test_f_taken_and_declined_rows_write_as_decisions(tmp_path):
     assert written == 4
     back = pd.read_parquet(tmp_path / "m.parquet")
     assert back["exit_fair_mid"].notna().sum() == 2
+
+    key = ["event_id", "arm_or_rule"]
+    mem = taken.set_index(key)
+    kept = back[back["status"] == "taken"].set_index(key)
+    assert len(kept) == len(mem) == 2
+    for col in fr.F_COLS:
+        want, got = mem[col], kept.loc[mem.index, col]
+        if pd.api.types.is_float_dtype(want):
+            np.testing.assert_allclose(got.to_numpy(float), want.to_numpy(float), rtol=1e-12)
+        else:
+            assert got.tolist() == want.tolist(), col
+    declined_back = back[back["status"] != "taken"]
+    assert len(declined_back) == 2
+    assert declined_back[fr.F_COLS].isna().all().all()
