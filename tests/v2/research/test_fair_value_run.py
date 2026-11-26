@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import io
 import json
 import sys
 from pathlib import Path
@@ -146,6 +147,16 @@ def test_fvf_id_changes_with_min_meaningful_cost(monkeypatch):
     assert run.fvf_id() != before
 
 
+def test_fvf_id_refuses_source_file_over_read_cap(tmp_path):
+    for n in run.SOURCE_FILES:
+        (tmp_path / n).write_bytes((SRC / n).read_bytes())
+    (tmp_path / run.SOURCE_FILES[0]).write_bytes(b"\0" * ((1 << 20) + 1))
+    with pytest.raises(fvi.FairValueRefusal) as exc:
+        run.fvf_id(root=tmp_path)
+    assert exc.value.code == "RESOURCE_LIMIT_EXCEEDED"
+    assert exc.value.details["reason"] == "input_too_large"
+
+
 def test_source_set_matches_fair_value_modules():
     names = {p.name for p in SRC.glob("fair_value_*.py")}
     assert set(run.SOURCE_FILES) | {"fair_value_run.py"} == names
@@ -177,7 +188,10 @@ def test_early_quarter_rate_comes_from_previous_month(world, spy):
     _run(world)
     q1 = spy[0][0]
     assert q1["obs_date"].eq(pd.Timestamp("2024-01-02")).all()
-    assert q1["rate"].between(0.04, 0.05).all()
+    # Previous-month rate row: iRate5wk 5.0 -> 0.05, iRateLt 4.0 -> 0.04 at rate_scale 0.01; linear in days to expiry.
+    days = (q1["expiry"] - pd.Timestamp("2024-01-02")).dt.days
+    weight = ((days - 35) / (365 - 35)).clip(0, 1)
+    assert q1["rate"].to_numpy() == pytest.approx((0.05 + weight * (0.04 - 0.05)).to_numpy())
 
 
 def test_unrequested_expiries_are_not_priced(world, spy):
@@ -276,6 +290,14 @@ def test_fvf_id_mismatch_refused_before_any_file_read(tmp_path):
     assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
+def test_pins_without_manifest_refused_before_any_file_read(tmp_path):
+    absent = tmp_path / "absent"
+    with pytest.raises(fvi.FairValueRefusal) as exc:
+        _run({"quotes": absent, "root": absent, "pins": {}})
+    assert exc.value.details["reason"] == "pins_invalid"
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
 @pytest.mark.parametrize("over,reason", [({"max_rss_mb": 0.0}, "rss_limit"),
                                          ({"max_rss_mb": float("nan")}, "rss_limit")])
 def test_bad_limits_refused_before_any_file_read(tmp_path, over, reason):
@@ -334,11 +356,19 @@ def test_quote_footer_estimate_over_limit_refused_before_decode(world, spy, read
     assert spy == []
 
 
-def test_quote_read_takes_only_contract_columns(world, spy, reads):
-    _chain("2024-01-02", ["2024-02-16", "2024-03-15", "2024-05-17"]).assign(junk=1.0).to_parquet(
-        world["quotes"] / "2024Q1.parquet", index=False)
+def test_quote_read_takes_only_contract_columns(world, spy, monkeypatch):
+    quote = world["quotes"] / "2024Q1.parquet"
+    _chain("2024-01-02", ["2024-02-16", "2024-03-15", "2024-05-17"]).assign(junk=1.0).to_parquet(quote, index=False)
+    blob, seen, real = quote.read_bytes(), [], pd.read_parquet
+
+    def wrapped(source, *args, **kwargs):
+        if isinstance(source, io.BytesIO) and source.getvalue() == blob:  # only quote-file reads, not table reads
+            seen.append(kwargs.get("columns"))
+        return real(source, *args, **kwargs)
+
+    monkeypatch.setattr(pd, "read_parquet", wrapped)
     _run(world)
-    assert not any("junk" in cols for cols in reads)
+    assert seen == [list(fvi.QUOTE_COLUMNS)]
     assert "junk" not in spy[0][0].columns
 
 
@@ -429,6 +459,41 @@ def test_main_legs_over_cap_refused_with_one_line(world, tmp_path, capsys, monke
     assert len(lines) == 1
     out = json.loads(lines[0])
     assert out["refusal"] == "RESOURCE_LIMIT_EXCEEDED" and out["details"]["reason"] == "input_too_large"
+
+
+def _mutate(where, data):
+    """Overwrite the named input with `data`; `data` None removes it."""
+    def mutate(w, tmp):
+        path = {"pins": tmp / "pins.json", "legs": tmp / "legs.csv", "quote": w["quotes"] / "2024Q1.parquet"}[where]
+        if data is None:
+            path.unlink()
+        else:
+            path.write_bytes(data)
+    return mutate
+
+
+MALFORMED = [
+    pytest.param(_mutate("pins", b"{not json"), "input_unreadable", id="pins-not-json"),
+    pytest.param(_mutate("pins", None), "input_unreadable", id="pins-missing"),
+    pytest.param(_mutate("pins", b"[]"), "pins_invalid", id="pins-list"),
+    pytest.param(_mutate("pins", b"{}"), "pins_invalid", id="pins-empty-object"),
+    pytest.param(_mutate("pins", b'{"manifest_sha256": 1, "files": {}}'), "pins_invalid", id="pins-sha-not-str"),
+    pytest.param(_mutate("pins", b'{"manifest_sha256": "a", "files": []}'), "pins_invalid", id="pins-files-list"),
+    pytest.param(_mutate("legs", b""), "input_unreadable", id="legs-empty"),
+    pytest.param(_mutate("legs", None), "input_unreadable", id="legs-missing"),
+    pytest.param(_mutate("quote", b"not parquet at all"), "input_unreadable", id="quote-garbage"),
+]
+
+
+@pytest.mark.parametrize("mutate,reason", MALFORMED)
+def test_main_malformed_input_refused_with_one_line(world, tmp_path, capsys, mutate, reason):
+    argv = _cli(world, tmp_path)
+    mutate(world, tmp_path)
+    assert run.main(argv) == 2
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 1
+    out = json.loads(lines[0])
+    assert out["refusal"] == "EXPERIMENT_IDENTITY_CONFLICT" and out["details"]["reason"] == reason
 
 
 def test_module_imports_only_allowed_modules():
