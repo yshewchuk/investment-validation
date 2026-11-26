@@ -370,6 +370,16 @@ CASES = {
     "scored row with nan quantile": lambda e, a, b: (_edit(a, e.index[0], "q50", np.nan), b, e, None),
     "raw missing a paired id": lambda e, a, b: (a, b, e, a[QCOLS].iloc[1:]),
     "raw with a nan value": lambda e, a, b: (a, b, e, _edit(a[QCOLS], e.index[0], "q25", np.nan)),
+    "b0 duplicate index": lambda e, a, b: (a, pd.concat([b, b.iloc[:1]]), e, None),
+    "raw duplicate index": lambda e, a, b: (a, b, e, pd.concat([a[QCOLS], a[QCOLS].iloc[:1]])),
+    "b0 id not in events": lambda e, a, b: (a, b.rename(index={e.index[0]: "ghost"}), e, None),
+    "in-period inf y": lambda e, a, b: (a, b, _edit(e, e.index[0], "y", np.inf), None),
+    "scored arm row with inf quantile": lambda e, a, b: (_edit(a, e.index[0], "q50", np.inf), b, e, None),
+    "scored b0 row with nan quantile": lambda e, a, b: (a, _edit(b, e.index[0], "q50", np.nan), e, None),
+    "raw with an inf value": lambda e, a, b: (a, b, e, _edit(a[QCOLS], e.index[0], "q25", np.inf)),
+    "raw missing a quantile column": lambda e, a, b: (a, b, e, a[QCOLS].drop(columns="q50")),
+    "arm missing a quantile column": lambda e, a, b: (a.drop(columns="q50"), b, e, None),
+    "b0 missing reason": lambda e, a, b: (a, b.drop(columns="reason"), e, None),
 }
 
 
@@ -387,6 +397,16 @@ MESSAGES = {
     "scored row with nan quantile": "scored rows need seven finite quantiles",
     "raw missing a paired id": "raw needs seven finite values for every paired event",
     "raw with a nan value": "raw needs seven finite values for every paired event",
+    "b0 duplicate index": "indexes must be unique",
+    "raw duplicate index": "indexes must be unique",
+    "b0 id not in events": "arm and b0 ids must all be in events",
+    "in-period inf y": "in-period events need a ticker and finite non-negative y",
+    "scored arm row with inf quantile": "scored rows need seven finite quantiles",
+    "scored b0 row with nan quantile": "scored rows need seven finite quantiles",
+    "raw with an inf value": "raw needs seven finite values for every paired event",
+    "raw missing a quantile column": "events, arm, b0 and raw need their columns",
+    "arm missing a quantile column": "events, arm, b0 and raw need their columns",
+    "b0 missing reason": "events, arm, b0 and raw need their columns",
 }
 
 
@@ -511,6 +531,51 @@ def test_walking_skeleton_paired_count_is_the_reason_null_intersection():
     assert expected > 0
     assert int(res["share"].set_index("period").loc["pooled", "paired"]) == expected
     assert int(row_of(res["tables"], "pooled", "pooled")["n"]) == expected
+
+
+# ---------- l. result shape, inputs unchanged, seed and resamples reach the bootstrap ----------
+
+@pytest.mark.parametrize("case", ["testable", "not_testable"])
+def test_result_has_no_combined_verdict_and_inputs_are_unchanged(case):
+    if case == "testable":
+        events, arm, b0 = _population("multi")
+        raw = arm[QCOLS].copy()
+    else:
+        events, arm, b0, raw = tiny_frames()
+    before = [f.copy(deep=True) for f in (events, arm, b0, raw)]
+    res = tables.evaluate_arm("S", arm, b0, events, raw=raw, resamples=R)
+    assert res["status"] == case
+    assert set(res) == {"arm", "status", "not_testable_reasons", "share", "drops", "tables", "accuracy",
+                        "calibration"}
+    for frame, saved in zip((events, arm, b0, raw), before):
+        pd.testing.assert_frame_equal(frame, saved)
+
+
+def test_resamples_and_seed_reach_the_bootstrap(monkeypatch):
+    calls = []
+    original = tables.bootstrap_interval
+
+    def recording(*args, **kwargs):
+        calls.append((kwargs["resamples"], kwargs["seed"]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(tables, "bootstrap_interval", recording)
+    events, arm, b0 = _population("multi")
+    res = tables.evaluate_arm("S", arm, b0, events, resamples=37, seed=7)
+    assert res["status"] == "testable"
+    assert calls == [(37, 7), (37, 7)]
+
+
+def test_seed_changes_the_intervals_on_a_noisy_population():
+    events = make_events(per_quarter=4)
+    y = events["y"].to_numpy(float)
+    wiggle = (np.arange(len(y)) % 5 - 2) * 0.3
+    arm = qframe(events.index, y[:, None] + wiggle[:, None] + OFF)
+    b0 = qframe(events.index, y[:, None] + 1.0 + np.zeros(7))
+    assert SEED != 7
+    default = tables.evaluate_arm("S", arm, b0, events, resamples=R)["accuracy"]
+    seeded = tables.evaluate_arm("S", arm, b0, events, resamples=R, seed=7)["accuracy"]
+    assert any(not np.array_equal(seeded[k], default[k]) for k in ("quarter_interval", "ticker_interval"))
 
 
 # ---------- stdout stays empty ----------

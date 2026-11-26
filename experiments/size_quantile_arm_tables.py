@@ -1,8 +1,8 @@
 """EXP-190 Q5b part 1: arm tables, scored share, pass rules 1 (accuracy) and 3 (calibration).
 
 Pure over caller-loaded frames: no file I/O, no stored artifacts, no production caller yet (Q6 first).
-Part 1 only: it returns NO pass verdict for the arm. Rule 2, the conditional tests and the Stage A verdict
-are part 2. The 8-of-10 and 5-of-10 quarter counts are the design's (section 5).
+Part 1 only: per-rule `passed` flags for pass rules 1 (accuracy) and 3 (calibration), no combined pass verdict.
+Rule 2, conditional tests and Stage A verdict are part 2; the 8-of-10 and 5-of-10 quarter counts are design section 5.
 """
 import numpy as np
 import pandas as pd
@@ -28,7 +28,7 @@ def _mean(x):
 
 
 def _pair(arm, b0, events, raw):
-    """Checks 1-5 in spec order; returns the admitted in-period events and each side's reason per event."""
+    """Input checks, then the admitted in-period events and each side's reason per event."""
     frames = [events, arm, b0] + ([] if raw is None else [raw])
     if not {"event_date", "ticker", "y", "m0", "m3"} <= set(events.columns) or not all(
             set(QCOLS + ["reason"]) <= set(f.columns) for f in (arm, b0)) or (
