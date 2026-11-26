@@ -43,9 +43,9 @@ def _admit(plan, pins):
     cols = ["event_id", "ticker", "entry_date", "exit_date"]
     if not isinstance(plan, pd.DataFrame) or any(c not in plan.columns for c in cols):
         raise fvi.FairValueRefusal("plan_invalid", "plan must be a DataFrame with event_id, ticker, entry_date, exit_date")
-    dates = [pd.to_datetime(plan[c], errors="coerce") for c in ("entry_date", "exit_date")]
-    if plan[cols].isna().any().any() or not plan["event_id"].astype(str).is_unique or any(d.isna().any() for d in dates):
-        raise fvi.FairValueRefusal("plan_invalid", "plan holds a null, a duplicate event_id or a date that does not convert")
+    entry, exit_ = (pd.to_datetime(plan[c], errors="coerce").dt.normalize() for c in ("entry_date", "exit_date"))
+    if plan[cols].isna().any().any() or not plan["event_id"].astype(str).is_unique or not (entry < exit_).all():
+        raise fvi.FairValueRefusal("plan_invalid", "plan holds a null, a duplicate event_id, a bad date or dates out of order")
 
 
 def _price(rows, vols, side):

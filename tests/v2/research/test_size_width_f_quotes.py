@@ -391,6 +391,9 @@ BAD_PLANS = [
     pytest.param(_plan(("E0", "AAA", ENTRY, EXIT), ("E0", "BBB", ENTRY, EXIT)), id="duplicate-event_id"),
     pytest.param(DEFAULT_PLAN.assign(entry_date=pd.NaT), id="null-entry_date"),
     pytest.param(DEFAULT_PLAN.assign(exit_date="not a date"), id="unparseable-exit_date"),
+    pytest.param(_plan(("E0", "AAA", EXIT, ENTRY)), id="exit-before-entry"),
+    pytest.param(_plan(("E0", "AAA", ENTRY, ENTRY)), id="exit-equal-entry"),
+    pytest.param(_plan(("E0", "AAA", "2024-02-05 16:00", "2024-02-05 09:30")), id="exit-same-day-earlier-time"),
     pytest.param([1, 2], id="not-a-dataframe"),
 ]
 
