@@ -167,6 +167,7 @@ def cell_scores(event_id, cell, e, q50, score, rules=Rules()):
 
     Returns (per_event, per_cell) in input row order. The skip reasons never depend
     on score, so W and L always use the same cells.
+    W and L (any two scores compared) must be scored on the same rows, in the same order.
     """
     event_id = np.asarray(event_id)
     e = np.asarray(e, float)

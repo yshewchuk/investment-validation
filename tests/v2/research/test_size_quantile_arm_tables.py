@@ -226,8 +226,17 @@ def test_period_without_paired_events_is_named():
     ids = [i for i in events.index if i.startswith("2024")]
     res = tables.evaluate_arm("S", mark(arm, ids, "no_output"), b0, events, resamples=R)
     assert res["status"] == "not_testable"
-    assert res["not_testable_reasons"] == ["2024:period_no_paired_events"]
+    assert res["not_testable_reasons"] == ["2024:period_no_paired_events", "2024:scored_share_below_floor"]
     assert res["accuracy"]["periods_below"]["2024"] is False
+
+
+def test_period_with_no_admitted_events_reports_only_no_pairs():
+    events = make_events(per_quarter=4, drop=[q for q in QUARTERS if q.startswith("2025")])
+    arm, b0 = perfect_vs_shift(events)
+    res = tables.evaluate_arm("S", arm, b0, events, resamples=R)
+    assert res["status"] == "not_testable"
+    assert res["not_testable_reasons"] == ["2025:period_no_paired_events"]
+    assert np.isnan(res["share"].set_index("period").loc["2025", "share"])
 
 
 # ---------- e. accuracy (rule 1) ----------
@@ -545,8 +554,8 @@ def test_result_has_no_combined_verdict_and_inputs_are_unchanged(case):
     before = [f.copy(deep=True) for f in (events, arm, b0, raw)]
     res = tables.evaluate_arm("S", arm, b0, events, raw=raw, resamples=R)
     assert res["status"] == case
-    assert set(res) == {"arm", "status", "not_testable_reasons", "share", "drops", "tables", "accuracy",
-                        "calibration"}
+    assert set(res) == {"arm", "status", "not_testable_reasons", "share", "drops", "paired_ids", "tables",
+                        "accuracy", "calibration"}
     for frame, saved in zip((events, arm, b0, raw), before):
         pd.testing.assert_frame_equal(frame, saved)
 
