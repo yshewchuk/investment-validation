@@ -161,13 +161,32 @@ def test_invalid_grid_cell_or_empty_axis_refuses_fit_fold_before_any_fit(monkeyp
     assert calls == []
 
 
+BAD_SELECTION_GRIDS = [
+    (_spec([], [300]), True), (_spec([7, 100], [300]), True), ({**SPEC, "levels": [0.1, 0.0]}, True),
+    (_spec([15], [300]), False),
+]
+
+
+@pytest.mark.parametrize("spec, has_outputs", BAD_SELECTION_GRIDS)
+def test_selection_refuses_grid_that_identity_and_fitting_refuse(spec, has_outputs):
+    refusal = ("EXPERIMENT_IDENTITY_CONFLICT", "grid_invalid")
+    with pytest.raises(OpsError) as exc:
+        fits.select_configuration(spec, _fit_sealed(), [], {})
+    assert _refusal(exc) == refusal
+    if has_outputs:
+        receipt = _receipt(["e1"], {k: [1.0] for k in KEYS})
+        with pytest.raises(OpsError) as exc:
+            fits.select_configuration(spec, _fit_sealed(), [receipt], {"e1": 0.0})
+        assert _refusal(exc) == refusal
+
+
 def test_no_earlier_outputs_returns_first_configuration():
-    assert fits.select_configuration(SPEC, [], {}) == ((7, 300), {})
+    assert fits.select_configuration(SPEC, _fit_sealed(), [], {}) == ((7, 300), {})
 
 
 def test_no_earlier_outputs_with_labels_refuses():
     with pytest.raises(OpsError) as exc:
-        fits.select_configuration(SPEC, [], {"e1": 0.0})
+        fits.select_configuration(SPEC, _fit_sealed(), [], {"e1": 0.0})
     assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "selection_inputs_invalid")
 
 
@@ -175,7 +194,7 @@ def test_earlier_outputs_without_any_label_refuse():
     receipt = _receipt(["e1"], {k: [1.0] for k in KEYS})
     for labels in ({}, {"zz": 1.0}):
         with pytest.raises(OpsError) as exc:
-            fits.select_configuration(SPEC, [receipt], labels)
+            fits.select_configuration(SPEC, _fit_sealed(), [receipt], labels)
         assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "selection_labels_empty")
 
 
@@ -185,7 +204,7 @@ def test_selection_picks_event_weighted_loss_not_year_average():
     three = _receipt(["e2", "e3", "e4"], {"7x300": [0.0] * 3, "7x1000": [0.8] * 3, "15x300": [0.8] * 3,
                                           "15x1000": [0.8] * 3})
     labels = {e: 0.0 for e in ("e1", "e2", "e3", "e4")}
-    winner, losses = fits.select_configuration(SPEC, [one_year, three], labels)
+    winner, losses = fits.select_configuration(SPEC, _fit_sealed(), [one_year, three], labels)
     # Per-year averaging would give 15x1000 (0.2 vs 0.5 for 7x300); event weighting gives 7x300.
     assert losses == pytest.approx({"7x300": 0.25, "7x1000": 0.55, "15x300": 0.55, "15x1000": 0.3})
     assert winner == (7, 300)
@@ -193,9 +212,9 @@ def test_selection_picks_event_weighted_loss_not_year_average():
 
 def test_exact_tie_prefers_fewer_leaves_then_larger_leaf():
     receipt = _receipt(["e1"], {k: [1.0] for k in KEYS})
-    assert fits.select_configuration(SPEC, [receipt], {"e1": 0.0})[0] == (7, 1000)
+    assert fits.select_configuration(SPEC, _fit_sealed(), [receipt], {"e1": 0.0})[0] == (7, 1000)
     two_configs = _spec([7, 15], [300])
-    assert fits.select_configuration(two_configs, [receipt], {"e1": 0.0})[0] == (7, 300)
+    assert fits.select_configuration(two_configs, _fit_sealed(), [receipt], {"e1": 0.0})[0] == (7, 300)
 
 
 def test_selection_sorts_rows_but_does_not_floor_them():
@@ -203,7 +222,7 @@ def test_selection_sorts_rows_but_does_not_floor_them():
     receipt = {"event_ids": ["e1"],
                "raw": {"7x300": [unsorted], "15x1000": [sorted(unsorted)], "7x1000": [[-2.0] * 7],
                        "15x300": [[0.0] * 7]}}
-    _, losses = fits.select_configuration(SPEC, [receipt], {"e1": 0.0})
+    _, losses = fits.select_configuration(SPEC, _fit_sealed(), [receipt], {"e1": 0.0})
     assert losses["7x300"] == pytest.approx(losses["15x1000"])  # both scored on the sorted row
     assert losses["7x1000"] == pytest.approx(1.0)  # -2 stays -2: a 2-unit overshoot, not floored to 0
 
@@ -212,7 +231,7 @@ def test_selection_ignores_events_without_a_label():
     receipt = {"event_ids": ["e1", "e2"],
                "raw": {"7x300": [[0.0] * 7, [50.0] * 7], "7x1000": [[0.0] * 7, [50.0] * 7],
                        "15x300": [[0.0] * 7, [-50.0] * 7], "15x1000": [[0.0] * 7, [-50.0] * 7]}}
-    _, losses = fits.select_configuration(SPEC, [receipt], {"e1": 0.0})
+    _, losses = fits.select_configuration(SPEC, _fit_sealed(), [receipt], {"e1": 0.0})
     assert losses == pytest.approx({k: 0.0 for k in KEYS})
 
 
@@ -220,13 +239,13 @@ def test_selection_ignores_events_without_a_label():
 def test_non_finite_selection_label_refuses(bad):
     receipt = _receipt(["e1", "e2"], {k: [1.0, 1.0] for k in KEYS})
     with pytest.raises(OpsError) as exc:
-        fits.select_configuration(SPEC, [receipt], {"e1": 0.0, "e2": bad})
+        fits.select_configuration(SPEC, _fit_sealed(), [receipt], {"e1": 0.0, "e2": bad})
     assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "selection_label_invalid")
 
 
 def test_non_finite_label_outside_earlier_outputs_is_ignored():
     receipt = _receipt(["e1"], {k: [1.0] for k in KEYS})
-    _, losses = fits.select_configuration(SPEC, [receipt], {"e1": 0.0, "zz": float("nan")})
+    _, losses = fits.select_configuration(SPEC, _fit_sealed(), [receipt], {"e1": 0.0, "zz": float("nan")})
     assert losses == pytest.approx({k: 0.5 for k in KEYS})
 
 

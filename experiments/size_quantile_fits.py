@@ -47,9 +47,7 @@ def q_raw(raw):
 
 
 def arm_id(spec, sealed, source, configuration):
-    recipes = _recipes(spec, sealed, configurations(spec))
-    if configuration not in configurations(spec):
-        raise _refuse("grid_invalid", "the configuration is not in the grid")
+    recipes = _recipes(spec, sealed, configuration)
     params = recipes[(configuration, spec["levels"][0])]["estimator"]["params"]
     cfg = {k: params[k] for k in ("max_leaf_nodes", "min_samples_leaf", *spec["grid"]["fixed"])}
     return content_hash({"source": source, "levels": list(spec["levels"]), "configuration": cfg})
@@ -69,11 +67,13 @@ def recipe_for(spec, sealed, configuration, level):
     return recipe
 
 
-def _recipes(spec, sealed, configs):
+def _recipes(spec, sealed, required=None):
+    configs = configurations(spec)
     levels = list(spec["levels"])
     real = all(isinstance(v, numbers.Real) and not isinstance(v, bool) and 0 < v < 1 for v in levels)
-    if not (levels and configs and real and all(a < b for a, b in zip(levels, levels[1:]))):
-        raise _refuse("grid_invalid", "levels must be real, in (0, 1), strictly increasing; axes non-empty")
+    if not (levels and configs and real and all(a < b for a, b in zip(levels, levels[1:]))
+            and required in (None, *configs)):
+        raise _refuse("grid_invalid", "levels real, in (0, 1), strictly increasing; grid complete; required in grid")
     try:
         return {(c, level): recipe_for(spec, sealed, c, level) for c, level in itertools.product(configs, levels)}
     except ValueError:
@@ -95,9 +95,9 @@ def _matrix(by_id, event_ids, columns):
     return matrix
 
 
-def select_configuration(spec, outputs, labels):
+def select_configuration(spec, sealed, outputs, labels):
     """`outputs`: earlier years' `fit_fold` results; `labels`: {event_id: y} labelled before the cutoff."""
-    configs = configurations(spec)
+    _recipes(spec, sealed, FIRST_CONFIGURATION)
     if not outputs:
         if labels:
             raise _refuse("selection_inputs_invalid", "labels were given but there are no earlier outputs")
@@ -109,10 +109,10 @@ def select_configuration(spec, outputs, labels):
                    details={"reason": "selection_labels_empty"})
     y = _label_array([v for _, _, v in pairs], "selection_label_invalid")
     losses = {}
-    for c in configs:
+    for c in configurations(spec):
         rows = np.asarray([out["raw"][_key(c)][i] for out, i, _ in pairs], float).reshape(len(pairs), len(levels))
         losses[_key(c)] = float(pinball(y, np.sort(rows, axis=1), levels).mean())
-    winner = min(configs, key=lambda c: (losses[_key(c)], c[0], -c[1]))
+    winner = min(configurations(spec), key=lambda c: (losses[_key(c)], c[0], -c[1]))
     decision("quantile selection", f"configuration={_key(winner)} selection_labels={len(pairs)}")
     return winner, losses
 
@@ -133,7 +133,7 @@ def fit_fold(spec, sealed, training, evaluation_ids):
         train_x = _matrix(by_id, training_ids, columns)
         eval_x = _matrix(by_id, evaluation_ids, columns)
         configs = configurations(spec)
-        recipes = _recipes(spec, sealed, configs)
+        recipes = _recipes(spec, sealed)
         progress = Progress("quantile fits", len(configs) * len(levels))
         with stage("quantile fold fits"):
             for c in configs:
