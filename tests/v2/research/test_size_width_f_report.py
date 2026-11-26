@@ -9,6 +9,8 @@ from experiments import size_pnl_receipts as receipts
 from experiments import size_width_f_views as f_views
 from experiments import size_width_report as report
 from experiments.size_pnl_shortvol import NAMES, Refusal
+from experiments.size_width_f_fills import ENTRY_REASONS
+from experiments.size_width_success import LADDER
 from test_size_width_report import _write
 
 CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
@@ -156,13 +158,30 @@ def _add_views(results, periods):
                 res["structures"][n]["views"] = {v: cell(res["structures"][n], v) for v in ACCOUNT_VIEWS}
 
 
+def _add_counts(results, periods):
+    """Non-trade and non-positive-debit counts in place: 2 of 10 candidates F-skipped (one each by two F reasons), E's any-k share 0.2,
+    and one non-positive debit per alpha on every account."""
+    for label, by in results.items():
+        for p in periods:
+            res = by[p]
+            res["account"]["nonpositive_debit"] = {f"{a:.2f}": 1 for a in LADDER}
+            for n in NAMES:
+                nt = {"candidates": 10, "f_skipped": 2, "reasons": {ENTRY_REASONS[0]: 1, ENTRY_REASONS[4]: 1, "below_cutoff": 4},
+                      "only_arm_f_skipped": 1, "only_production_f_skipped": 3}
+                if label == "E":
+                    nt["any_k_f_skipped_share"] = 0.2
+                res["structures"][n]["nontrades"] = nt
+
+
 def _f_run(out, fill=FILL):
-    """A synthetic F run: _write's receipts retuned per period, the F binding in both inputs, beside-F views in both summaries."""
+    """A synthetic F run: _write's receipts retuned per period, the F binding in both inputs, beside-F views and non-trade counts in both summaries."""
     _write(out, passing=("A",))
     for name in ("inputs_inner.json", "inputs_outer.json"):
         _mutate(out, name, lambda b: b.update(fill_model=fill))
-    _mutate(out, "inner_summary.json", lambda b: (_retune(b["results"], HALVES), _add_views(b["results"], HALVES)))
-    _mutate(out, "outer_summary.json", lambda b: (_retune(b["results"], ("2025",)), _add_views(b["results"], ("2025",))))
+    _mutate(out, "inner_summary.json",
+            lambda b: (_retune(b["results"], HALVES), _add_views(b["results"], HALVES), _add_counts(b["results"], HALVES)))
+    _mutate(out, "outer_summary.json",
+            lambda b: (_retune(b["results"], ("2025",)), _add_views(b["results"], ("2025",)), _add_counts(b["results"], ("2025",))))
 
 
 def _text(out):

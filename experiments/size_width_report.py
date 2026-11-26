@@ -9,6 +9,7 @@ from experiments import size_width_band as band
 from experiments import size_width_choices as choices
 from experiments import size_width_errmodel as errmodel
 from experiments import size_width_fake as fake
+from experiments import size_width_f_report_counts as f_report_counts
 from experiments import size_width_f_views as f_views
 from experiments import size_width_flex as flex
 from experiments import size_width_success as success
@@ -258,11 +259,20 @@ def assemble(out_dir, *, expected=None, w5_tables=None):
     if f_run:
         if not (f_views.admit(inner["results"], labels, ("2023H2", "2024")) and f_views.admit(outer["results"], labels, ("2025",))):
             raise _conflict("the F views in results are missing, malformed, extra or differ from the deciding values")
+        if not (f_report_counts.admit(inner["results"], labels, ("2023H2", "2024")) and f_report_counts.admit(outer["results"], labels, ("2025",))):
+            raise _conflict("the F counts in results are missing, malformed or inconsistent")
     elif f_views.has_views(inner["results"]) or f_views.has_views(outer["results"]):
         raise _conflict("F views in a run that does not bind F")
     merged = {label: {**inner["results"][label], **outer["results"][label]} for label in labels}
     stats = {label: {**inner["stats"][label], **outer["stats"][label]} for label in labels}
     body_E = bodies["E"]
+    t2c, t5c = [], []
+    if f_run:
+        t2c = [f_report_counts.counts_markdown("T2c F entry non-trades by reason, arm, year and structure "
+                                               "(2023-24 tuning years; shares are % of candidates)", labels, ("2023H2", "2024"), merged)]
+        t5c = [f_report_counts.counts_markdown("T5c F entry non-trades by reason, arm, year and structure "
+                                               "(2025 NOT blind for widths; shares are % of candidates)", labels, ("2025",), merged),
+               f_report_counts.nonpositive_markdown(labels, PERIODS, merged)]
     breakevens = {label: {p: stats[label].get(p, {}).get("x") for p in PERIODS} for label in labels}
     table = success.success_table(merged["production"], {label: merged[label] for label in labels if label != "production"},
                                   breakevens, body_E)
@@ -281,9 +291,9 @@ def assemble(out_dir, *, expected=None, w5_tables=None):
     flat_note = [_flat_note(bodies, rec)] if rec in TUNED else []
     rule_text = "\n\n".join([success.render_rule(rule), *flat_note, EVIDENCE])
     w5 = w5_tables if w5_tables is not None else flex.render(inner, outer) if has_flex else PLACEHOLDER
-    sections = [head, _t1(inner), *_t2({arm: bodies[arm] for arm in TUNED if arm in bodies}, body_E), t3,
+    sections = [head, _t1(inner), *_t2({arm: bodies[arm] for arm in TUNED if arm in bodies}, body_E), *t2c, t3,
                 fake.t4_markdown({n: {float(k): cell for k, cell in row.items()} for n, row in inner["anchor"].items()}).rstrip(),
-                t5, *([choices.report_line(*echoes)] if any(e is not None for e in echoes) else []),
+                t5, *t5c, *([choices.report_line(*echoes)] if any(e is not None for e in echoes) else []),
                 t6, success.render_t7(table), rule_text, w5]
     report = out / "REPORT.md"
     text = "\n\n".join(s.rstrip() for s in sections) + "\n"
