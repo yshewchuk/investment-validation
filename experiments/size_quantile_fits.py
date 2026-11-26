@@ -1,6 +1,6 @@
 """EXP-190 Q3a (design sections 4, 7): one fold's quantile fits, walk-forward configuration selection, the
-non-crossing sort and arm ids. No file I/O; the caller supplies labels. The yearly loop, its `bind_grid` call, label
-reads and fit receipts are in `size_quantile_walk`, its only caller (nothing calls the walk yet); real-data fits need
+non-crossing sort and arm ids. No file I/O; the caller supplies labels. No production caller yet. The yearly loop,
+label reads, `bind_grid` and fit receipts are the next slice; real-data fits also need
 `size_quantile_prereg.require_preregistration` first. Uses v14's fit path (`fit_regression_predictions`: signed
 domain so raw outputs are not clipped, native NaN, all-empty training columns zeroed, one thread). Row masks are
 v14's: every training pair the caller passes, no feature filter. A `ValueError` from the fit itself propagates: the

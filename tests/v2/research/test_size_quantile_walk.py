@@ -221,13 +221,19 @@ def test_three_years_chain_receipts_and_see_only_their_own_labels(monkeypatch, t
     for index, year in enumerate(YEARS):
         train, evaluation, cutoff = EXPECT[year]
         receipt = receipts[year]
-        assert receipt["schema_version"] == walk.SCHEMA
+        assert receipt["schema_version"] == "size_quantile_fit.v1"
         assert receipt["status"] == "ok" and receipt["failure"] is None
         assert receipt["levels"] == LEVELS
         assert receipt["configuration"] == CONFIG[year]
         expected = {k: _pinball([LABEL[e] for e in SELECTION[year]], PRED[k]) for k in KEYS} if SELECTION[year] else {}
         assert receipt["selection_losses"] == {k: pytest.approx(v) for k, v in expected.items()}
-        assert receipt["arm_id"] == fits.arm_id(SPEC, sealed, "Q_raw", tuple(CONFIG[year]))
+        leaves, leaf = CONFIG[year]
+        arm_payload = {"source": "Q_raw", "levels": [0.1, 0.25, 0.4, 0.5, 0.6, 0.75, 0.9],
+                       "configuration": {"max_leaf_nodes": leaves, "min_samples_leaf": leaf, "learning_rate": 0.03,
+                                         "l2_regularization": 10.0, "max_iter": 3000, "early_stopping": True,
+                                         "validation_fraction": 0.1, "n_iter_no_change": 10, "tol": 1e-07,
+                                         "random_state": 0}}
+        assert receipt["arm_id"] == content_hash(arm_payload)
         assert receipt["event_ids"] == evaluation
         assert set(receipt["raw"]) == set(KEYS)
         for key in KEYS:
@@ -529,6 +535,38 @@ def test_replay_refuses_a_defective_mapping_as_a_fresh_fit_does(monkeypatch, tmp
     calls = _install(monkeypatch, out)
     with pytest.raises(OpsError) as exc:
         walk.fit_walk_forward(_broken(defect, event), SPEC, YEARS, out)
+    assert _refusal(exc) == _refusal(fresh_exc)
+    assert calls["fits"] == []
+    assert _snapshot(out) == before
+
+
+def _duplicate_training_fold(sealed):
+    """Repeat e20a as a training candidate in fold_events and in every sealed outer list, so parity still holds."""
+    sealed["fold_events"].append(dict(sealed["fold_events"][0]))
+    for group in sealed["plan"]["folds"]:
+        group["outer"]["training_candidate_event_ids"] = [*group["outer"]["training_candidate_event_ids"], "e20a"]
+    return sealed
+
+
+@pytest.mark.parametrize("case", ["negative_training_label", "duplicate_fold_id"])
+def test_replay_refuses_bad_fold_inputs_as_a_fresh_fit_does(monkeypatch, tmp_path, case):
+    out, fresh = tmp_path / "walk", tmp_path / "fresh"
+    _install(monkeypatch, out)
+    walk.fit_walk_forward(_sealed(), SPEC, YEARS, out)
+    before = _snapshot(out)
+    if case == "negative_training_label":
+        sealed, labels, reason = _sealed(), {**LABEL, "e20a": -1.0}, "training_label_invalid"
+    else:
+        sealed, labels, reason = _duplicate_training_fold(_sealed()), LABEL, "fold_inputs_invalid"
+    calls = _install(monkeypatch, fresh, labels=labels)
+    with pytest.raises(OpsError) as fresh_exc:
+        walk.fit_walk_forward(sealed, SPEC, YEARS, fresh)
+    assert _refusal(fresh_exc) == ("EXPERIMENT_IDENTITY_CONFLICT", reason)
+    assert calls["fits"] == []
+    assert not (fresh / "fit_2023.json").exists()
+    calls = _install(monkeypatch, out, labels=labels)
+    with pytest.raises(OpsError) as exc:
+        walk.fit_walk_forward(sealed, SPEC, YEARS, out)
     assert _refusal(exc) == _refusal(fresh_exc)
     assert calls["fits"] == []
     assert _snapshot(out) == before
