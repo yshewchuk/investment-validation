@@ -236,6 +236,23 @@ def test_accepted_entry_and_exit_match_hand_computed_literals(tmp_path):
     assert got == Exit(got.value, frozenset(), False)
 
 
+def test_quantities_weight_the_debit_and_the_proceeds(tmp_path):
+    """Two long puts and one short: debit_F = 2 * 1.04 - 0.48 = 1.60 (fair 1.50, spread sum 0.50: accepted);
+    proceeds_F = 2 * 0.96 - 0.52 = 1.40."""
+    fq, chunk = _setup(tmp_path, _frames(), DEFAULT_PLAN)
+    _, priced = _trade(chunk, 0)
+    cols = dict(eff_bid=[0.90, 0.45], eff_ask=[1.10, 0.55], V=[1.00, 0.50], fill_buy=[1.04, 0.52], fill_sell=[0.96, 0.48])
+
+    def edit(frame, exit):
+        return frame.assign(status=["ok", "ok"], **cols)
+
+    pair = _pair(chunk)
+    trade = pair._replace(legs=({**pair.legs[0], "qty": 2.0}, pair.legs[1]))
+    model = ff.FFills(StubQuotes(fq, edit))
+    assert model.entry(trade, priced)[0] == pytest.approx(1.60, abs=1e-12)
+    assert model.exit_value(trade, list(trade.legs), 0.5).value == pytest.approx(1.40, abs=1e-12)
+
+
 def test_fair_mid_exit_and_negative_exit_match_hand_computed_literals(tmp_path):
     """The long leg has no rate at exit: V = mid = 1.00 of 0.80/1.20, s = 0.40, thin size 1, thin OI 0.5, so
     c = 0.25 + 0.50 * 0.8 + 0.15 + 0.05 = 0.85 and it sells at 1.00 - 0.85 * 0.20 = 0.83 (its stored fill 5.0 is
@@ -332,7 +349,9 @@ def test_exit_fair_mid_leg_takes_v_at_mid_and_flags_the_exit(tmp_path, status):
     frame = _legs_frame(fq, chunk, traded, at_exit=True)
     got = ff.FFills(StubQuotes(fq, _exit_status(status))).exit_value(trade, traded, 0.5)
     assert got.value == pytest.approx(_proceeds(frame, fallback=(0,)))
-    assert "exit_fair_mid" in got.flags and got.unquoted is False
+    want = _proceeds(frame, fallback=(0,))
+    assert got.flags == frozenset({"exit_fair_mid"} | ({"exit_negative"} if want < 0 else set()))
+    assert got.unquoted is False
     assert abs(got.value - _proceeds(frame)) > 1e-9  # the fallback is exercised, not a no-op
 
 
@@ -387,10 +406,15 @@ def test_results_are_kept_per_chunk_and_recomputed_for_a_new_chunk(tmp_path):
     assert _count(stub, False) == 2
     model.entry(t0, p0)  # the chunk's memo keeps both events
     assert _count(stub, False) == 2
-    model.entry(t0._replace(chunk=dict(chunk)), p0)  # a new chunk object drops the memo
+    pair = _pair(chunk)  # other resolved legs of the same event are a separate result
+    assert model.entry_result(pair) != model.entry_result(t0)
     assert _count(stub, False) == 3
-    model.entry(t0, p0)  # back to the first chunk: its results were dropped, so computed again
+    model.entry_result(pair)
+    assert _count(stub, False) == 3
+    model.entry(t0._replace(chunk=dict(chunk)), p0)  # a new chunk object drops the memo
     assert _count(stub, False) == 4
+    model.entry(t0, p0)  # back to the first chunk: its results were dropped, so computed again
+    assert _count(stub, False) == 5
 
     traded = [leg for leg in t0.legs if leg["qty"] > 0]
     for alpha in (0.0, 0.5, 0.5):
