@@ -16,6 +16,7 @@ Public interface (W7b1 and W7d build on this; nothing else is public):
   fair value or rate took V = mid) and ``exit_negative``. An F-``unpriceable`` leg gives ``Exit(0.0, unquoted=True)``
   with no flags: the seam labels that row's rung ``exit_unquoted_worst_case``, as it does a ladder rung 3.
 - ``exit_value_at_v(trade)`` -> float: the positive-quantity legs closed at V with no concession (NaN when a leg is unpriceable).
+- ``was_priced(trade)`` -> bool: True iff the ENTRY result of these legs is already computed for the trade's chunk (computes nothing).
 - ``entry_result(trade)`` / ``exit_result(trade)`` -> F's own ``fair_value_fills.EntryResult`` / ``ExitResult`` (the
   three debits, spread sum, sensitivities, per-leg flags) for the same legs.
 
@@ -33,18 +34,26 @@ ENTRY_REASONS = tuple(f"f_{name}" for name in _STATUS_ORDER + ("not_a_debit", "f
 EXIT_FLAGS = ("exit_fair_mid", "exit_negative")
 
 
+def _memo_key(trade, legs, exit):
+    return (trade.i, exit, tuple((leg["idx"], leg["side"], leg["qty"]) for leg in legs if leg["qty"] > 0))
+
+
 class FFills:
     exit_flags = EXIT_FLAGS
 
     def __init__(self, quotes):
         self._quotes, self._chunk, self._memo = quotes, None, {}
+        self.quotes = quotes
+
+    def was_priced(self, trade):
+        return trade.chunk is self._chunk and _memo_key(trade, trade.legs, False) in self._memo
 
     def _result(self, trade, legs, exit):
         """F's structure result for the positive-quantity ``legs`` of ``trade``, computed once per chunk."""
         if trade.chunk is not self._chunk:
             self._chunk, self._memo = trade.chunk, {}
         legs = [leg for leg in legs if leg["qty"] > 0]
-        key = (trade.i, exit, tuple((leg["idx"], leg["side"], leg["qty"]) for leg in legs))
+        key = _memo_key(trade, legs, exit)
         if key not in self._memo:
             table = self._quotes.legs(trade.chunk, trade.i, legs, exit=exit)
             table = table.assign(side=[leg["side"] for leg in legs], qty=[leg["qty"] for leg in legs])

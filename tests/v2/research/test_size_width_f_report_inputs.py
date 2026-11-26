@@ -227,8 +227,10 @@ def test_write_publishes_each_table_then_one_receipt_bound_by_hashes(tmp_path):
     stage = out / "report_inputs" / "inner"
     assert sorted(p.name for p in stage.iterdir()) == ["exits.parquet", "legs.parquet"]
     assert receipt["stage"] == "inner" and receipt["inputs_hash"] == "H1" and receipt["scope"] == "W"
-    assert receipt["tables"] == {name: {"sha256": _sha(stage / f"{name}.parquet"), "rows": len(frame)}
-                                 for name, frame in tables.items()}
+    assert receipt["tables"] == {name: {"sha256": _sha(stage / f"{name}.parquet"), "rows": len(frame),
+                                        "bytes": (stage / f"{name}.parquet").stat().st_size} for name, frame in tables.items()}
+    assert receipt["rows"] == sum(len(f) for f in tables.values()) and receipt["leg_rows"] == 0
+    assert receipt["bytes"] == sum(e["bytes"] for e in receipt["tables"].values())
     for name, frame in tables.items():
         pd.testing.assert_frame_equal(pd.read_parquet(stage / f"{name}.parquet"), frame)
     assert receipts.load_receipt(out / "receipts" / "report_inputs_inner.json") == receipt

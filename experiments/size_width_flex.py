@@ -68,19 +68,21 @@ def admit(inner_summary, bands, frozen, outer_body=None):
         raise Refusal("EXPERIMENT_IDENTITY_CONFLICT", "fallback summaries do not match the frozen receipts", {"reason": "tuning_receipt_changed"})
 
 
-def _run(factor_sets, months, total, out, inputs_hash, sessions, pricing, ladder, tag):
+def _run(factor_sets, months, total, out, inputs_hash, sessions, pricing, ladder, tag, store=None):
     """{label: {phi: FallbackSweep}}; identical factor sets share their sweeps, and each month is simulated once for all of them."""
     built, keys = {}, {label: tuple(float(factors[n]) for n in NAMES) for label, factors in factor_sets.items()}
     for label, factors in factor_sets.items():
         if keys[label] not in built:
             built[keys[label]] = {phi: FallbackSweep(factors, out, inputs_hash, phi, pricing=pricing, ladder=ladder) for phi in PHIS}
     sweeps = [sweep for by_phi in built.values() for sweep in by_phi.values()]
+    for sweep in sweeps: sweep.store = store
     started = time.monotonic()
     print(f"[width_flex] {tag} start sets={len(factor_sets)} sweeps={len(sweeps)} months={total}", file=sys.stderr)
     for done, (chunk, events, output, pool) in enumerate(months, start=1):
         sims = pricing.simulate(chunk, events, pool, draws=DRAWS)
         for sweep in sweeps:
             sweep.add_month(chunk, events, pool, output=output, sessions=sessions, sims=sims)
+        if store is not None: store.flush(chunk)
         elapsed = max(time.monotonic() - started, 1e-9)
         print(f"[width_flex] {tag} month {done}/{total} rate={done / elapsed * 60:.2f}/min eta={(total - done) * elapsed / done:.0f}s "
               f"rss={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024:.0f}MB", file=sys.stderr)
@@ -93,7 +95,7 @@ def inner(factor_sets, months, total, base, out, inputs_hash, sessions, pricing)
     """The 2023-24 stage per fixed-factor arm: per phi the recovery, accounts and T9, and the phi chosen from 2023-24 alone."""
     chosen = {label: f for label, f in factor_sets.items() if label in LABELS}
     result = {}
-    for label, by_phi in _run(chosen, months, total, out, inputs_hash, sessions, pricing, False, "inner").items():
+    for label, by_phi in _run(chosen, months, total, out, inputs_hash, sessions, pricing, False, "inner", getattr(base, "store", None)).items():
         rec = {phi: recovery(fb, base, INNER) for phi, fb in by_phi.items()}
         result[label] = {"factors": {n: float(k) for n, k in chosen[label].items()}, "choice": choose_phi(rec),
                          "phis": {str(phi): {"recovery": rec[phi], "accounts": accounts(fb, base, {w: WINDOWS[w] for w in ("2023H2", "2024")}),
@@ -106,7 +108,8 @@ def outer(frozen, flex_inner, rec, months, total, base, out, inputs_hash, sessio
     label_t = target(rec)
     labels = ["production"] + ([label_t] if label_t not in (None, "production") else [])
     window = WINDOWS["2025"]
-    fbs = _run({label: frozen[label] for label in labels}, months, total, out, inputs_hash, sessions, pricing, True, "outer")
+    fbs = _run({label: frozen[label] for label in labels}, months, total, out, inputs_hash, sessions, pricing, True, "outer",
+               getattr(base, "store", None))
     sets = {}
     for label in labels:
         phis = {}

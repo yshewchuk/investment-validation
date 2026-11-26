@@ -64,7 +64,7 @@ class Sweep:
         ``choices`` records arm E's per-event choices of each output month in ``fresh_choices`` (size_width_choices)."""
         self.ks, self.names = tuple(admit_k(k) for k in ks), tuple(names)
         self.pricing, self.ladder, self.fresh, self.fresh_declined = pricing, bool(ladder), [], []
-        self.record_choices, self.fresh_choices = bool(choices), []
+        self.record_choices, self.fresh_choices, self.store = bool(choices), [], None  # store: a size_width_f_store.Store on an F run stage
         self.f = size_width_f_rows.is_f(pricing)
         self.taken_cols = _TAKEN + (size_width_f_rows.F_COLS if self.f else [])
         if not self.ks or len(set(self.ks)) != len(self.ks): raise ValueError(f"ks must be non-empty and unique: {self.ks}")
@@ -86,6 +86,7 @@ class Sweep:
         ids = set(events["event_id"].astype(str))
         for name in self.names:
             for arm, frame in self._frames(chunk, events, sims, name):
+                if output and self.store is not None and arm != E_ARM: self.store.candidates(self, chunk, scaled(events, arm), name, arm)
                 self._decide(chunk, events, frame, name, arm, ids, output, sessions)
         rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
         print(f"[width_sweep] month events={len(events)} output={output} elapsed={time.time() - started:.1f}s rss={rss:.0f}MiB",
@@ -148,6 +149,7 @@ class Sweep:
         rows["entry_date"] = rows["event_id"].map(lambda e: sessions.get(e, (np.nan, np.nan))[0])
         rows["exit_date"] = rows["event_id"].map(lambda e: sessions.get(e, (np.nan, np.nan))[1])
         taken = rows[self.taken_cols + (RET_COLS if self.ladder else [])]
+        if self.store is not None and len(taken): self.store.taken(self, chunk, ev, taken, arm)
         self.taken.setdefault(key, []).append(taken)
         self.fresh.append(taken.assign(arm=str(arm)))
         if self.record_choices and arm == E_ARM:

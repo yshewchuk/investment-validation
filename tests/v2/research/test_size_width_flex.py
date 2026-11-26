@@ -45,7 +45,7 @@ def stubs(monkeypatch):
     """_run, accounts and t9 are stubs. Every phi but 0.95 gives 2025 accounts that beat base; 0.95 looks best of all."""
     seen = []
 
-    def run(factor_sets, months, total, out, inputs_hash, sessions, pricing, ladder, tag):
+    def run(factor_sets, months, total, out, inputs_hash, sessions, pricing, ladder, tag, store=None):
         seen.append(sorted(factor_sets))
         return {label: {phi: Fake(phi, factors) for phi in PHIS} for label, factors in factor_sets.items()}
 
