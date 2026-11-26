@@ -217,6 +217,10 @@ def test_amendment_1_selects_f_with_loadable_bindings():
     assert (fill["vol_scale"], fill["rate_scale"]) == (1.0, 0.01)
     reingest = fill["reingest"]
     assert reingest["manifest_sha256"] == "17ecc75e84d2e261900eccc3ad79a1cbd065af2d58eabdfebfd49dd75001f75d"
+    assert reingest["manifest_units"] == {
+        "iRate5wk": "percent", "iRateLt": "percent", "borrow30": "percent", "borrow2yr": "percent",
+        "divAmt": "dollars_per_share", "annIdiv": "dollars_per_share", "annActDiv": "dollars_per_share",
+        "divDate": "date", "assetType": "code"}
     # F's own manifest check accepts the bound unit labels (it refuses input_unit otherwise).
     unread = {"unreadable": 0, "unrecognized": 0}
     fvi._check_manifest(json.dumps({"tables": {"quotes": unread, "rates": unread},

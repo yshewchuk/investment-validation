@@ -11,7 +11,8 @@ Operating steps for `experiments/EXP-189_short_vol_width_tuning/run.py`. Design:
    (`guides/size_pnl_runbook.md`). EXP-189 reads them through `size_pnl_driver.Sources` unchanged.
 2. The spec is registered: one PLANNED `EXP-189` ledger row, plus one per entry of the spec's `amendments`, the last
    with the spec's hash (`python3 -m experiments.size_width_prereg --check`). Without it every stage refuses
-   `EXPERIMENT_IDENTITY_CONFLICT` (`planned_row_missing`) before reading anything. A changed `spec.yaml` needs a new
+   `EXPERIMENT_IDENTITY_CONFLICT` (`planned_row_missing` with no row; `planned_row_ambiguous` with a wrong row count;
+   `spec_hash_mismatch` when the last row's hash differs) before reading anything. A changed `spec.yaml` needs a new
    PLANNED row first.
 3. Use a fresh `--out-dir` under `experiments/EXP-189_*/results/`. Receipts are immutable; a rerun with the same inputs
    replays read-only and changed inputs refuse (first on the stage's inputs receipt, `inputs_receipt_changed`; the outer preflight against the inner receipts uses `tuning_receipt_changed`). Never delete a receipt to force a rerun.
@@ -148,5 +149,5 @@ additions. F is selected only by the `spec.yaml` `amendments` entry that carries
    print before any outcome is read. No smoke result tunes F or a rule.
 6. **Full rerun** of inner, outer and report in a fresh out-dir, one heavy job at a time. Reuse and delete no earlier
    receipt, month file or tuning. F's refusals (A1.7) leave no partial report.
-7. **Report again once W7c2 lands**, on the same out-dir. An earlier `REPORT.md` may lack A1.1's labels and F's tables
+7. **Report again once W7c1 and W7c2 have both landed**, on the same out-dir. An earlier `REPORT.md` may lack A1.1's labels and F's tables
    and diagnostics, so it is not the Amendment 1 report.
