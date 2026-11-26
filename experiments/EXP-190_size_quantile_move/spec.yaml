@@ -35,7 +35,7 @@ walk_forward:
 arms:
   Q: {role: eligible, rule: "one quantile HGB per level and fold, sorted, then causally calibrated"}
   Q_raw: {role: eligible, rule: "one quantile HGB per level and fold, sorted, floored at 0, uncalibrated"}
-  S: {role: reported, can_pass: false, rule: "q = median + scale * z_q at year Y's chosen configuration. Median: absolute_error HGB. Scale: second HGB, loss absolute_error (conditional median), on out-of-fold |y - median| in year-blocked expanding folds within training rows; any year with an earlier training row is predicted, training only on labels available before that year. scale = max(scale, 0.5) both when standardising and in q; report MUST print, per year, the share of events where this floor binds (distribution_tails' binding-share report). z_q from S's own earlier out-of-sample standardised residuals ((y - median) over the floored scale), labels available before cutoff (start of month m); trailing 12 months, refreshed monthly (same as Q); at least 500 events, else unscored (scale_burn_in); Y0 unscored. Raw = median + scale * z_q; scored after sort and floor at 0; crossing rate on raw."}
+  S: {role: reported, can_pass: false, rule: "q = median + scale * z_q. Both HGBs use the configuration grid.selection chooses for year Y; S runs no selection of its own. Median: absolute_error HGB. Scale: second HGB, loss absolute_error (conditional median), on out-of-fold |y - median| in year-blocked expanding folds within training rows; every training-row year that has an earlier training row gets out-of-fold predictions, from a fit trained only on labels available before that year. scale = max(scale, 0.5) both when standardising and in q; report MUST print, per year, the share of events where this floor binds (distribution_tails' binding-share report). z_q from S's own earlier out-of-sample standardised residuals ((y - median) over the floored scale), labels available before cutoff (start of month m); trailing 12 months, refreshed monthly (same as Q); at least 500 events, else unscored (scale_burn_in); Y0 unscored. Raw = median + scale * z_q; scored after sort and floor at 0; crossing rate on raw."}
 
 grid:
   axes: {max_leaf_nodes: [7, 15], min_samples_leaf: [300, 1000]}
@@ -99,6 +99,7 @@ failure_semantics:
   R1: "panel, folds, dictionary, M0 or M3 series do not bind: refuse EXPERIMENT_IDENTITY_CONFLICT; nothing rebuilt or imputed. A merely absent M3 year is B3 not_testable."
   fit_failed: "fold's arm is fit_failed, no retry. Q_raw fit failure makes Stage A not_testable; calibration failure affects Q only."
   abstention: "burn-in, thin tail pool, non-finite output: unscored (an abstention, not 'no'), counted; leaves paired population"
+  baseline_abstention: "B1 pool_too_small; B2 under 500 donors or invalid own implied_move: that baseline is unscored for the event, counted; its common-subset tables drop it. B2 donor with null, zero, negative or non-finite implied_move: dropped from the pool and counted"
   level_width: "burn-in or empty bin: no L, counted; only conditional tests"
   R2: "quarter or year chunks; over-limit refuses RESOURCE_LIMIT_EXCEEDED, no partial report"
   R3_R4: "fixed seeds; receipts atomic, immutable, bound to inputs; changed input refuses"
