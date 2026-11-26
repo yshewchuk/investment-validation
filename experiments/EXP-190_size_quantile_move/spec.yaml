@@ -35,7 +35,7 @@ walk_forward:
 arms:
   Q: {role: eligible, rule: "one quantile HGB per level and fold, sorted, then causally calibrated"}
   Q_raw: {role: eligible, rule: "one quantile HGB per level and fold, sorted, floored at 0, uncalibrated"}
-  S: {role: reported, can_pass: false, rule: "q = median + scale * z_q, z_q from earlier standardised out-of-sample residuals; median from absolute_error HGB; scale from out-of-fold |y - median| residuals in year-blocked expanding folds within training rows"}
+  S: {role: reported, can_pass: false, rule: "q = median + scale * z_q. Both HGBs use the configuration grid.selection chooses for year Y; S runs no selection of its own. Median: absolute_error HGB. Scale: second HGB, loss absolute_error (conditional median), on out-of-fold |y - median| in year-blocked expanding folds within training rows; every training-row year that has an earlier training row gets out-of-fold predictions, from a fit trained only on labels available before that year. scale = max(scale, 0.5) both when standardising and in q; report MUST print, per year, the share of events where this floor binds (distribution_tails' binding-share report). z_q from S's own earlier out-of-sample standardised residuals ((y - median) over the floored scale), labels available before cutoff (start of month m); trailing 12 months, refreshed monthly (same as Q); at least 500 events, else unscored (scale_burn_in); Y0 unscored. Raw = median + scale * z_q; scored after sort and floor at 0; crossing rate on raw."}
 
 grid:
   axes: {max_leaf_nodes: [7, 15], min_samples_leaf: [300, 1000]}
@@ -48,20 +48,21 @@ calibration:
   window_months: 12
   min_events: 500
   method: linear
-  rule: "delta_q is empirical q-quantile of y - qhat_q over out-of-sample predictions with labels available before month began; apply qhat_q + delta_q, sort, floor at 0. Under min_events: unscored (calibration_burn_in)"
+  rule: "pool: out-of-sample events dated in the window_months before month m begins, labels available before m began; each at its own year's chosen configuration (what was actually forecast). delta_q is empirical q-quantile of signed errors y - qhat_q on sorted, unfloored predictions (never floored first); add delta_q to unfloored qhat_q, sort, then floor at 0. Under min_events: unscored (calibration_burn_in)"
 distribution_tails:
   min_donors: 50
   floor: 0.5
   interpolation: "inverse CDF linear between knots, per arm from its own predictions"
-  rule: "above p90: quantiles of (y - q90) / max(q90 - q50, floor) over strictly earlier predictions with y > q90 (same window), scaled by event width; below p10 likewise with q50 - q10, floored at 0. Thin pool: unscored (tail_pool_thin)"
+  rule: "tail pool fixed at start of each month (calibration pool's events rule). Above 0.9: d = (y - q90) / max(q90 - q50, floor) over donors with y > q90; Q(u) = q90 + s_hi * quantile(d, (u - 0.9)/0.1). Below 0.1: d = (y - q10) / max(q50 - q10, floor) over donors with y < q10; Q(u) = max(0, q10 + s_lo * quantile(d, u/0.1)). Event's own s_hi = max(q90 - q50, floor), s_lo = max(q50 - q10, floor). numpy linear; a jump at the knots is allowed. Under min_donors in a tail: whole event unscored for that arm (tail_pool_thin)"
+  floor_report: "0.5 floor is a user decision (2026-11-26: keep 0.5 floor and report): report MUST print, per arm and year, the share of events where the 0.5 floor binds, for the event width and for the donor normalisation; for arm S also the scale-floor share (arms.S)"
 zero_median:
   threshold: 1.0e-09
   rule: "ratio over q50 (W / q50) undetermined when q50 <= threshold: counted zero_median, never 0/0; quantiles stay valid."
 
 baselines:
   B0: {name: "production forecast + ResidualPool (bar)", rule: "stored tier-4 pred_abs_move; native full-history pool, strictly earlier; quantiles of max(f + err_move, 0) over the exact rows draw samples: forecast bucket, or whole earlier pool when bucket under MIN_POOL; refused draw unscored"}
-  B1: {name: "M0 with v14 band", rule: "size_distribution.v1 residual-ratio band (5 forecast buckets, max(f, 0.05) * Q_q(y / max(pool_f, 0.05))), parity-tested at shared levels; earlier M0 donors"}
-  B2: {name: "option-implied", rule: "panel implied_move times trailing earlier quantiles of y / implied_move; null or zero abstains"}
+  B1: {name: "M0 with v14 band", rule: "size_distribution.v1 residual-ratio band, max(f, 0.05) * Q_q(y / max(pool_f, 0.05)), parity-tested at shared levels; monthly M0 donor pool, labels before the month, full history; user decision (2026-11-26): the v14 bucket rule: v14 quintile buckets of the forecast with the 20-row floor, below which the event is unscored (pool_too_small)"}
+  B2: {name: "option-implied", rule: "panel implied_move times trailing earlier quantiles of y / implied_move: trailing 12 months, at least 500 donors, anchored at month start with labels before it; donors with null, zero, negative or non-finite implied_move dropped and counted; event abstains if its own is invalid"}
   B3: {name: "best v14 point model, own pool", rule: "sealed lead-1 predictions of M3 (v14 MAE winner, per sealed selection record); B0's construction on M3's own strictly earlier residuals (from 2023). If M3 lacks HMOSXLP, lowest inner-MAE HMOSXLP candidate with stored predictions; missing year: not_testable"}
 
 stage_a:
@@ -98,6 +99,7 @@ failure_semantics:
   R1: "panel, folds, dictionary, M0 or M3 series do not bind: refuse EXPERIMENT_IDENTITY_CONFLICT; nothing rebuilt or imputed. A merely absent M3 year is B3 not_testable."
   fit_failed: "fold's arm is fit_failed, no retry. Q_raw fit failure makes Stage A not_testable; calibration failure affects Q only."
   abstention: "burn-in, thin tail pool, non-finite output: unscored (an abstention, not 'no'), counted; leaves paired population"
+  baseline_abstention: "B1 pool_too_small; B2 under 500 donors or invalid own implied_move: that baseline is unscored for the event, counted; its common-subset tables drop it. B2 donor with null, zero, negative or non-finite implied_move: dropped from the pool and counted"
   level_width: "burn-in or empty bin: no L, counted; only conditional tests"
   R2: "quarter or year chunks; over-limit refuses RESOURCE_LIMIT_EXCEEDED, no partial report"
   R3_R4: "fixed seeds; receipts atomic, immutable, bound to inputs; changed input refuses"
