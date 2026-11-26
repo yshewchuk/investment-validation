@@ -46,7 +46,7 @@ def _peak_rss_kb() -> int:
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 
 
-def _num(values) -> np.ndarray:
+def float_array(values) -> np.ndarray:
     """Float array; NaN, None and pd.NA all become NaN."""
     return pd.Series(values).astype("Float64").to_numpy(dtype=float, na_value=np.nan)
 
@@ -105,14 +105,14 @@ def smile_vol(fit, k):
 def _inputs(quotes: pd.DataFrame, vols: pd.DataFrame) -> dict:
     """Float arrays and masks per quote row, in input order."""
     n = len(quotes)
-    c = {name: _num(quotes[name]) for name in ("strike", "spot", "bid", "ask", "iv", "rate")}
+    c = {name: float_array(quotes[name]) for name in ("strike", "spot", "bid", "ask", "iv", "rate")}
     days = (pd.to_datetime(quotes["expiry"]) - pd.to_datetime(quotes["obs_date"])).dt.days
-    c["T"] = np.maximum(_num(days), 0.0) / 365.0
+    c["T"] = np.maximum(float_array(days), 0.0) / 365.0
     left = quotes[VOL_KEY].reset_index(drop=True)
     left["_pos"] = np.arange(n)
     merged = left.merge(vols[VOL_COLUMNS], on=VOL_KEY, how="left", sort=False)
     smv = np.full(n, np.nan)
-    smv[merged["_pos"].to_numpy()] = _num(merged["smvVol"])
+    smv[merged["_pos"].to_numpy()] = float_array(merged["smvVol"])
     c["smv"] = np.where(np.isfinite(smv) & (smv > 0), smv, np.nan)
     right = quotes["right"].to_numpy()
     c["put"], c["call"] = right == "P", right == "C"
