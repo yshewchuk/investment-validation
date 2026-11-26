@@ -517,10 +517,17 @@ def test_run_py_logs_progress_to_stderr_and_never_to_stdout(tmp_path, monkeypatc
     run_py = _run_main()
     _gates(monkeypatch)
     monkeypatch.setattr(logging.root, "handlers", [])
-    monkeypatch.setattr(logging.root, "level", logging.WARNING)
-    ids = tmp_path / "ids.json"
-    ids.write_text('{"a": 1}', encoding="utf-8")
-    assert run_py.main(_argv(tmp_path, "--event-ids", str(ids))) == 2  # a quick refusal; main configures logging first
-    logging.getLogger("size_width_f_quotes").info("probe-line")
-    captured = capsys.readouterr()
-    assert "probe-line" in captured.err and "probe-line" not in captured.out
+    level = logging.root.level
+    logging.root.setLevel(logging.WARNING)  # setLevel also clears logging's per-logger isEnabledFor cache
+    try:
+        ids = tmp_path / "ids.json"
+        ids.write_text('{"a": 1}', encoding="utf-8")
+        assert run_py.main(_argv(tmp_path, "--event-ids", str(ids))) == 2  # a quick refusal; main configures logging first
+        logging.getLogger("size_width_f_quotes").info("probe-line")
+        captured = capsys.readouterr()
+        assert "probe-line" in captured.err and "probe-line" not in captured.out
+    finally:
+        for handler in list(logging.root.handlers):  # the root list is monkeypatched to [], so these are main's
+            logging.root.removeHandler(handler)
+            handler.close()
+        logging.root.setLevel(level)

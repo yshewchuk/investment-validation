@@ -458,6 +458,7 @@ def test_batches_never_split_an_expiry_and_match_the_unbatched_table(tmp_path, m
     monkeypatch.setattr(fvr, "BATCH_ROWS", 1)  # every expiry (82 rows) exceeds the bound: one batch each
     fq2, chunk2 = _setup(tmp_path, _frames(), DEFAULT_PLAN)
     caplog.set_level(logging.INFO, logger="size_width_f_quotes")
+    caplog.clear()  # count only the batched build's records, whatever level earlier tests left
     batched = fq2.table(chunk2)
     assert len(spied) == 2
     for frame in spied:

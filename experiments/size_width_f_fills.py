@@ -15,6 +15,7 @@ Public interface (W7b1 and W7d build on this; nothing else is public):
   ``proceeds_F``, kept when negative, with flags from ``EXIT_FLAGS``: ``exit_fair_mid`` (a leg with a usable quote but no
   fair value or rate took V = mid) and ``exit_negative``. An F-``unpriceable`` leg gives ``Exit(0.0, unquoted=True)``
   with no flags: the seam labels that row's rung ``exit_unquoted_worst_case``, as it does a ladder rung 3.
+- ``exit_value_at_v(trade)`` -> float: the positive-quantity legs closed at V with no concession (NaN when a leg is unpriceable).
 - ``entry_result(trade)`` / ``exit_result(trade)`` -> F's own ``fair_value_fills.EntryResult`` / ``ExitResult`` (the
   three debits, spread sum, sensitivities, per-leg flags) for the same legs.
 
@@ -74,3 +75,13 @@ class FFills:
             return Exit(0.0, unquoted=True)
         flags = {name for name in EXIT_FLAGS if getattr(got, name)}
         return Exit(got.proceeds_F, frozenset(flags))
+
+    def exit_value_at_v(self, trade):
+        """Closing the positive-quantity legs at V (a no_fair_value / rate_unknown leg at its effective mid, as F's exit does),
+        with no concession. NaN when any such leg is unpriceable."""
+        if self.exit_result(trade).outcome == "unpriceable": return float("nan")
+        legs = [leg for leg in trade.legs if leg["qty"] > 0]
+        table = self._quotes.legs(trade.chunk, trade.i, legs, exit=True)
+        mid = (table["eff_bid"] + table["eff_ask"]) / 2
+        v = table["V"].where(~table["status"].isin(fvf.FALLBACK_STATUSES), mid).to_numpy(dtype=float)
+        return float(sum(leg["qty"] * (1.0 if leg["side"] == "buy" else -1.0) * x for leg, x in zip(legs, v)))

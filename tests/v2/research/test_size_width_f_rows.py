@@ -315,3 +315,46 @@ def test_f_taken_and_declined_rows_write_as_decisions(tmp_path):
     declined_back = back[back["status"] != "taken"]
     assert len(declined_back) == 2
     assert declined_back[fr.F_COLS].isna().all().all()
+
+
+def test_report_columns_on_a_normal_row_match_f_and_are_not_excluded(tmp_path):
+    fq, chunk = _setup(tmp_path, _tight_frames(), DEFAULT_PLAN)
+    out = _month(_sweep(fq), chunk)
+    assert len(out) == 4
+    assert out["excluded_rung3"].dtype == bool and out["excluded_unpriceable"].dtype == bool
+    for row in out.to_dict("records"):
+        i = EVENT_INDEX[row["event_id"]]
+        traded = _traded(chunk, i)
+        frame = fq.legs(chunk, i, traded, exit=True)  # F's exit leg table: V signed by side, times quantity
+        want_at_v = sum(leg["qty"] * (1.0 if leg["side"] == "buy" else -1.0) * float(frame["V"].iloc[pos])
+                        for pos, leg in enumerate(traded))
+        assert row["debit_F"] == pytest.approx(row["entry_cost"], abs=1e-12)
+        assert row["proceeds_F"] == pytest.approx(row["exit_value"], abs=1e-12)
+        assert row["exit_value_at_v"] == pytest.approx(want_at_v, abs=1e-9)
+        assert not row["excluded_rung3"] and not row["excluded_unpriceable"]
+
+
+def test_f_unpriceable_rows_are_excluded_as_unpriceable_with_nan_proceeds(tmp_path):
+    fq, chunk = _setup(tmp_path, _tight_frames(), DEFAULT_PLAN)
+    out = _month(_sweep(StubQuotes(fq, _exit_status("unpriceable"))), chunk)
+    assert len(out) == 4
+    assert out["excluded_unpriceable"].dtype == bool and out["excluded_unpriceable"].all()
+    assert out["excluded_rung3"].dtype == bool and not out["excluded_rung3"].any()
+    assert out["proceeds_F"].dtype == float and out["proceeds_F"].isna().all()
+    assert out["exit_value_at_v"].dtype == float and out["exit_value_at_v"].isna().all()
+    assert out["debit_F"].dtype == float and np.isfinite(out["debit_F"]).all()
+
+
+def test_ladder_rung3_row_is_excluded_as_rung3_not_unpriceable(tmp_path):
+    _, probe = _setup(tmp_path / "probe", _tight_frames(), DEFAULT_PLAN)
+    strike = float(probe["strike"][_traded(probe, 0)[0]["idx"]])
+    frames = _tight_frames()
+    frames[("AAA", _ts(EXIT))] = _listing("AAA", EXIT, skip=[("P", strike)])  # E0 loses a traded exit contract
+    fq, chunk = _setup(tmp_path / "rung3", frames, DEFAULT_PLAN)
+    out = _month(_sweep(fq), chunk)
+    row = out[(out["event_id"] == "E0") & (out["arm"] == "1.0")].iloc[0]
+    assert row["rung"] == EXIT_UNQUOTED and row["rung_ladder"] == EXIT_UNQUOTED
+    assert row["excluded_rung3"] and not row["excluded_unpriceable"]
+    assert math.isnan(row["proceeds_F"]) and math.isnan(row["exit_value_at_v"])
+    assert np.isfinite(row["debit_F"])
+    assert row["debit_F"] == pytest.approx(row["entry_cost"], abs=1e-12)
