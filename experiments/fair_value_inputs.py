@@ -1,0 +1,351 @@
+"""Input layer for fair-value fill model F (guides/fair_value_fill_design.md, sections 3, 10, 13).
+
+Binds quote rows to the consumer's pinned snapshot id, loads the smoothed-vol and rate tables under
+caller-supplied SHA-256 pins, applies the unit and rate rules, and reports entry input coverage.
+The consumer reads quotes from its pinned snapshot; the manifest pins do not prove that files and
+manifest come from one run.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+import logging
+import math
+import numbers
+import re
+import resource
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+QUOTE_KEYS = ["ticker", "obs_date", "expiry", "strike", "right"]
+QUOTE_COLUMNS = QUOTE_KEYS + ["bid", "ask", "iv", "spot", "quote_repaired", "open_interest", "bid_size", "ask_size", "chain_kind"]
+VOL_KEYS = ["ticker", "obs_date", "expiry", "strike"]
+RATE_KEYS = ["ticker", "obs_date"]
+RATE_COLUMNS = ["iRate5wk", "iRateLt"]
+NEEDED_COLUMNS = {"quotes": VOL_KEYS + ["smvVol"], "rates": RATE_KEYS + RATE_COLUMNS}
+RATE_BOUNDS = (-0.05, 0.20)
+RATE_RULE_VALUES = {"rate_out_of_range": ("missing", "row_unknown"), "rate_empty_row": ("rate_unknown", "earlier_row")}
+VOL_MEDIAN_BOUNDS = (0.05, 5.0)
+RATE_LOOKBACK_DAYS = 7
+SHORT_DAYS = 35
+LONG_DAYS = 365
+MAX_MANIFEST_BYTES = 1 << 20
+MAX_TABLE_BYTES = 1 << 30
+MAX_TOTAL_TABLE_BYTES = 2 << 30
+DECODED_ROW_BYTES = 128  # conservative decoded bytes per row of the needed columns; used for admission before decoding
+_TABLE_RE = re.compile(r"(quotes|rates)/year=[0-9]{4}/month=(0[1-9]|1[0-2])\.parquet")
+_COUNTED = ["usable_quote", "smvvol_positive", "rate_found", "open_interest_known", "bid_size_known", "ask_size_known"]
+_LOG = logging.getLogger("fair_value_inputs")
+
+
+class FairValueRefusal(ValueError):
+    """`code` names the class; `details["reason"]` names the rule that fired."""
+
+    def __init__(self, reason, message, code="EXPERIMENT_IDENTITY_CONFLICT", **context):
+        self.code, self.details = code, {"reason": reason, **context}
+        super().__init__(f"{code} {reason}: {message}")
+
+
+@dataclass(frozen=True)
+class InputTables:
+    vols: pd.DataFrame
+    rates: pd.DataFrame
+    hashes: dict
+    rate_rules: dict
+
+
+def _floats(values):
+    """Float array; None, pandas NA and non-numeric values become NaN."""
+    series = values if isinstance(values, pd.Series) else pd.Series(values)
+    if series.dtype == object:
+        series = series.mask(series.isna(), np.nan)
+    return pd.to_numeric(series, errors="coerce").to_numpy(dtype=float, na_value=np.nan)
+
+
+def _require(frame, columns):
+    missing = [c for c in columns if c not in frame.columns]
+    if missing:
+        raise FairValueRefusal("required_column", "rows lack required columns", columns=missing)
+
+
+def _unique(frame, keys, table, message):
+    if frame.duplicated(keys).any():
+        raise FairValueRefusal("duplicate_key", message, table=table)
+
+
+def _table_values(frame, columns, ok, table):
+    """Refuse a normalised table holding a value the loader never returns; NaN is always accepted."""
+    bad = [c for c in columns if not ok(frame[c].to_numpy(dtype=float)).all()]
+    if bad:
+        raise FairValueRefusal("table_value", "table holds a value outside the loader's rules", table=table, columns=bad)
+
+
+def _norm(frame, columns):
+    """Str tickers, datetime64[ns] dates and float numbers, with a fresh RangeIndex. Refuses absent columns, and null or unconvertible keys before any conversion."""
+    _require(frame, columns)
+    bad = _bad_key_columns(frame, [c for c in columns if c in QUOTE_KEYS])
+    if bad:
+        raise FairValueRefusal("key_value", "key column is null or does not convert", columns=bad)
+    out = {}
+    for col in columns:
+        raw = pd.Series(frame[col].to_numpy())
+        if col == "ticker":
+            out[col] = raw.astype(str).astype(object).to_numpy()
+        elif col in ("obs_date", "expiry"):
+            try:
+                out[col] = pd.to_datetime(raw).astype("datetime64[ns]").to_numpy()
+            except (TypeError, ValueError, OverflowError) as err:
+                raise FairValueRefusal("key_value", "date column holds a value that is not a date", column=col) from err
+        else:
+            out[col] = _floats(frame[col])
+    return pd.DataFrame(out)
+
+
+def _unit_scale(value, name):
+    if isinstance(value, bool) or not isinstance(value, numbers.Real) or not math.isfinite(value) or value <= 0:
+        raise FairValueRefusal("unit_scale", f"{name} must be a finite number > 0", name=name)
+    return float(value)
+
+
+def _read_capped(path, cap, name):
+    with path.open("rb") as stream:
+        blob = stream.read(cap + 1)
+    if len(blob) > cap:
+        raise FairValueRefusal("input_too_large", f"{name} over the read cap", code="RESOURCE_LIMIT_EXCEEDED", path=name)
+    return blob
+
+
+def _check_manifest(blob):
+    try:
+        manifest = json.loads(blob)
+    except ValueError as err:
+        raise FairValueRefusal("manifest_invalid", "manifest.json is not JSON") from err
+    tables = manifest.get("tables") if isinstance(manifest, dict) else None
+    if not isinstance(tables, dict):
+        raise FairValueRefusal("manifest_invalid", "manifest.json has no tables object")
+    for kind in ("quotes", "rates"):
+        entry = tables.get(kind) if isinstance(tables.get(kind), dict) else {}
+        for key in ("unreadable", "unrecognized"):
+            if type(entry.get(key)) is not int or entry[key] != 0:
+                raise FairValueRefusal("manifest_unread_payloads", f"{kind}.{key} must be integer 0", table=kind, key=key)
+
+
+def _estimate(blob, kind, rel):
+    """Footer only: refuse unreadable or incomplete tables, else bound the decoded size of the needed columns."""
+    needed = NEEDED_COLUMNS[kind]
+    try:
+        pf = pq.ParquetFile(io.BytesIO(blob))
+        meta, names = pf.metadata, pf.schema_arrow.names
+    except (ValueError, OSError, KeyError, pa.ArrowException) as err:
+        raise FairValueRefusal("table_unreadable", "table is not readable parquet", path=rel) from err
+    absent = [c for c in needed if c not in names]
+    if absent:
+        raise FairValueRefusal("required_column", "table lacks required columns", path=rel, columns=absent)
+    chunk_bytes = 0
+    for g in range(meta.num_row_groups):
+        group = meta.row_group(g)
+        for c in range(group.num_columns):
+            chunk = group.column(c)
+            if chunk.path_in_schema.split(".")[0] in needed:
+                chunk_bytes += chunk.total_uncompressed_size
+    return max(meta.num_rows * DECODED_ROW_BYTES, chunk_bytes)
+
+
+def _admit(blob, kind, rel, total, budget):
+    """Refuse before any decode when the running total plus the footer estimate would exceed the budget."""
+    estimate = _estimate(blob, kind, rel)
+    if total + estimate > budget:
+        raise FairValueRefusal("input_too_large", "table estimate exceeds the total memory budget",
+                               code="RESOURCE_LIMIT_EXCEEDED", path=rel, total_bytes=total + estimate, max_total_bytes=budget)
+
+
+def _parse(blob, kind, rel):
+    """Decode the needed columns in the single pd.read_parquet call; read failure is table_unreadable, refusals pass through."""
+    needed = NEEDED_COLUMNS[kind]
+    try:
+        return _norm(pd.read_parquet(io.BytesIO(blob), columns=needed), needed)
+    except FairValueRefusal:
+        raise
+    except (ValueError, KeyError, OSError, pa.ArrowException) as err:
+        raise FairValueRefusal("table_unreadable", "table is not readable parquet", path=rel) from err
+
+
+_KEY_CONVERTERS = {"strike": pd.to_numeric, "obs_date": pd.to_datetime, "expiry": pd.to_datetime}
+
+
+def _bad_key_columns(frame, columns):
+    """Of the given key columns, those holding a null, or a strike or date that does not convert (coerced to NaN/NaT)."""
+    bad = []
+    for col in columns:
+        raw = frame[col]
+        if raw.isna().any():
+            bad.append(col)
+        elif col in _KEY_CONVERTERS:
+            try:
+                if _KEY_CONVERTERS[col](raw, errors="coerce").isna().any():
+                    bad.append(col)
+            except (TypeError, ValueError, OverflowError):
+                bad.append(col)
+    return bad
+
+
+def bind_quotes(frame, *, snapshot_id, expected_snapshot_id):
+    """Check the snapshot binding, quote schema and quote keys; return the QUOTE_COLUMNS rows as a copy."""
+    ids_ok = all(isinstance(s, str) and s for s in (snapshot_id, expected_snapshot_id))
+    if not ids_ok or snapshot_id != expected_snapshot_id:
+        raise FairValueRefusal("snapshot_binding", "snapshot ids are missing or differ")
+    missing = [c for c in QUOTE_COLUMNS if c not in frame.columns]
+    if missing:
+        raise FairValueRefusal("required_column", "quote columns are absent", columns=missing)
+    bad = _bad_key_columns(frame, QUOTE_KEYS)
+    if bad:
+        raise FairValueRefusal("key_value", "key column is null or does not convert", columns=bad)
+    keys = _norm(frame, VOL_KEYS)  # normalised, so "100" and 100.0 collide; "right" is taken by position below
+    keys["right"] = frame["right"].to_numpy()
+    _unique(keys, QUOTE_KEYS, "option_chains", "duplicate quote key")
+    return frame[QUOTE_COLUMNS].copy()
+
+
+def load_tables(root, *, manifest_sha256, file_sha256, vol_scale, rate_scale,
+                # pending the user's review of measured missing-rate frequency (design section 13 item 3)
+                rate_out_of_range="missing", rate_empty_row="rate_unknown", max_total_bytes=None):
+    """Load, pin-check and convert the vol and rate tables; every refusal raises FairValueRefusal."""
+    started = time.monotonic()
+    vol_k, rate_k = _unit_scale(vol_scale, "vol_scale"), _unit_scale(rate_scale, "rate_scale")
+    rules = {"rate_out_of_range": rate_out_of_range, "rate_empty_row": rate_empty_row}
+    for name, value in rules.items():
+        if not (isinstance(value, str) and value in RATE_RULE_VALUES[name]):
+            raise FairValueRefusal("rate_rule", f"{name} is not an allowed value", name=name)
+    budget = MAX_TOTAL_TABLE_BYTES if max_total_bytes is None else max_total_bytes
+    if isinstance(budget, bool) or not isinstance(budget, int) or budget <= 0:
+        raise FairValueRefusal("load_budget", "max_total_bytes must be an int > 0", name="max_total_bytes")
+    root, rels = Path(root), sorted(file_sha256)
+    for rel in rels:
+        if not (isinstance(rel, str) and _TABLE_RE.fullmatch(rel)):
+            raise FairValueRefusal("table_path", "table path is not in the tool layout", path=str(rel))
+    if not {"quotes", "rates"} <= {rel.split("/")[0] for rel in rels}:
+        raise FairValueRefusal("table_absent", "a quotes and a rates file are both required")
+    _LOG.info("load start: %d table files under %s", len(rels), root)
+    if not (root / "manifest.json").is_file():
+        raise FairValueRefusal("manifest_absent", "manifest.json is missing")
+    blob = _read_capped(root / "manifest.json", MAX_MANIFEST_BYTES, "manifest.json")
+    hashes = {"manifest.json": hashlib.sha256(blob).hexdigest()}
+    if hashes["manifest.json"] != manifest_sha256:
+        raise FairValueRefusal("manifest_hash", "manifest.json hash differs from the pin")
+    _check_manifest(blob)
+
+    frames, last_log, total = {"quotes": [], "rates": []}, started, 0
+    for done, rel in enumerate(rels, 1):
+        if not (root / rel).is_file():
+            raise FairValueRefusal("table_absent", "a listed table file is missing", path=rel)
+        blob = _read_capped(root / rel, MAX_TABLE_BYTES, rel)
+        hashes[rel] = hashlib.sha256(blob).hexdigest()
+        if hashes[rel] != file_sha256[rel]:
+            raise FairValueRefusal("table_hash", "table file hash differs from the pin", path=rel)
+        kind = rel.split("/")[0]
+        _admit(blob, kind, rel, total, budget)
+        frame = _parse(blob, kind, rel)
+        total += int(frame.memory_usage(index=True, deep=True).sum())  # concat peaks at about twice the retained size
+        if total > budget:
+            raise FairValueRefusal("input_too_large", "decoded tables exceed the total memory budget",
+                                   code="RESOURCE_LIMIT_EXCEEDED", path=rel, total_bytes=total, max_total_bytes=budget)
+        frames[kind].append(frame)
+        now = time.monotonic()
+        if now - last_log >= 30.0:
+            last_log, rate = now, done / (now - started)
+            _LOG.info("reading tables: %d/%d files, %.2f files/s, eta %.0fs", done, len(rels), rate, (len(rels) - done) / rate)
+
+    quotes = pd.concat(frames["quotes"], ignore_index=True)
+    rates = pd.concat(frames["rates"], ignore_index=True)
+    _unique(quotes, VOL_KEYS, "quotes", "duplicate vol key across quote files")
+    _unique(rates, RATE_KEYS, "rates", "duplicate rate key across rate files")
+    vol = quotes["smvVol"] * vol_k
+    quotes["smvVol"] = vol.where(np.isfinite(vol) & (vol > 0))
+    median = quotes["smvVol"].median()
+    if not VOL_MEDIAN_BOUNDS[0] < median < VOL_MEDIAN_BOUNDS[1]:
+        raise FairValueRefusal("vol_unit", "median smvVol is outside the bounds or no vol is positive", median=float(median))
+    conv = {col: rates[col] * rate_k for col in RATE_COLUMNS}
+    inside = {col: conv[col].between(*RATE_BOUNDS) for col in RATE_COLUMNS}  # NaN and +/-inf are not inside
+    outside = {col: conv[col].notna() & ~inside[col] for col in RATE_COLUMNS}  # mask taken before any nulling
+    row_outside = outside[RATE_COLUMNS[0]] | outside[RATE_COLUMNS[1]]
+    for col in RATE_COLUMNS:
+        keep = inside[col] & ~row_outside if rules["rate_out_of_range"] == "row_unknown" else inside[col]
+        rates[col] = conv[col].where(keep)
+    if rules["rate_empty_row"] == "earlier_row":
+        rates = rates[rates[RATE_COLUMNS].notna().any(axis=1)]
+    rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+    _LOG.info("load end: %.1f s, rss %.0f MB, decoded tables %.1f MB", time.monotonic() - started, rss_mb, total / 2**20)
+    return InputTables(quotes[VOL_KEYS + ["smvVol"]], rates[RATE_KEYS + RATE_COLUMNS], hashes, rules)
+
+
+def attach_vol(quotes, vols):
+    """smvVol per quote row by VOL_KEYS (both rights share it); NaN when unmatched. Null or unconvertible keys are refused."""
+    left = _norm(quotes, VOL_KEYS)
+    vols = _norm(vols, VOL_KEYS + ["smvVol"])
+    _unique(vols, VOL_KEYS, "quotes", "duplicate vol key in the vol table")
+    _table_values(vols, ["smvVol"], lambda v: np.isnan(v) | (np.isfinite(v) & (v > 0)), "quotes")
+    merged = left.merge(vols, on=VOL_KEYS, how="left", validate="many_to_one")
+    return pd.Series(merged["smvVol"].to_numpy(dtype=float, copy=True), index=quotes.index, name="smvVol")
+
+
+def lookup_rate(rows, rates):
+    """Rate per row: the ticker's row at obs_date, else its latest earlier one within 7 days; then a blend."""
+    left = _norm(rows, ["ticker", "obs_date", "expiry"])
+    right = _norm(rates, RATE_KEYS + RATE_COLUMNS)
+    _unique(right, RATE_KEYS, "rates", "duplicate rate key in the rate table")
+    _table_values(right, RATE_COLUMNS, lambda v: np.isnan(v) | ((v >= RATE_BOUNDS[0]) & (v <= RATE_BOUNDS[1])), "rates")
+    out = np.full(len(rows), np.nan)
+    if left.empty or right.empty:
+        return pd.Series(out, index=rows.index, name="rate")
+    left["_pos"] = np.arange(len(left))
+    m = pd.merge_asof(left.sort_values("obs_date", kind="mergesort"), right.sort_values("obs_date", kind="mergesort"),
+                      on="obs_date", by="ticker", direction="backward", tolerance=pd.Timedelta(days=RATE_LOOKBACK_DAYS))
+    days = np.maximum((m["expiry"] - m["obs_date"]).dt.days.to_numpy(dtype=float), 0.0)
+    r5, rl = m["iRate5wk"].to_numpy(dtype=float), m["iRateLt"].to_numpy(dtype=float)
+    weight = np.clip((days - SHORT_DAYS) / (LONG_DAYS - SHORT_DAYS), 0.0, 1.0)
+    blend = np.where(np.isfinite(r5) & np.isfinite(rl), r5 + weight * (rl - r5), np.where(np.isfinite(r5), r5, rl))
+    out[m["_pos"].to_numpy()] = np.where(np.isfinite(days), blend, np.nan)
+    return pd.Series(out, index=rows.index, name="rate")
+
+
+def usable_quote(bid, ask):
+    """Design section 7's unpriceable, negated: both finite, bid >= 0, ask > 0, bid <= ask."""
+    b, a = _floats(bid), _floats(ask)
+    return np.isfinite(b) & np.isfinite(a) & (b >= 0) & (a > 0) & (b <= a)
+
+
+def entry_coverage(entry_rows, tables, *, snapshot_id, expected_snapshot_id, emit=print):
+    """Input coverage of ENTRY rows by obs_date year and chain_kind. Binds its rows itself via bind_quotes
+    (snapshot id, quote schema, keys) before anything is emitted. Reads no outcome column."""
+    entry_rows = bind_quotes(entry_rows, snapshot_id=snapshot_id, expected_snapshot_id=expected_snapshot_id)
+    n = len(entry_rows)
+    flags = pd.DataFrame({
+        "year": pd.to_datetime(entry_rows["obs_date"]).dt.year.to_numpy(),
+        "chain_kind": entry_rows["chain_kind"].map(lambda v: "null" if pd.isna(v) else str(v)).to_numpy(dtype=object),
+        "usable_quote": usable_quote(entry_rows["bid"], entry_rows["ask"]),
+        "smvvol_positive": attach_vol(entry_rows, tables.vols).notna().to_numpy(),
+        "rate_found": lookup_rate(entry_rows, tables.rates).notna().to_numpy(),
+        "open_interest_known": np.isfinite(_floats(entry_rows["open_interest"])),
+        "bid_size_known": np.isfinite(_floats(entry_rows["bid_size"])),
+        "ask_size_known": np.isfinite(_floats(entry_rows["ask_size"])),
+    })
+    columns = ["year", "chain_kind", "rows"] + [c for name in _COUNTED for c in (name, name + "_share")]
+    out = pd.DataFrame(columns=columns)
+    if n:
+        grouped = flags.groupby(["year", "chain_kind"], sort=True)
+        out = grouped[_COUNTED].sum()
+        out.insert(0, "rows", grouped.size())
+        out = out.reset_index()
+        for name in _COUNTED:
+            out[name + "_share"] = out[name] / out["rows"]
+        out = out[columns]
+    emit("\n".join(["[fvf] entry input coverage", out.to_string(index=False)]))
+    return out

@@ -9,7 +9,7 @@
 
 ## 2. Module boundary
 
-- New modules `experiments/fair_value_*`. Imports: numpy, pandas, and `engine.fills.MIN_MEANINGFUL_COST`. `engine/fills.py`, `engine/structures.py`, `engine/pnl_sim.py`, `engine/chain_index.py` and the production normalizer do not change. No sealed v14 closure imports F; the first slice tests both closure hashes (part 1 section 3) unchanged.
+- New modules `experiments/fair_value_*`. Imports: numpy, pandas, and `engine.fills.MIN_MEANINGFUL_COST`, plus `pyarrow.parquet` for footer reads (Amendment 1, item 5). `engine/fills.py`, `engine/structures.py`, `engine/pnl_sim.py`, `engine/chain_index.py` and the production normalizer do not change. No sealed v14 closure imports F; the first slice tests both closure hashes (part 1 section 3) unchanged.
 - F prices **resolved legs** only; the consumer resolves them and owns timing, gating and sizing.
 - **Tool check.** Adding QuantLib (not installed) would change the pinned environment sealed runs record; one American put pricer on numpy suffices, with no IV solver. `engine.pnl_sim.black_scholes_put` and the `engine/v2/scoring/stages.py` helper are European with zero rates, and `pnl_sim` is in the v14 closure, so F is a new pricer.
 
@@ -23,9 +23,9 @@
 
 **Data facts (supervisor-checked 2026-11-25, not re-read here).** `engine/data/normalize/n_chains.py` drops `smvVol` from curated `option_chains`; the raw cache has it per strike. Open interest and both sizes exist only on `chain_kind=fetch` rows (2023-01-03 to 2025-12-31), about 75-80% of rows; `eod`, `t14` and `c2` rows have none, so earlier history has none.
 
-**The re-ingest tool** (`tools/orats_smoothed_vol.py`, unmerged) writes no production store. F binds the content hash of its `manifest.json` (written last) and of every table file read. A missing manifest, or a manifest with a null `input_fingerprint` (some payloads unread), refuses. If the merged tool's columns differ from the table above, this file is amended before slice F1.
+**The re-ingest tool** (`tools/orats_smoothed_vol.py`) writes no production store. F binds the content hash of its `manifest.json` (written last) and of every table file read. A missing manifest, or one that reports unread payloads, refuses (Amendment 1). F reads only the columns above; extra columns and manifest keys are ignored.
 
-**Units.** `spot`, strikes and quotes are dollars per share; vols and rates are annualised decimals. The raw units are confirmed from the re-ingest and pinned in each consumer's spec before registration, using no outcome. After conversion, a rate outside [-0.05, 0.20] is `rate_unknown`; a non-finite or non-positive vol is missing; a bound vol table whose median `smvVol` is outside (0.05, 5) refuses `vol_unit` (bounds mine).
+**Units.** `spot`, strikes and quotes are dollars per share; vols and rates are annualised decimals. The raw units are confirmed from the re-ingest and pinned in each consumer's spec before registration, using no outcome. After conversion, a rate value outside [-0.05, 0.20] is by default missing (Amendment 1, item 3, pending); a non-finite or non-positive vol is missing; a bound vol table whose median `smvVol` is outside (0.05, 5) refuses `vol_unit` (bounds mine).
 
 ## 4. Fair value
 
@@ -103,7 +103,7 @@ F is used in **selection and scoring alike**:
 - Every F-scored P&L, account and success test uses `debit_F` and `proceeds_F`.
 - **Mid and harsh are still reported**, on the same taken set, computed by the consumer's existing code (`mid` is `FillModel(0.5)`; "harsh" keeps that experiment's own definition). They never decide or break a tie where F is the declared basis.
 
-**Diagnostics**, by year, `chain_kind` and entry versus exit: vol source and status shares; smile minus `smvVol`; `|V - mid| / half-spread` (effective quote; rows with zero half-spread excluded and counted) by right (the dividend omission would show as a put/call difference); clamp, better-than-mid, unknown and repaired shares; `c` quantiles; guard skips by reason; `exit_fair_mid` and `unpriceable` counts; and the share of entries whose structure value violates a no-arbitrage payoff bound at mid and at `V`. Status, source and liquidity coverage on entry rows is printed **before any outcome is read**.
+**Diagnostics**, by year, `chain_kind` and entry versus exit: vol source and status shares; smile minus `smvVol`; `|V - mid| / half-spread` (effective quote; rows with zero half-spread excluded and counted) by right (the dividend omission would show as a put/call difference); clamp, better-than-mid, unknown and repaired shares; `c` quantiles; guard skips by reason; `exit_fair_mid` and `unpriceable` counts; and the share of entries whose structure value violates a no-arbitrage payoff bound at mid and at `V`. Input coverage (F1, Amendment 1), then status, source and liquidity coverage (F5), on entry rows is printed **before any outcome is read**.
 
 ## 9. Recalibration from the user's real fills (only if supplied)
 
@@ -117,7 +117,7 @@ New constants are a **new constants id**. A consumer needs a new spec hash and P
 
 | Rule | Case | Result |
 | --- | --- | --- |
-| R1 inputs | snapshot, manifest or table hash does not bind; manifest absent or fingerprint null; required column absent; duplicate quote or vol key; vol unit check fails | refuse `EXPERIMENT_IDENTITY_CONFLICT` with a `details.reason`; no partial output; nothing imputed except the rules written above |
+| R1 inputs | snapshot, manifest or table hash does not bind; manifest absent or reporting unread payloads; required column absent; duplicate quote, vol or rate key; vol unit check fails | refuse `EXPERIMENT_IDENTITY_CONFLICT` with a `details.reason`; no partial output; nothing imputed except the rules written above |
 | R1 per row | missing vol, rate or quote | section 7 statuses, counted; never silent or zero |
 | R2 resources | put tree on unique rows | quarter chunks, each row priced once per run, under the consumer's `bounded_run` limit; over it refuses `RESOURCE_LIMIT_EXCEEDED`, no partial report. Smoke first |
 | R3 determinism | no randomness or clock | values never depend on row order, chunking or requested structures |
@@ -141,9 +141,19 @@ Estimates: non-test code lines / test lines / doc words, excluding the re-ingest
 
 | Slice | Scope | Size | After |
 | --- | --- | --- | --- |
-| F1 | Table and snapshot binding, unit and rate rules, closure-hash tests, entry coverage report | ~130 / ~140 / 50 | re-ingest merged |
+| F1 | Table and snapshot binding, unit and rate rules, closure-hash tests, entry **input** coverage report | ~130 / ~140 / 50 | re-ingest merged |
 | F2 | American put tree, European call, pricer reference tests | ~100 / ~140 / 30 | this PR |
 | F3 | Fit set, smile, source choice, leg table values | ~120 / ~150 / 40 | F2 |
 | F4 | Concession, repaired and unknown rules, sensitivities, structure entry, guard, exit | ~150 / ~180 / 50 | F3 |
-| F5 | `fvf_id`, receipts, diagnostics, chunked smoke | ~130 / ~130 / 60 | F1, F4 |
+| F5 | `fvf_id`, receipts, diagnostics (with status and source coverage), chunked smoke | ~130 / ~130 / 60 | F1, F4 |
 | F6 | Calibration from real fills; only if supplied | ~110 / ~120 / 40 | F4 |
+
+## 13. Amendment 1 (2026-11-25, before any F1 code)
+
+Items 1 and 2 are **settled by the user (2026-11-25)**. Item 3 is **pending the user's review of measured missing-rate frequency**. Item 4 is the F1 owner's reading (mine), for the user's review.
+
+1. **Manifest.** The merged tool writes no `input_fingerprint`. F refuses a missing manifest, and one where `tables.quotes` or `tables.rates` lacks an `unreadable` or `unrecognized` count, or has a nonzero one. The consumer supplies the expected SHA-256 of the manifest and of every table file it reads. **Limit:** the manifest lists no file hashes, so the pins do not prove that the files and the manifest came from the same run.
+2. **F1 coverage** is input coverage only, by `obs_date` year and `chain_kind`: usable quotes (not section 7's `unpriceable`), a positive `smvVol` match, a rate found, and known open interest, bid size and ask size. Status and source shares move to F5. Match reporting on the tool's side is [#2891](https://github.com/yshewchuk/investment-validation/issues/2891).
+3. **Rates** (pending, as above). Two rules are load parameters, applied to every lookup on the loaded table. `rate_out_of_range`: by default (`missing`) a value outside the bounds after conversion is missing, so the other is used; `row_unknown` removes both values of that row. A non-finite value is missing under either; with an infinite one, `row_unknown` treats it as outside. `rate_empty_row`: by default (`rate_unknown`), once section 4 has selected a row by its date F does not look further back, even if the row has neither value; `earlier_row` ignores rows with neither value, whatever the cause, within the same 7 days. In both, no usable value is `rate_unknown`. The vol and rate unit conversions are required caller parameters with no defaults.
+4. **Binding details.** Section 2's imports exclude the snapshot repository, so the consumer reads the quote rows from its pinned snapshot and passes the id it read with the id its spec pins. F refuses a difference; it cannot verify that the rows came from that snapshot. The coverage report binds its rows the same way. A null or unconvertible key refuses wherever F1 takes keys: quote rows, both tables and the lookup helpers. The helpers also refuse a table value the loader could not have returned. The `vol_unit` median covers the positive finite vols of the files bound in one load; none at all also refuses. A duplicate rate key refuses like a duplicate vol key. A manifest or table file over F1's read cap refuses `RESOURCE_LIMIT_EXCEEDED`, as does one load whose parsed tables together pass its memory budget (default 2 GiB, caller-settable; concatenating peaks at about twice that).
+5. **Admission before decoding** (the owner's change to section 2, for the user's review). pandas cannot read a Parquet footer, so F1 imports `pyarrow.parquet`, already pandas's engine here, for footer and schema reads. It adds nothing to the environment. A table is decoded only if the load's running total plus its footer estimate fits the budget: the larger of 128 bytes a row and the needed columns' uncompressed size. The measured size is checked again afterwards. This is an estimate, not a hard memory bound; the consumer's `bounded_run` limit stays the hard one.
