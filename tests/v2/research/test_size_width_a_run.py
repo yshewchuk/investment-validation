@@ -40,8 +40,8 @@ from tests.v2.research.test_size_width_run import FAKE, _argv, _gates, _install,
 
 DOC = fvk.constants_document(fvk.primary_constants(0.21, 0.0, 0.15, 0.10))  # base, spread, thin_size, thin_oi
 EXPERIMENTS = Path(__file__).resolve().parents[3] / "experiments"
-A_SOURCES = ("fair_value_apply.py", "fair_value_constants.py", "size_width_a_fills.py", "size_width_f_fills.py",
-             "size_width_f_quotes.py", "size_pnl_shortvol.py", "size_width_fills.py", "size_width_pricing.py")
+A_SOURCES = (*sorted(path.name for path in EXPERIMENTS.glob("size_width_*.py")),
+             "fair_value_apply.py", "fair_value_constants.py", "size_pnl_shortvol.py")
 WEIGHT = {"primary": 0.0, "spread050": 0.50}  # the spread weight each variant sets (the fixtures' sizes and open interest are not thin)
 MODEL = af.ModelA(DOC, DOC["constants_id"], "primary")
 
@@ -170,6 +170,14 @@ def test_a_source_over_the_cap_refuses_input_too_large_before_any_quote_is_read(
     with pytest.raises(fvi.FairValueRefusal) as caught:
         af.load(DOC["constants_id"], "primary")
     assert caught.value.details["reason"] == "input_too_large" and caught.value.code == "RESOURCE_LIMIT_EXCEEDED"
+
+
+def test_the_a_source_hash_names_cover_the_pricing_path(tmp_path, monkeypatch):
+    _constants(tmp_path, monkeypatch)
+    names = af.load(DOC["constants_id"], "primary")[1]["model_a_source_sha256"].keys()
+    assert {"size_width_a_fills.py", "size_width_f_select.py", "size_width_driver.py", "size_width_sweep.py",
+            "size_width_f_rows.py", "size_width_f_fills.py", "size_width_f_quotes.py", "size_width_fills.py",
+            "size_width_pricing.py", "fair_value_apply.py", "fair_value_constants.py", "size_pnl_shortvol.py"} <= set(names)
 
 
 def _unread(expiries):

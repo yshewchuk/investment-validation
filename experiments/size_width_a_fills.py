@@ -24,9 +24,10 @@ HERE = Path(__file__).resolve().parent
 CONSTANTS_PATH = HERE / "EXP-189_short_vol_width_tuning" / "model_a_constants.json"  # read at call time (tests monkeypatch it)
 MAX_CONSTANTS_BYTES = 1 << 16
 MAX_SOURCE_BYTES = 1 << 20
-# every file of model A's pricing path outside fvf_id: the apply code, this module, the F seam (quote tables, structure dispatch), and the shared entry, Skip/Exit and pricing-seam modules
-SOURCE_FILES = ("fair_value_apply.py", "fair_value_constants.py", "size_width_a_fills.py", "size_width_f_fills.py",
-                "size_width_f_quotes.py", "size_pnl_shortvol.py", "size_width_fills.py", "size_width_pricing.py")
+# the A run's code outside fvf_id: every EXP-189 width module (selection, driver, sweep, seam, quotes, fills) plus the apply
+# code and the shared short-vol entry module; a glob, so a new width module cannot be left out
+SOURCE_FILES = (*sorted(path.name for path in HERE.glob("size_width_*.py")),
+                "fair_value_apply.py", "fair_value_constants.py", "size_pnl_shortvol.py")
 
 
 class ModelA(typing.NamedTuple):
