@@ -270,7 +270,7 @@ def test_real_spec_has_the_design_levels_grid_and_pending_decisions():
                for b in spec["grid"]["axes"]["min_samples_leaf"]}
     assert len(product) == 4
     assert spec["stage_b"]["status"] == "pending_decisions"
-    assert set(spec["stage_b"]["open_decisions"]) == {"tau_window_aggregation", "buildability_fallback"}
+    assert set(spec["stage_b"]["open_decisions"]) == {"tau_window_aggregation", "buildability_fallback", "stage_b_arms"}
     assert spec["preregistered_at"] is None
 
 
@@ -344,3 +344,16 @@ def test_stage_a_terms_are_not_changed_by_stage_b():
     assert "50-ticker smoke" in spec["real_data_order"]
     assert "admitted event keys only" in spec["real_data_order"]
     assert spec["real_data_order"].index("PLANNED row") < spec["real_data_order"].index("50-ticker smoke")
+
+
+def test_real_spec_records_the_2026_11_26_decisions():
+    spec = load_spec()[0]
+    assert spec["distribution_tails"]["min_donors"] == 30
+    assert "CRPS ONLY" in spec["distribution_tails"]["rule"]
+    assert "thin tail pool," not in spec["failure_semantics"]["abstention"]
+    for term in ("y0_none", "POPULATION_COLLAPSED", "training_labels"):
+        assert term in spec["walk_forward"]["y0_rule"]
+    assert "y0_none" in spec["failure_semantics"]["R1"]
+    assert "never paired or scored" in spec["stage_a"]["settlements"]["s4"]
+    assert "unsorted fit outputs" in spec["stage_a"]["settlements"]["s9"]
+    assert "its own common subset" in spec["stage_a"]["flags"]

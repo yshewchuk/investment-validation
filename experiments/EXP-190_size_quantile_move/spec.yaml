@@ -14,7 +14,7 @@ constraints:
 
 target: {column: abs_move, units: percent_points, lead: 1}
 levels: [0.1, 0.25, 0.4, 0.5, 0.6, 0.75, 0.9]
-note: "every quantile uses numpy's default linear method; no coverage guarantee. The 500-event minima (calibration, S z_q, level_width_L, B2 donors), the 50 tail donors and min(20, n // 100) L bins are pre-registered judgement values: no derivation or study supports them; fixed before any quantile-model run"
+note: "every quantile uses numpy's default linear method; no coverage guarantee. The 500-event minima (calibration, S z_q, level_width_L, B2 donors), the 30 tail donors (user, 2026-11-26) and min(20, n // 100) L bins are pre-registered judgement values: no derivation or study supports them; fixed before any quantile-model run"
 features:
   panel: "sealed v14 SIZE panel"
   set: HMOSXLP
@@ -26,7 +26,7 @@ features:
 walk_forward:
   folds: "annual; refit yearly per level and configuration"
   range: "Y0 through 2025"
-  y0_rule: "earliest year where every year Y0..2025 has at least chain_share_min admitted panel events with stored entry and exit option chains, and panel holds at least training_years_min earlier calendar years of training rows"
+  y0_rule: "earliest year where every year Y0..2025 has at least chain_share_min admitted panel events with stored entry and exit option chains, and at least training_years_min earlier calendar years of training rows. A year counts only with at least one label training_labels qualifies (usable labels, after v14's label-end cutoff and embargo; user, 2026-11-26); these label reads are allowed before registration. A year whose annual_folds raises POPULATION_COLLAPSED fails the test and does not refuse the report. No year qualifies: refuse, reason y0_none, no fits, no report"
   chain_share_min: 0.5
   training_years_min: 3
   label_rule: "training row needs label available before fold cutoff (data dates, never computed_at)"
@@ -50,10 +50,10 @@ calibration:
   method: linear
   rule: "pool: out-of-sample events dated in the window_months before month m begins, labels available before m began; each at its own year's chosen configuration (what was actually forecast). delta_q is empirical q-quantile of signed errors y - qhat_q on sorted, unfloored predictions (never floored first); add delta_q to unfloored qhat_q, sort, then floor at 0. Under min_events: unscored (calibration_burn_in)"
 distribution_tails:
-  min_donors: 50
+  min_donors: 30
   floor: 0.5
   interpolation: "inverse CDF linear between knots, per arm from its own predictions"
-  rule: "tail pool fixed at start of each month (calibration pool's events rule). Above 0.9: d = (y - q90) / max(q90 - q50, floor) over donors with y > q90; Q(u) = q90 + s_hi * quantile(d, (u - 0.9)/0.1). Below 0.1: d = (y - q10) / max(q50 - q10, floor) over donors with y < q10; Q(u) = max(0, q10 + s_lo * quantile(d, u/0.1)). Event's own s_hi = max(q90 - q50, floor), s_lo = max(q50 - q10, floor). numpy linear; a jump at the knots is allowed. Under min_donors in a tail: whole event unscored for that arm (tail_pool_thin)"
+  rule: "tail pool fixed at start of each month (calibration pool's events rule). Above 0.9: d = (y - q90) / max(q90 - q50, floor) over donors with y > q90; Q(u) = q90 + s_hi * quantile(d, (u - 0.9)/0.1). Below 0.1: d = (y - q10) / max(q50 - q10, floor) over donors with y < q10; Q(u) = max(0, q10 + s_lo * quantile(d, u/0.1)). Event's own s_hi = max(q90 - q50, floor), s_lo = max(q50 - q10, floor). numpy linear; a jump at the knots is allowed. Under min_donors in a tail: tail_pool_thin removes the event from that arm's CRPS ONLY; it keeps its quantiles and stays scored on every other metric and rule, level-width history included (user, 2026-11-26); the report counts CRPS exclusions per arm and year"
   floor_report: "0.5 floor is a user decision (2026-11-26: keep 0.5 floor and report): report MUST print, per arm and year, the share of events where the 0.5 floor binds, for the event width and for the donor normalisation; for arm S also the scale-floor share (arms.S)"
 zero_median:
   threshold: 1.0e-09
@@ -72,12 +72,12 @@ stage_a:
     s1: "Spearman bootstrap: in a used cell of n events with rank residuals rW, re, each event gets n * rW * re / sqrt(sum(rW^2) * sum(re^2)), 0 in a zero-W cell (L alike); size_pnl_contrast ticker bootstrap on these and on the W minus L per-event difference; ranks and residuals fixed across resamples; seed a parameter, default 188"
     s2: "tercile difference within each cell (top minus bottom tercile mean e), weighted by cell event count; zero-residual cell counts 0; ordered by residual, ties by event id, np.array_split; pooled-event tercile table report only"
     s3: "level-width burn-in removes an event only from conditional tests (W, L, B0 comparison); it stays in accuracy and coverage"
-    s4: "min_scored_share per period and arm; denominator all admitted events in the period; numerator admitted events scored by both arm and B0; below: not_testable (scored_share_below_floor); always reported"
+    s4: "min_scored_share per period and arm; denominator all admitted events in the period; numerator admitted events scored by both arm and B0; below: not_testable (scored_share_below_floor); always reported. An admitted in-period event with no qualified label counts in the denominator and is never paired or scored (user, 2026-11-26, option B; no admitted_label_missing refusal); the report counts these per year"
     s5: "a period with no paired event or no usable cell, or a bootstrap with under two groups: arm not_testable; a missing quarter does not count towards a quarter requirement, which stays of 10"
     s6: "cell where e varies but its residual is all zero: skipped for both W and L, own count"
     s7: "L edges: numpy linear quantiles with duplicates removed; a value on an edge goes to the lower bin, earlier and current alike; if ties leave the event's bin with no earlier y: no L (level_width_empty_bin), treated as s3"
     s8: "CRPS uses the distribution_tails rule for every arm; the metric integrates each event's piecewise-linear (u, x) quantile function exactly"
-    s9: "crossing rate: share of events where any neighbouring pair of raw quantiles is strictly out of order"
+    s9: "crossing rate: share of events where any neighbouring pair of raw quantiles is strictly out of order. For Q too, raw means the unsorted fit outputs (user, 2026-11-26)"
   population: "events where judged arm and B0 both have output; drops counted by reason and year; B1-B3 on common subsets"
   periods: ["2023H2", "2024", "2025"]
   quarters: 10
@@ -101,14 +101,14 @@ stage_a:
     - "conditional_sharpness: in each period W's partial Spearman positive and exceeds L's, and W's wide-minus-narrow tercile difference in mean e positive and exceeds L's; pooled over periods, ticker intervals for W's Spearman and W minus L both lie above 0"
     - "calibration_guard: for each band, |coverage - nominal| no worse than B0's in at least 5 of 10 quarters"
   bootstrap: {resamples: 10000, interval_percentile: 90, seed: "fixed"}
-  flags: "pooled pinball loss to B1, B2 or B3 is flagged in headline, not gated"
-  verdict: "Stage A passes if Q or Q_raw passes. Each passing arm enters Stage B with own verdict. Two eligible arms give two tries, uncorrected. Otherwise Stage B not run."
+  flags: "pooled pinball loss to B1, B2 or B3 is flagged in headline, not gated. Each baseline has its own common subset (events scored by the arm, B0 and that baseline), so one baseline's gaps never shrink another's (issue 3042 item 1, owner default, user 2026-11-26)"
+  verdict: "Stage A passes if Q or Q_raw passes. Each passing arm enters Stage B with own verdict. Two eligible arms give two tries, uncorrected. Otherwise Stage B not run. With no passing arm, Stage A is not_passed (not_testable stays for a Q_raw fit failure), each arm labelled and reasons listed (issue 3042 item 4, owner default, user 2026-11-26). The Stage A report does not store stage_b_arms. Which arms enter Stage B: stage_b.open_decisions.stage_b_arms."
   selection_period_disclosure: "report states: grid for year Y uses earlier years; B3 identity, feature set, grid values used 2023-2024; Stage A gate uses 2023H2-2025. No feature set, grid value, configuration or baseline identity was selected by scoring 2025 (baselines here are B0-B3; Stage B's control arm E was recommended after its 2025 results were seen). 2025 is not a clean test or holdout: the Stage A gate reads it (Stage B scores it after a pass that read 2025 outcomes), and 2025 results shaped the design, EXP-188's and EXP-189's among them (D15 as revised by the user, 2026-11-26). Only the forward period after data end is independent."
 
 failure_semantics:
-  R1: "panel, folds, dictionary, M0 or M3 series do not bind: refuse EXPERIMENT_IDENTITY_CONFLICT; nothing rebuilt or imputed. A merely absent M3 year is B3 not_testable."
+  R1: "panel, folds, dictionary, M0 or M3 series do not bind: refuse EXPERIMENT_IDENTITY_CONFLICT; nothing rebuilt or imputed. A merely absent M3 year is B3 not_testable. No Y0: refuse, reason y0_none (walk_forward.y0_rule)."
   fit_failed: "fold's arm is fit_failed, no retry. One failed fit (any level or configuration) fails the whole year. The Q walk runs years in order and stops at the first fit_failed year: later years are neither selected nor fitted, so no grid selection reads a failed year; none is skipped or substituted. The walk's source is Q_raw (Q derives from it), so a Q_raw fit failure makes the whole of Stage A not_testable, even for a year before the judged periods. Only a ValueError from fitting is fit_failed; a memory-limit refusal is not: it refuses RESOURCE_LIMIT_EXCEEDED and publishes no receipt for that year. Receipts are published whole or not at all; a rerun replays published ones, fit_failed included. Calibration failure affects Q only. The stop and not_testable rule is a user decision (2026-11-26)."
-  abstention: "burn-in (except level-width, see level_width), thin tail pool, non-finite output: unscored (an abstention, not 'no'), counted; leaves paired population"
+  abstention: "burn-in (except level-width, see level_width), non-finite output: unscored (an abstention, not 'no'), counted; leaves paired population. A thin tail pool is not an abstention: CRPS only (distribution_tails)."
   baseline_abstention: "B1 pool_too_small; B2 under 500 donors or invalid own implied_move: that baseline is unscored for the event, counted; its common-subset tables drop it. B2 donor with null, zero, negative or non-finite implied_move: dropped from the pool and counted"
   level_width: "burn-in or empty bin: no L, counted; only conditional tests"
   R2: "quarter or year chunks. Memory limit (user decision, 2026-11-26; peak not yet measured): one heavy process on a 13 GiB box; the real-data entry point (not yet built, #3047) must wrap the whole run in experiments.memory_guard.rss_watchdog(8 * 2**30): the run's own VmRSS, sampled every 50 ms, above 8 GiB raises MemoryError, refused RESOURCE_LIMIT_EXCEEDED; no partial report, complete fit receipts stay. bounded_run --heavy --max-rss-gb 9 is the untyped backstop above it. No wall-clock limit; receipt byte caps are separate."
@@ -123,8 +123,9 @@ stage_b:
   open_decisions:  # SB0 part 2 records both and sets status settled
     tau_window_aggregation: "open: how the 2025 tau objective combines the 2023H2 and 2024 selection periods, since each account period starts fresh (issue 2941)"
     buildability_fallback: "open: whether arms E and EQ have any retry beyond choosing among feasible widths (issue 2941; user hold of 2026-11-25: wait for the EXP-189 fair-value result)"
+    stage_b_arms: "open: whether both Q and Q_raw enter Stage B whenever Stage A passes (design sections 5, 6.1 and D7) or only each passing arm (stage_a.pass_rule verdict) (issue 3042 item 5)"
   rules_from: "design section 6; decisions in section 10 (D1, D11-D15, N1-N4, F, EQ)"
-  runs_if: "only after a bound Stage A pass receipt. Sources s are Q (calibrated) and Q_raw (uncalibrated), each with its own tails; an arm suffixed _s uses only s. Both run, each labelled with its own Stage A verdict; EQ runs only for a source that itself passed"
+  runs_if: "only after a bound Stage A pass receipt. Sources s are Q (calibrated) and Q_raw (uncalibrated), each with its own tails; an arm suffixed _s uses only s. Which of the two run: open_decisions.stage_b_arms; each that runs is labelled with its own Stage A verdict; EQ runs only for a source that itself passed"
   machinery: "EXP-188 production-exact rules as a library (its design section 18: strikes through price_structure, no zero-floor drop, entry and exit sessions, spread and market-cap terms, per-arm trailing cutoffs, exit rungs). No size_pnl_* or size_width_* change. Draw key event_id, shared by all arms"
   fill_model:
     id: "F"
@@ -223,7 +224,7 @@ stage_b:
     selection_period_disclosure: "report states: tau as in tau.windows; N1 and N2 fit on earlier exits with a fixed configuration; cutoffs, kappa and TF's median trail causally; E and EQ choose k without realised outcomes. 2024 is not clean (features, grid and tau used earlier results). No feature set, grid value, configuration, baseline identity, tau or selection-model setting was selected by scoring 2025 (control E was recommended after its 2025 results were seen); only causal trailing statistics read earlier 2025 data. 2025 is not a clean test or holdout: the Stage A gate reads it and 2025 results shaped the design. Only the forward period is independent"
   failure_semantics:
     R1: "no bound Stage A pass receipt: stage_a_not_passed; changed spec: spec_hash_mismatch; no PLANNED row: planned_row_missing. Panel, folds, M0, quantile receipts, snapshot, F tables or the pinned EXP-189 version do not bind, and F's own R1 refusals: EXPERIMENT_IDENTITY_CONFLICT with details.reason; no partial report, nothing rebuilt or imputed"
-    R1_rows: "quantile burn-in, thin pool or cutoff history, missing fact: undetermined, counted, never no. Thin kappa or TF history, zero_median in TF's R, selection_burn_in: that arm's row undetermined, counted"
+    R1_rows: "quantile burn-in, thin pool or cutoff history, missing fact: undetermined, counted, never no. An event whose tail pool is thin has no full distribution: rows of arms that read it (D, WD, LWD, EQ, ST for that source, ST0 for B0) are undetermined, counted; quantile-only arms keep it. Thin kappa or TF history, zero_median in TF's R, selection_burn_in: that arm's row undetermined, counted"
     entry_exit: "entry failure (width declined, ladder too coarse, F status or guard, no feasible k): non-trade at P&L 0, counted, event stays. Exit unusable after entry is never a non-trade (exit rule above)"
     fit_failed: "a failed selection fit: that year, family and source, N1 and N2 fit_failed, no retry, verdict not_testable; other arms run"
     optional: "G_PROD artifacts absent: not_available; no verdict depends on it"
