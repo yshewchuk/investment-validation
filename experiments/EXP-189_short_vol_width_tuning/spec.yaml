@@ -176,22 +176,23 @@ amendments:
     f_comparison: "F is not re-priced by this amendment. Its code, fvf_id and the A1 entry are unchanged, and model A's results are compared with Amendment 1's stored report. The two runs' taken sets can differ, so the comparison is between whole runs, not trade by trade."
     exit_concession: "Amendment 1's exit-concession diagnostic is measured from F's fair value, which no model A fill uses. No model A statistic is defined: the inputs are stored raw (exit_rows_artifact), any statistic is computed at report time, and it never blocks a run."
     exit_rows_artifact:
-      tables: "F's raw report-row tables, written by experiments/size_width_f_store.py for the inner and outer stages: legs_NNNN (one row per positive-quantity leg; exit legs have point = exit) beside taken_NNNN (the taken rows and their arm)"
+      tables: "F's raw report-row tables, written by experiments/size_width_f_store.py for the inner and outer stages: legs_NNNN (one row per positive-quantity leg; exit legs have point = exit) beside taken_NNNN (the taken rows and their arm) A model A run adds the columns below."
       existing_columns_used: ["point", "event_id", "structure", "k", "side", "qty", "mid", "eff_bid", "eff_ask", "V", "status", "c_buy", "c_sell", "fill_buy", "fill_sell"]
       model_a_values: "In a model A run, c_buy, c_sell, fill_buy and fill_sell hold model A values; the fill columns are null on a leg whose status is not ok."
-      added_columns: {constants_id: "string, the run's pinned constants_id", variant: "string, primary or spread050"}
-      producer: "S1, the first code slice. No full run starts until the added columns are on main."
+      added_columns: {legs_NNNN: ["constants_id", "variant"], taken_NNNN: ["constants_id", "variant", "exit_value_at_eff_mid"]}
+      other_exit_inputs: "The existing taken_NNNN columns proceeds_F, debit_F, exit_value_at_v, excluded_rung3 and excluded_unpriceable, and the legs' eff_bid, eff_ask, c_buy, c_sell and status."
+      producer: "S1, the first code slice (size_width_f_store)."
     label: "Every Amendment 2 table and proposed_rule.json carries a label marking it post-hoc under Amendment 2. The report slice (S3) defines the exact string; it changes no result."
     receipts:
       binds: ["every Amendment 1 receipt binding", "the fill-model id", "constants_id", "the variant", "the constants file hash as loaded", "a hash of the model A source, because neither fvf_id nor constants_id covers the apply code"]
-      field_names: "Under the inputs receipts' fill_model key, and so under inputs_hash: Amendment 1's binding fields, with fill_model_id A, plus constants_id, variant, constants_file_sha256 and model_a_source_sha256."
-      model_a_source_files: ["experiments/fair_value_apply.py", "experiments/fair_value_constants.py", "experiments/size_width_a_fills.py"]
+      field_names: "Under the inputs receipts' fill_model key, and so under inputs_hash: Amendment 1's binding fields, with fill_model_id A, plus constants_id, variant and model_a_source_sha256. constants_file_sha256 is at the top level of each stage's inputs receipt, outside inputs_hash, and is not compared across stages."
+      model_a_source_files: ["every experiments/size_width_*.py", "experiments/fair_value_apply.py", "experiments/fair_value_constants.py", "experiments/size_pnl_shortvol.py"]
       constants_file_hash: "The loaded file's hash is recorded as constants_file_sha256. A hash that differs from constants_sha256 is recorded, not refused (supervisor's decision): load_constants already refuses any change to the constants themselves, so only a reformatting can differ."
     failure_semantics:
-      R1_inputs: "Amendment 1's input refusals are unchanged. When the run opens: the existing F input checks and carry_dividend_mode; then constants_unreadable (not a readable regular file), input_too_large (over 64 KiB; RESOURCE_LIMIT_EXCEEDED), constants_unreadable (not JSON), constants_invalid, constants_id_mismatch, variant_unknown; then the manifest and snapshot checks; all before any quote read or write. A variant other than primary with F refuses fill_variant_unexpected. Entry and exit refuse legs_unbound, then legs_constants_mismatch; exit first repeats the constants refusals and F's leg checks. A report whose inputs do not bind the selected model refuses f_report_unbound. Other refusals are EXPERIMENT_IDENTITY_CONFLICT; nothing is imputed."
+      R1_inputs: "Amendment 1's input refusals are unchanged. When the run opens: the existing F input checks and carry_dividend_mode; then constants_unreadable (not a readable regular file), input_too_large (over 64 KiB; RESOURCE_LIMIT_EXCEEDED), constants_unreadable (not JSON), constants_invalid, constants_id_mismatch, variant_unknown; then input_too_large for a model A source file over 1 MiB; then the manifest and snapshot checks; all before any quote read or write. A variant other than primary with F refuses fill_variant_unexpected. Entry and exit refuse legs_unbound, then legs_constants_mismatch; exit first repeats the constants refusals and F's leg checks. A report whose inputs do not bind the selected model refuses f_report_unbound. Other refusals are EXPERIMENT_IDENTITY_CONFLICT; nothing is imputed."
       R2_limits: "Amendment 1's bounded run and resource refusals are unchanged. No partial report after any refusal or late failure."
       R3_determinism: "Model A adds no randomness."
-      R4_receipts: "Receipts bind exactly what was loaded (receipts.binds); a change refuses at replay. Receipts from another fill model or variant are never reused."
+      R4_receipts: "Receipts bind what was loaded (receipts.field_names); a change under inputs_hash refuses at replay. The constants file hash is recorded only; constants_id refuses any change to the constants. Receipts from another fill model or variant are never reused."
       R5_identity: "A constants_id or variant that differs from the run's pinned values refuses. A model A run never prices on F or current marks as primary."
       R6_causality: "Amendment 1's entry and exit date rules are unchanged; the constants are fixed before the run. See causality_limit."
       progress: "Stage, load and pricing progress goes to stderr as under Amendment 1."
@@ -201,7 +202,7 @@ amendments:
         - id: "S1"
           scope: "Walking skeleton through the real driver: select model A from this entry, load the pinned constants, price entry and exit, bind receipts, the --fill-variant option for both variants, end-to-end tests; and the two added raw-row columns."
           files: "run.py, size_width_{driver,f_select,f_quotes,f_fills,f_counts,f_store}, size_width_a_fills"
-          estimate: "built as pull request 3133: 117 added production lines"
+          estimate: "~140 / ~200 / ~150 (built and merged as pull request 3133)"
           after: "none"
           failure_semantics: "R1: failure_semantics.R1_inputs, constants checked before any quote is read. R2: no partial out-dir results or report after a late failure. R3: no randomness added. R4, R5, R6: as in failure_semantics; progress to stderr."
           artifacts: "inputs and stage receipts (receipts.field_names); raw exit rows (exit_rows_artifact)"
@@ -216,7 +217,7 @@ amendments:
     open_issues:
       - "Issue 3091 (the replay donor pool ignores label availability, so exp_pnl_sim and the trailing cutoff may use slightly late donors) is NOT addressed by this amendment and stays open."
     registration:
-      planned_rows: "Three EXP-189 PLANNED rows: the original, Amendment 1 and this one, last. The supervisor appends the third after this entry, the model A code and the added raw-row columns are all on main. No agent writes experiments/LEDGER.csv."
+      planned_rows: "Three EXP-189 PLANNED rows: the original, Amendment 1 and this one, last. The supervisor appends the third after this entry, the model A code (with its raw-row columns) are on main. No agent writes experiments/LEDGER.csv."
       smoke: "Amendment 1's no-ledger smoke (design A1.9 step 3: the same 50-ticker rule, all stages, fresh /tmp out-dir), run under model A before the full run. No smoke result tunes a constant or a rule."
       full_run: "All stages in a fresh out-dir; no earlier receipt, month file or tuning is reused or deleted."
 label_2025: "2025 NOT blind for widths"
