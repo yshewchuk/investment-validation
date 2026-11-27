@@ -19,7 +19,7 @@ from experiments.size_pnl_contrast import RESAMPLES, SEED
 from experiments.size_pnl_prereg import _read_bounded
 from experiments.size_pnl_readers import read_labels, read_production
 from experiments.size_quantile_arm_verdict import judge_arm, stage_a_verdict
-from experiments.size_quantile_baselines import pool_quantiles
+from experiments.size_quantile_baselines import lead1_decision_dates, pool_quantiles
 from experiments.size_quantile_calibration import MIN_TAIL, PERIOD, QCOLS, calibrate, predictions_from_receipts, score_crps
 from experiments.size_quantile_prereg import SPEC_PATH, load_spec, require_preregistration
 from experiments.size_quantile_sources import training_labels
@@ -59,10 +59,11 @@ def _score(sealed, walk, production, fetch, admitted):
     events = targets.loc[ids, ["event_date", "ticker", "label_end"]].assign(y=y.reindex(ids).to_numpy(float),
         pred_move=production["frame"]["pred_move"].reindex(ids).to_numpy(float), m0=lambda d: d["pred_move"],
         m3=np.nan)
+    events["decision_date"] = lead1_decision_dates(sealed["context"]["target_events"], events.index)
     arms, pools, floors = calibrate(predictions, events)
     with stage("stage A CRPS and verdicts"):
         labels = read_labels(fetch, admitted)  # after the walk: predictions are written before outcomes are read
-        b0_hash = content_hash(sorted(_plain(labels[["abs_move", "crush_pct_iv30"]].reset_index()
+        b0_hash = content_hash(sorted(_plain(labels[["abs_move", "crush_pct_iv30", "available"]].reset_index()
                                              .values.tolist())))
         raw = pd.concat([pd.DataFrame(np.asarray(r["raw"]["{}x{}".format(*r["configuration"])], float),
                                       index=r["event_ids"], columns=QCOLS) for r in walk.values()])

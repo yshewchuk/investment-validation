@@ -545,8 +545,11 @@ def skeleton():
     events = pd.DataFrame({"event_date": dates, "ticker": ["DNR"] * 2000 + [TICKERS[k % 3] for k in j],
                            "y": y, "m0": pred, "m3": pred + 0.1}, index=ids)
     table = pd.DataFrame({"event_date": d_date, "pred_move": d_pred, "pred_crush": 0.0}, index=ids[:2000])
-    labels = pd.DataFrame({"abs_move": d_y, "crush_pct_iv30": 0.0}, index=ids[:2000])
-    b0 = pool_quantiles(table, labels, pd.DataFrame({"event_date": dates, "pred_move": pred}, index=ids))
+    available = (d_date + pd.Timedelta(days=1)).strftime("%Y-%m-%d").to_numpy()
+    labels = pd.DataFrame({"abs_move": d_y, "crush_pct_iv30": 0.0, "available": available}, index=ids[:2000])
+    targets = pd.DataFrame({"event_date": dates, "decision_date": dates - pd.Timedelta(days=1), "pred_move": pred},
+                           index=ids)
+    b0 = pool_quantiles(table, labels, targets)
     label_end = (dates + pd.Timedelta(days=5)).strftime("%Y-%m-%d").to_numpy()
     qhat = pd.DataFrame(pred[:, None] + OFFS, index=ids, columns=QCOLS)
     arms, _, _ = calibrate(qhat, pd.DataFrame({"event_date": dates, "y": y, "label_end": label_end}, index=ids))

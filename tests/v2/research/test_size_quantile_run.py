@@ -5,6 +5,7 @@ import hashlib
 import inspect
 import json
 import time
+from datetime import date, timedelta
 from types import SimpleNamespace
 
 import pandas as pd
@@ -183,7 +184,8 @@ def test_full_run_writes_run_inputs_before_the_first_fit(monkeypatch, tmp_path):
     assert run_inputs["sealed_binding"] == base.BINDING
     assert "y0_check" in report["not_included"]
     labels = world["labels"]
-    b0 = content_hash(sorted([e, float(labels.at[e, "abs_move"]), float(labels.at[e, "crush_pct_iv30"])]
+    b0 = content_hash(sorted([e, float(labels.at[e, "abs_move"]), float(labels.at[e, "crush_pct_iv30"]),
+                              (date.fromisoformat(world["dates"][e]) + timedelta(days=1)).isoformat()]
                              for e in labels.index))
     assert report["inputs"]["b0_labels_hash"] == b0
     label_calls = base._label_fetches(calls)
