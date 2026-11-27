@@ -170,7 +170,10 @@ def test_fvf_id_refuses_source_file_over_read_cap(tmp_path):
 
 def test_source_set_matches_fair_value_modules():
     names = {p.name for p in SRC.glob("fair_value_*.py")}
-    assert set(run.SOURCE_FILES) | {"fair_value_run.py"} == names
+    # fair_value_fit.py computes no mark, so it is deliberately not in fvf_id; it is listed here only to match the module set.
+    assert set(run.SOURCE_FILES) | {"fair_value_run.py", "fair_value_fit.py"} == names
+    for name in ["fair_value_run.py", *run.SOURCE_FILES]:
+        assert "fair_value_fit" not in (SRC / name).read_text(encoding="utf-8"), name
 
 
 def test_require_fvf_id_accepts_pin_and_refuses_another():
