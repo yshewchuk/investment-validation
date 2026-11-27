@@ -38,7 +38,7 @@ def test_memory_error_inside_calibrate_becomes_resource_limit_exceeded(monkeypat
     qhat = [[float(k) for k in range(7)]] * 2
     predictions = pd.DataFrame(qhat, index=["d", "a"], columns=calib.QCOLS)
     events = pd.DataFrame({"event_date": ["2020-01-10", "2020-02-15"], "y": [1.0, np.nan],
-                           "label_end": ["2020-01-20", None]}, index=["d", "a"])
+                           "label_end": ["2020-01-20", None], "available": ["2020-01-21", None]}, index=["d", "a"])
     with pytest.raises(OpsError) as exc:
         calib.calibrate(predictions, events)
     assert exc.value.problem.code == "RESOURCE_LIMIT_EXCEEDED"
@@ -87,11 +87,17 @@ def _chain_rows(n_hi=50, n_lo=50, later=False):
     return rows
 
 
+def _day_after(text):
+    """The ISO date one day after an ISO date: a label's native availability when it is label_end + 1 day."""
+    return (pd.Timestamp(text) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+
 def _frames(rows):
     ids = [r[0] for r in rows]
     preds = pd.DataFrame([r[3] for r in rows], index=ids, columns=calib.QCOLS)
     events = pd.DataFrame({"event_date": [r[1] for r in rows], "y": [r[4] for r in rows],
-                           "label_end": [r[2] for r in rows]}, index=ids)
+                           "label_end": [r[2] for r in rows], "available": [_day_after(r[2]) for r in rows]},
+                          index=ids)
     return preds, events
 
 
@@ -420,7 +426,7 @@ def test_non_finite_prediction_is_flagged_never_counted_and_takes_precedence():
 def test_extra_events_outside_the_predictions_are_ignored():
     preds = pd.DataFrame([_qrow(0)], index=["a"], columns=calib.QCOLS)
     events = pd.DataFrame({"event_date": ["2020-03-01", None], "y": [1.0, -1.0],
-                           "label_end": ["2020-03-05", None]}, index=["a", "zzz"])
+                           "label_end": ["2020-03-05", None], "available": ["2020-03-06", None]}, index=["a", "zzz"])
     arms, _, _ = calib.calibrate(preds, events)
     assert arms["Q"].loc["a", "reason"] == "calibration_burn_in"
 
@@ -436,7 +442,8 @@ def test_extra_events_outside_the_predictions_are_ignored():
 ])
 def test_refusals_on_identity_dates_and_labels(pred_ids, ev_ids, dates, labels, y):
     preds = pd.DataFrame([_qrow(0)] * len(pred_ids), index=pred_ids, columns=calib.QCOLS)
-    events = pd.DataFrame({"event_date": dates, "y": y, "label_end": labels}, index=ev_ids)
+    events = pd.DataFrame({"event_date": dates, "y": y, "label_end": labels, "available": ["2020-01-21"] * len(ev_ids)},
+                          index=ev_ids)
     with pytest.raises(ValueError):
         calib.calibrate(preds, events)
 
@@ -446,11 +453,12 @@ def test_refusals_on_identity_dates_and_labels(pred_ids, ev_ids, dates, labels, 
     ([], ["event_date"]),
     ([], ["y"]),
     ([], ["label_end"]),
+    ([], ["available"]),
 ])
 def test_missing_columns_raise_value_error(drop_pred, drop_event):
     preds = pd.DataFrame([_qrow(0)], index=["a"], columns=calib.QCOLS).drop(columns=drop_pred)
-    events = pd.DataFrame({"event_date": ["2020-01-10"], "y": [1.0], "label_end": ["2020-01-20"]},
-                          index=["a"]).drop(columns=drop_event)
+    events = pd.DataFrame({"event_date": ["2020-01-10"], "y": [1.0], "label_end": ["2020-01-20"],
+                           "available": ["2020-01-21"]}, index=["a"]).drop(columns=drop_event)
     with pytest.raises(ValueError):
         calib.calibrate(preds, events)
 
@@ -458,7 +466,7 @@ def test_missing_columns_raise_value_error(drop_pred, drop_event):
 def test_malformed_label_end_text_raises_value_error():
     preds = pd.DataFrame([_qrow(0), _qrow(1)], index=["x", "t"], columns=calib.QCOLS)
     events = pd.DataFrame({"event_date": ["2020-01-10", "2020-03-01"], "y": [1.0, np.nan],
-                           "label_end": ["not-a-date", None]}, index=["x", "t"])
+                           "label_end": ["not-a-date", None], "available": ["2020-01-11", None]}, index=["x", "t"])
     with pytest.raises(ValueError):
         calib.calibrate(preds, events)  # x is in the window of month 2020-03, so its label is parsed
 
@@ -468,15 +476,16 @@ def test_malformed_label_end_text_raises_value_error():
 def test_finite_y_row_in_no_donor_window_still_needs_an_iso_label_end(label_end):
     preds = pd.DataFrame([_qrow(0)], index=["a"], columns=calib.QCOLS)  # the only event: no later month uses it
     events = pd.DataFrame({"event_date": ["2020-01-10"], "y": [1.0],
-                           "label_end": np.array([label_end], dtype=object)}, index=["a"])
+                           "label_end": np.array([label_end], dtype=object), "available": ["2020-01-21"]}, index=["a"])
     with pytest.raises(ValueError, match="label_end"):
         calib.calibrate(preds, events)
 
 
-def test_nan_y_row_keeps_any_label_end():
+def test_nan_y_row_keeps_any_label_end_and_any_available():
     preds = pd.DataFrame([_qrow(0)], index=["a"], columns=calib.QCOLS)
     events = pd.DataFrame({"event_date": ["2020-01-10"], "y": [np.nan],
-                           "label_end": np.array(["not-a-date"], dtype=object)}, index=["a"])
+                           "label_end": np.array(["not-a-date"], dtype=object),
+                           "available": np.array(["not-a-date"], dtype=object)}, index=["a"])
     arms, _, _ = calib.calibrate(preds, events)  # label_end is never read: the event has no donors
     assert arms["Q"].loc["a", "reason"] == "calibration_burn_in"
 
@@ -533,7 +542,8 @@ def _crps_frames():
     rows += [("t1", "2023-07-05", "2023-07-10", 7.0), ("t2", "2024-06-05", "2024-06-10", 7.0),
              ("t3", "2025-12-05", "2025-12-10", 7.0), ("t4", "2023-07-06", "2023-07-10", np.nan)]
     events = pd.DataFrame({"event_date": [r[1] for r in rows], "label_end": [r[2] for r in rows],
-                           "y": [r[3] for r in rows]}, index=[r[0] for r in rows])
+                           "available": [_day_after(r[2]) for r in rows], "y": [r[3] for r in rows]},
+                          index=[r[0] for r in rows])
     frame = pd.DataFrame([CRPS_Q] * len(rows), index=events.index, columns=calib.QCOLS)
     frame["reason"] = None
     return events, frame
@@ -568,18 +578,128 @@ def _set(events, id_, column, value):
     return events
 
 
+DATE_MSG = "event_date must be set; y must be finite or NaN and non-negative"
+LABEL_MSG = "a finite y needs a label_end and available that are ISO dates"
+INDEX_MSG = "predictions and events must have unique indexes"
+
+
 @pytest.mark.parametrize("name", ["Q", "B0"])
-@pytest.mark.parametrize("mutate", [
-    lambda e: _set(e, "t1", "y", -1.0),                  # negative y
-    lambda e: _set(e, "t1", "y", np.inf),                # +inf y
-    lambda e: pd.concat([e, e.loc[["t1"]]]),             # duplicate events index
-    lambda e: _set(e, "t1", "event_date", None),         # null event_date
-    lambda e: _set(e, "t1", "label_end", None),          # finite y, null label_end
-    lambda e: _set(e, "t1", "label_end", "not-a-date"),  # finite y, non-ISO label_end
-    lambda e: _set(e, "t3", "label_end", None),          # t3 (Dec 2025): no later month reads its label
-    lambda e: _set(e, "t3", "label_end", "2025-13-10"),  # same row, non-ISO label_end
+@pytest.mark.parametrize("mutate, message", [
+    (lambda e: _set(e, "t1", "y", -1.0), DATE_MSG),                  # negative y
+    (lambda e: _set(e, "t1", "y", np.inf), DATE_MSG),                # +inf y
+    (lambda e: pd.concat([e, e.loc[["t1"]]]), INDEX_MSG),            # duplicate events index
+    (lambda e: _set(e, "t1", "event_date", None), DATE_MSG),         # null event_date
+    (lambda e: _set(e, "t1", "label_end", None), LABEL_MSG),         # finite y, null label_end
+    (lambda e: _set(e, "t1", "label_end", "not-a-date"), LABEL_MSG),  # finite y, non-ISO label_end
+    (lambda e: _set(e, "t3", "label_end", None), LABEL_MSG),         # t3 is finite too: refused, not skipped
+    (lambda e: _set(e, "t3", "label_end", "2025-13-10"), LABEL_MSG),  # same row, non-ISO label_end
+    (lambda e: _set(e, "t1", "available", None), LABEL_MSG),         # finite y, null available
+    (lambda e: _set(e, "t1", "available", "2023-13-01"), LABEL_MSG),  # finite y, non-ISO available
 ])
-def test_score_crps_refuses_what_calibrate_refuses(name, mutate):
+def test_score_crps_refuses_what_calibrate_refuses(name, mutate, message):
     events, frame = _crps_frames()
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=message):
         calib.score_crps({name: frame}, mutate(events), {})
+
+
+@pytest.mark.parametrize("drop", [["q40"], ["reason"]])
+def test_score_crps_frame_missing_a_column_raises_value_error(drop):
+    events, frame = _crps_frames()
+    with pytest.raises(ValueError, match="needs the seven QCOLS and reason"):
+        calib.score_crps({"B1": frame.drop(columns=drop)}, events, {})
+
+
+def test_thin_tail_month_keeps_its_quantile_values_and_gets_no_crps():
+    rows = _chain_rows(29, 50)
+    preds, events = _frames(rows)
+    arms, pools, _ = calib.calibrate(preds, events)
+    _, qb, yb = _pick(rows, "b")
+    _, qs, ys = _pick(rows, "s")
+    t_ids, qt, _ = _pick(rows, "t")
+    expected = _oracle_q(qt, np.vstack([qb, qs]), np.concatenate([yb, ys]))
+    np.testing.assert_allclose(arms["Q"].loc[t_ids, calib.QCOLS].to_numpy(), expected, rtol=0, atol=1e-9)
+    assert arms["Q"].loc[t_ids, "reason"].isna().all()
+    assert ("Q", T_MONTH) not in pools  # thin: the quantiles are kept, only the pool is absent
+    out, _, _ = calib.score_crps({"Q": arms["Q"]}, events, pools)
+    assert out["Q"].loc[t_ids, "crps"].isna().all()
+
+
+def test_b0_floor_row_counts_bound_events_by_hand():
+    events, frame = _crps_frames()
+    frame = frame.copy()
+    frame.loc["t1", calib.QCOLS] = [6.0, 6.5, 7.0, 7.0, 7.0, 7.1, 7.25]  # q90 - q50 = 0.25: the upper floor binds
+    _, _, floors = calib.score_crps({"B0": frame}, events, {})
+    rows = {r["year"]: r for r in floors}
+    # 2023: 60 donors, t1 and t4 (t4 has finite quantiles but no label, and the floor row counts quantiles only).
+    assert rows[2023]["events"] == 62
+    assert (rows[2023]["event_hi_bound"], rows[2023]["event_lo_bound"]) == (1, 0)
+    assert rows[2023]["event_hi_share"] == pytest.approx(1 / 62)
+    assert (rows[2024]["events"], rows[2024]["event_hi_bound"]) == (1, 0)
+
+
+# ---------- 10. a month pool needs each donor's native availability printed before the month ----------
+
+def _tail_frames(name, first_upper_available):
+    """Thirty upper-tail donors (y = 15, above Q90 = 11) and thirty lower-tail donors (y = 0, below Q10 = 5), dated
+    2023-06-15 with label_end 2023-06-20, and the target t dated 2024-03-05 (y = 7, scored in the March 2024 pool).
+    Donor d00 is an upper-tail donor with native availability first_upper_available; the others are available
+    2024-02-29."""
+    ids = [f"d{i:02d}" for i in range(60)] + ["t"]
+    available = ["2024-02-29"] * 60 + ["2024-03-11"]
+    available[0] = first_upper_available
+    events = pd.DataFrame({"event_date": ["2023-06-15"] * 60 + ["2024-03-05"],
+                           "label_end": ["2023-06-20"] * 60 + ["2024-03-10"], "available": available,
+                           "y": [15.0] * 30 + [0.0] * 30 + [7.0]}, index=ids)
+    frame = pd.DataFrame([CRPS_Q] * len(ids), index=ids, columns=calib.QCOLS)
+    frame["reason"] = None
+    return events, {name: frame}
+
+
+@pytest.mark.parametrize("name", ["S", "B1", "B2", "B3"])
+@pytest.mark.parametrize("first_upper_available, excluded", [
+    ("2024-02-29", 0),  # the day before March 2024: printed before it, so 30 + 30 donors and a pool
+    ("2024-03-01", 1),  # the month start itself: not printed before it, so the upper pool has 29 donors: thin
+    ("2024-03-02", 1),  # after the month start: excluded the same way
+])
+def test_non_q_month_pool_needs_native_availability_before_the_month(name, first_upper_available, excluded):
+    events, frames = _tail_frames(name, first_upper_available)
+    out, exclusions, _ = calib.score_crps(frames, events, {})
+    got = {(r["arm"], r["year"]): (r["scored"], r["crps_excluded"]) for r in exclusions}
+    assert got[(name, 2024)] == (1, excluded)
+    crps = out[name].loc["t", "crps"]
+    if excluded:
+        assert np.isnan(crps)
+    else:
+        assert crps == pytest.approx(_dense_crps(7.0, CRPS_Q, np.full(30, -5 / 3), np.full(30, 4 / 3)), abs=1e-4)
+
+
+@pytest.mark.parametrize("available, expected", [
+    ("2021-02-28", None),                   # the day before March 2021: all 500 calibration donors count, scored
+    ("2021-03-01", "calibration_burn_in"),  # the month start itself: not printed before it, so 499 donors
+])
+def test_q_calibration_pool_needs_native_availability_before_the_month(available, expected):
+    rows = [(f"c{i:03d}", "2020-03-02", "2020-03-10", _qrow(i), 1.0) for i in range(500)]
+    rows.append(("t", "2021-03-15", "2021-03-20", _qrow(0), 1.0))
+    preds, events = _frames(rows)
+    events = _set(events, "c000", "available", available)
+    arms, _, _ = calib.calibrate(preds, events)
+    got = arms["Q"].loc["t", "reason"]
+    if expected is None:  # a scored row's reason is NaN in pandas, not None
+        assert pd.isna(got)
+    else:
+        assert got == expected
+
+
+def test_score_crps_refuses_a_missing_available_column():
+    events, frame = _crps_frames()
+    with pytest.raises(ValueError, match="available"):
+        calib.score_crps({"B1": frame}, events.drop(columns="available"), {})
+
+
+@pytest.mark.parametrize("available", [None, float("nan"), "not-a-date", "2020-13-01", 20200110])
+def test_finite_y_row_needs_an_iso_available_date(available):
+    preds = pd.DataFrame([_qrow(0)], index=["a"], columns=calib.QCOLS)
+    events = pd.DataFrame({"event_date": ["2020-01-10"], "y": [1.0], "label_end": ["2020-01-20"],
+                           "available": np.array([available], dtype=object)}, index=["a"])
+    with pytest.raises(ValueError, match="ISO dates"):
+        calib.calibrate(preds, events)
