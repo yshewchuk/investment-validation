@@ -203,6 +203,30 @@ def test_drops_group_by_year_and_both_reasons():
                    (2024, "scored", "pool_too_small", 1)]
 
 
+# ---------- c2. Q4 option B: a NaN in-period y is label_missing: in the denominator, never paired ----------
+
+def test_nan_in_period_y_stays_admitted_and_is_label_missing_on_both_sides():
+    events = make_events(per_quarter=4)
+    arm, b0 = perfect_vs_shift(events)  # quantiles come from the true y, so they are finite before the label drops
+    events.loc[["2024Q1-0", "2024Q1-1"], "y"] = np.nan
+    res = tables.evaluate_arm("S", arm, b0, events, resamples=R)
+    share = res["share"].set_index("period")
+    assert (share.loc["2024", "admitted"], share.loc["2024", "paired"]) == (16, 14)
+    assert "2024Q1-0" not in res["paired_ids"] and "2024Q1-1" not in res["paired_ids"]
+    assert (2024, "label_missing", "label_missing", 2) in [tuple(r) for r in res["drops"].itertuples(index=False)]
+    assert res["status"] == "testable"
+
+
+def test_b0_crps_is_the_mean_and_count_of_finite_paired_b0_crps():
+    events, arm, b0 = tiny_frames()[:3]
+    b0 = b0.assign(crps=[0.1, np.nan])
+    res = tables.evaluate_arm("S", arm, b0, events, resamples=R)
+    pooled = row_of(res["tables"], "pooled", "pooled")
+    assert (pooled["b0_crps"], pooled["b0_n_crps"]) == (pytest.approx(0.1), 1)
+    empty = row_of(res["tables"], "quarter", "2023Q4")
+    assert np.isnan(empty["b0_crps"]) and empty["b0_n_crps"] == 0
+
+
 # ---------- d. outside periods; a period with no pairs ----------
 
 def test_events_outside_the_periods_are_ignored():
@@ -374,7 +398,6 @@ CASES = {
     "arm id not in events": lambda e, a, b: (a, b, e.iloc[1:], None),
     "null event_date": lambda e, a, b: (a, b, _edit(e, e.index[0], "event_date", pd.NaT), None),
     "null in-period ticker": lambda e, a, b: (a, b, _edit(e, e.index[0], "ticker", None), None),
-    "nan in-period y": lambda e, a, b: (a, b, _edit(e, e.index[0], "y", np.nan), None),
     "negative in-period y": lambda e, a, b: (a, b, _edit(e, e.index[0], "y", -1.0), None),
     "scored row with nan quantile": lambda e, a, b: (_edit(a, e.index[0], "q50", np.nan), b, e, None),
     "raw missing a paired id": lambda e, a, b: (a, b, e, a[QCOLS].iloc[1:]),
@@ -400,16 +423,15 @@ MESSAGES = {
     "b0 missing a quantile": "events, arm, b0 and raw need their columns",
     "arm id not in events": "arm and b0 ids must all be in events",
     "null event_date": "event_date must not be null",
-    "null in-period ticker": "in-period events need a ticker and finite non-negative y",
-    "nan in-period y": "in-period events need a ticker and finite non-negative y",
-    "negative in-period y": "in-period events need a ticker and finite non-negative y",
+    "null in-period ticker": "in-period events need a ticker and non-negative, non-infinite y",
+    "negative in-period y": "in-period events need a ticker and non-negative, non-infinite y",
     "scored row with nan quantile": "scored rows need seven finite quantiles",
     "raw missing a paired id": "raw needs seven finite values for every paired event",
     "raw with a nan value": "raw needs seven finite values for every paired event",
     "b0 duplicate index": "indexes must be unique",
     "raw duplicate index": "indexes must be unique",
     "b0 id not in events": "arm and b0 ids must all be in events",
-    "in-period inf y": "in-period events need a ticker and finite non-negative y",
+    "in-period inf y": "in-period events need a ticker and non-negative, non-infinite y",
     "scored arm row with inf quantile": "scored rows need seven finite quantiles",
     "scored b0 row with nan quantile": "scored rows need seven finite quantiles",
     "raw with an inf value": "raw needs seven finite values for every paired event",

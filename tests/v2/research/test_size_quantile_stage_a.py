@@ -107,7 +107,7 @@ def _fake_fit(boom=False):
 
 
 def _install(monkeypatch, world, *, omit=(), regress=None, read=None):
-    """Fake the label reader (dropping `omit` on the evaluation read only) and the fit regression."""
+    """Fake the label reader (dropping `omit` on the evaluation read only) and the walk's fit regression."""
     def fake_read(sealed, event_ids, labels_before):
         drop = set(omit) if labels_before == "2026-02-01" else set()
         kept = [e for e in event_ids if e not in drop]
@@ -280,8 +280,8 @@ def test_full_run_passes_and_every_checked_number_matches_the_oracle(full_run):
     assert full_run["stdout"] == ""
     assert "[quantile stage A] start" in full_run["stderr"] and "done in" in full_run["stderr"]
     assert "stage_b_arms" not in doc and "stage_b_arms" not in (out / REPORT).read_text(encoding="utf-8")
-    assert doc["not_included"] == ["y0_check", "S", "B1", "B2", "B3", "baseline_crps", "headline_loss_flags",
-                                   "b0_conditional_value", "unconditional_width_terciles"]
+    assert doc["not_included"] == ["y0_check", "S", "B1", "B2", "B3", "headline_loss_flags", "b0_conditional_value",
+                                   "unconditional_width_terciles"]
     assert sorted(p.name for p in out.iterdir()) == ["fits", REPORT]
     inputs = doc["inputs"]
     assert inputs["production_binding"] == PRODUCTION_BINDING and inputs["production_table_hash"] == TABLE_HASH
@@ -349,24 +349,15 @@ def test_history_is_the_arms_own_scored_out_of_sample_rows(monkeypatch, tmp_path
     monkeypatch.setattr(stage_a, "judge_arm", recording)
     _run(world, out, guard)
 
-    donor_pools = _donor_pools(world)
-    months = [date(year, month, 1) for year in range(2022, 2026) for month in range(1, 13)]
-    scored = set()
-    for month in months:
-        hi, lo = donor_pools(month)
-        if len(hi) >= 50 and len(lo) >= 50:
-            scored.add(month)
-    assert any(m.year == 2022 and m not in scored for m in months)
-    assert all(m in scored for m in months if m.year == 2025)
+    # Q3: a thin tail keeps its quantiles, so every window event is a scored Q_raw row and the history is all of them.
     window = [e for e in world["events"] if "2022-01-01" <= e["date"] <= "2025-12-31"]
-    expected = [e for e in window if date.fromisoformat(e["date"]).replace(day=1) in scored]
     history = judged["Q_raw"]
-    assert len(history) == len(expected) < len(window)
+    assert len(history) == len(window)
     got_pairs = sorted(zip(history["q50"].tolist(), history["y"].tolist()))
-    want_pairs = sorted((max(world["mu"][e["id"]], 0.0), world["y"][e["id"]]) for e in expected)
+    want_pairs = sorted((max(world["mu"][e["id"]], 0.0), world["y"][e["id"]]) for e in window)
     np.testing.assert_allclose(np.array(got_pairs), np.array(want_pairs))
     got_available = sorted(pd.to_datetime(history["label_available"]))
-    want_available = sorted(pd.Timestamp(e["date"]) + pd.Timedelta(days=2) for e in expected)
+    want_available = sorted(pd.Timestamp(e["date"]) + pd.Timedelta(days=2) for e in window)
     assert got_available == want_available
 
 
@@ -431,7 +422,7 @@ def test_production_is_read_before_fits_and_labels_only_after_every_fit(monkeypa
     production = [call for call in fetched if "pred_abs_move" in call["columns"]]
     assert len(production) == 1 and not production[0]["fits"]
     labels = _label_fetches(fetched)
-    assert labels and all(call["fits"] for call in labels)
+    assert labels and all(call["fits"] for call in labels)  # every walk fit is written before any outcome is read
     assert fetched.index(production[0]) < fetched.index(labels[0])
 
 
@@ -479,14 +470,24 @@ def test_late_failure_leaves_no_report_and_no_temp_file(monkeypatch, tmp_path):
     assert (out / "fits" / "fit_2025.json").exists()
 
 
-def test_in_period_admitted_event_without_a_label_refuses_and_drops_nothing(monkeypatch, tmp_path):
+def test_in_period_event_without_a_label_is_counted_unpaired_not_refused(monkeypatch, tmp_path, full_run):
     world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
-    missing = next(e["id"] for e in world["events"] if "2023-07-01" <= e["date"] <= "2025-12-31")
-    _install(monkeypatch, world, omit=(missing,))
-    with pytest.raises(OpsError) as exc:
-        _run(world, out, guard)
-    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "admitted_label_missing")
-    assert not (out / REPORT).exists()
+    picks = [next(e["id"] for e in world["events"] if e["date"].startswith(prefix)) for prefix in
+             ("2023-08", "2024-05", "2025-11")]  # Q4 option B: three in-period events lose their evaluation label
+    _install(monkeypatch, world, omit=picks)
+    doc = _run(world, out, guard)
+    assert json.loads((out / REPORT).read_text(encoding="utf-8")) == doc
+    assert doc["unlabelled_in_period"] == {"2023": 1, "2024": 1, "2025": 1}
+    assert doc["inputs"]["unlabelled_outside_periods"] == []
+    pooled = next(r for r in full_run["doc"]["arms"]["Q_raw"]["share"] if r["period"] == "pooled")
+    now = next(r for r in doc["arms"]["Q_raw"]["share"] if r["period"] == "pooled")
+    assert now["admitted"] == pooled["admitted"] == 4500  # the denominator still counts them
+    assert now["paired"] == pooled["paired"] - 3  # and only they leave the paired count
+    assert not {r["event_id"] for r in doc["arms"]["Q_raw"]["conditional"]["rows"]} & set(picks)
+    drops = [(d["year"], d["arm_reason"], d["b0_reason"], d["n"]) for d in doc["arms"]["Q_raw"]["drops"]
+             if d["arm_reason"] == "label_missing"]
+    assert sorted(drops) == [(2023, "label_missing", "label_missing", 1), (2024, "label_missing", "label_missing", 1),
+                             (2025, "label_missing", "label_missing", 1)]
 
 
 def test_unlabelled_event_outside_the_periods_is_recorded_not_refused(monkeypatch, tmp_path):
@@ -509,6 +510,8 @@ def test_fit_failure_publishes_a_not_testable_report(monkeypatch, tmp_path):
     assert doc["inputs"]["unlabelled_outside_periods"] is None
     assert doc["inputs"]["b0_labels_hash"] is None and not _label_fetches(fetched)
     assert doc["arms"] == {} and doc["fit_status"] == {"2022": "fit_failed"} and doc["floor_report"] == []
+    assert doc["unlabelled_in_period"] == {} and doc["crps_exclusions"] == []
+    assert doc["inputs"]["evaluation_labels_hash"] is None
     assert json.loads((out / REPORT).read_text(encoding="utf-8")) == doc
 
 
@@ -580,3 +583,88 @@ def test_b0_rows_match_an_independent_design_rule_oracle(full_run):
     miss = y[:, None] - q
     pinball = np.maximum(levels * miss, (levels - 1) * miss)
     assert table["b0_mean_pinball"] == pytest.approx(pinball.mean(), rel=1e-9)
+
+
+def test_arms_schema_and_not_included_list(full_run):
+    doc = full_run["doc"]
+    assert doc["schema_version"] == "size_quantile_stage_a.v2"
+    assert set(doc["arms"]) == {"Q", "Q_raw"} and set(doc["arm_verdicts"]) == {"Q", "Q_raw"}
+    assert doc["not_included"] == ["y0_check", "S", "B1", "B2", "B3", "headline_loss_flags", "b0_conditional_value",
+                                   "unconditional_width_terciles"]
+    assert not {"arm_s", "headline_loss_flags"} & set(doc)
+    assert not {"arm_s_receipt_hashes", "b2_implied_hash"} & set(doc["inputs"])
+    assert {"crps_exclusions", "unlabelled_in_period", "floor_report"} <= set(doc)
+
+
+def _b0_pool_oracle(world):
+    """B0 quantiles and month pools from the design rule, in plain numpy. Donors are the 2022+ events (the B0 frame's
+    rows), dated in [M - 12 months, M) with label_end + 1 day < M, scored by their own B0 quantiles from _b0_oracle.
+    A tail with under 30 donors makes the month thin. Returns (quantiles_of, pool_of); pool_of(month) is (d_lo, d_hi)
+    or None."""
+    oracle = _b0_oracle(world)
+    donors = [(date.fromisoformat(e["date"]), date.fromisoformat(e["label_end"]) + timedelta(days=1),
+               world["y"][e["id"]], oracle(e["id"])[0]) for e in world["events"] if e["date"] >= "2022-01-01"]
+    pools = {}
+
+    def pool_of(month):
+        if month not in pools:
+            start = month.replace(year=month.year - 1)
+            hi, lo = [], []
+            for day, ready, y, q in donors:
+                if not (start <= day < month and ready < month):
+                    continue
+                if y > q[6]:
+                    hi.append((y - q[6]) / max(q[6] - q[3], 0.5))
+                if y < q[0]:
+                    lo.append((y - q[0]) / max(q[3] - q[0], 0.5))
+            pools[month] = (np.array(lo), np.array(hi)) if min(len(lo), len(hi)) >= 30 else None
+        return pools[month]
+
+    return oracle, pool_of
+
+
+def test_b0_crps_in_the_quarter_table_matches_an_independent_oracle(full_run):
+    world, doc = full_run["world"], full_run["doc"]
+    oracle, pool_of = _b0_pool_oracle(world)
+    quarter = [e for e in world["events"] if "2024-04-01" <= e["date"] <= "2024-06-30"]
+    row = next(t for t in doc["arms"]["Q_raw"]["tables"] if t["slice"] == "quarter" and t["label"] == "2024Q2")
+    grid = (np.arange(20000) + 0.5) / 20000
+    scores = []
+    for event in quarter:
+        pool = pool_of(date.fromisoformat(event["date"]).replace(day=1))
+        if pool is None:
+            continue
+        d_lo, d_hi = pool
+        q = oracle(event["id"])[0]
+        s_lo, s_hi = max(q[3] - q[0], 0.5), max(q[6] - q[3], 0.5)
+        lower = np.maximum(0.0, q[0] + s_lo * np.quantile(d_lo, np.clip(grid / 0.1, 0.0, 1.0)))
+        upper = q[6] + s_hi * np.quantile(d_hi, np.clip((grid - 0.9) / 0.1, 0.0, 1.0))
+        Q = np.where(grid > 0.9, upper, np.where(grid < 0.1, lower, np.interp(grid, LEVELS, q)))
+        y = world["y"][event["id"]]
+        scores.append(2 * np.mean(np.where(y >= Q, grid * (y - Q), (1 - grid) * (Q - y))))
+    assert row["b0_n_crps"] == len(scores) > 0
+    assert row["b0_crps"] == pytest.approx(float(np.mean(scores)), rel=1e-3)
+
+
+def test_crps_exclusions_and_pooled_crps_counts_match_the_oracles(full_run):
+    world, doc = full_run["world"], full_run["doc"]
+    _, pool_of = _b0_pool_oracle(world)
+    excl = {(r["arm"], r["year"]): r for r in doc["crps_exclusions"]}
+    # The report is JSON: row order is not part of the contract, so compare by (arm, year) and reject duplicate keys.
+    assert len(excl) == len(doc["crps_exclusions"]) == 9
+    assert sorted(excl) == sorted((arm, year) for arm in ("Q", "Q_raw", "B0") for year in (2023, 2024, 2025))
+    in_period = [e for e in world["events"] if "2023-07-01" <= e["date"] <= "2025-12-31"]
+    for year in (2023, 2024, 2025):
+        events_of_year = [e for e in in_period if e["date"].startswith(str(year))]
+        for arm in ("Q", "Q_raw", "B0"):
+            assert excl[(arm, year)]["scored"] == len(events_of_year)  # every in-period event is scored here
+        missing = sum(pool_of(date.fromisoformat(e["date"]).replace(day=1)) is None for e in events_of_year)
+        assert excl[("B0", year)]["crps_excluded"] == missing
+    pooled = {arm: next(t for t in doc["arms"][arm]["tables"] if t["slice"] == "pooled") for arm in ("Q", "Q_raw")}
+    for arm in ("Q", "Q_raw"):  # the pooled CRPS count is the scored events that keep a pool
+        kept = sum(excl[(arm, year)]["scored"] - excl[(arm, year)]["crps_excluded"] for year in (2023, 2024, 2025))
+        assert pooled[arm]["n_crps"] == kept
+    b0_kept = sum(excl[("B0", year)]["scored"] - excl[("B0", year)]["crps_excluded"] for year in (2023, 2024, 2025))
+    assert pooled["Q_raw"]["b0_n_crps"] == b0_kept
+
+
