@@ -116,11 +116,12 @@ failure_semantics:
   R5: "arm ids hash source, level set and configuration"
   R6: "causality: fits, selection, calibration, tail, level-width and baseline pools use data available before fold or month; month's predictions written before its labels are read"
 
+code_alignment: "pending. The user rules of 2026-11-26 (30-donor CRPS-only tails; unlabelled in-period events in the denominator with no refusal; the Y0 rule with y0_none; per-baseline headline flags) are the contract, but merged code does not yet implement them: calibration still uses 50 donors and unscores the whole event, the driver still raises admitted_label_missing, and Y0 and the flags are not built. Wherever this spec states those rules it states required behaviour. SB0 part 2 must not set stage_b.status settled, and no PLANNED row is registered, until merged code implements them. Until then the guard refuses stage_b_pending, so no registered run can happen"
 real_data_order: "SB0 (both parts), then PLANNED row, then 50-ticker smoke (a real-data fit), then full run (user decision, 2026-11-26: registration stays before the smoke). Before the row (user decision, 2026-11-26): sealed-record binding, panel and chain counts, Y0 report and training-id parity (with the label reads they need) are allowed; no model fit on real data and no computing of any arm's or baseline's score against realised moves (showing v14's stored metrics is allowed). Those label reads stay under the no-holdout rule: shared admission first, admitted event keys only. They use event id, ticker and label_end, and for usable-label counts whether a qualified abs_move exists; no move value is printed, aggregated or compared with a forecast."
 
 stage_b:
   status: pending_decisions  # the guard accepts only 'settled', so registration is refused
-  open_decisions:  # SB0 part 2 records both and sets status settled
+  open_decisions:  # SB0 part 2 records all three and sets status settled
     tau_window_aggregation: "open: how the 2025 tau objective combines the 2023H2 and 2024 selection periods, since each account period starts fresh (issue 2941)"
     buildability_fallback: "open: whether arms E and EQ have any retry beyond choosing among feasible widths (issue 2941; user hold of 2026-11-25: wait for the EXP-189 fair-value result)"
     stage_b_arms: "open: whether both Q and Q_raw enter Stage B whenever Stage A passes (design sections 5, 6.1 and D7) or only each passing arm (the earlier stage_a.verdict wording, and the merged stage_a_verdict) (issue 3042 item 5)"
