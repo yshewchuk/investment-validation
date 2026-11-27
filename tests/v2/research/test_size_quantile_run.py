@@ -266,6 +266,31 @@ def test_smoke_into_a_non_empty_directory_refuses_before_the_config_is_read(monk
     assert base._refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "smoke_out_dir_not_fresh")
 
 
+@pytest.mark.parametrize("kind", ["file", "file_parent", "dangling_link"])
+@pytest.mark.parametrize("tickers", [None, 3])
+def test_out_dir_that_cannot_be_a_directory_refuses_before_the_config_is_read(
+        monkeypatch, tmp_path, tickers, kind):
+    guard = base._guard(tmp_path)
+    if kind == "file":
+        out, kept = tmp_path / "out", tmp_path / "out"
+        out.write_text("x", encoding="utf-8")
+    elif kind == "file_parent":
+        kept = tmp_path / "plain"
+        kept.write_text("x", encoding="utf-8")
+        out = kept / "out"
+    else:
+        out = tmp_path / "out"
+        out.symlink_to(tmp_path / "missing")
+    monkeypatch.setattr(run_mod.sources, "_config", _no_config)
+    with pytest.raises(OpsError) as exc:
+        run_mod.run("cfg.json", out, tickers, **_paths(guard))
+    assert base._refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "out_dir_not_directory")
+    if kind == "dangling_link":
+        assert not (tmp_path / "missing").exists()
+    else:
+        assert kept.read_text(encoding="utf-8") == "x"
+
+
 def test_watchdog_breach_refuses_resource_limit_and_publishes_no_report(monkeypatch, tmp_path):
     world, guard, out = _world(), base._guard(tmp_path), tmp_path / "out"
     _env(monkeypatch, world, out)

@@ -5,6 +5,7 @@ import argparse
 import functools
 import hashlib
 import json
+import os
 import resource
 import sqlite3
 import sys
@@ -69,7 +70,9 @@ def _run(sources_config, out_dir, tickers, **paths):
     guard, out_dir = require_preregistration(**paths), Path(out_dir)
     if tickers is not None and (type(tickers) is not int or tickers < 1):
         raise fail("INVALID_EXPERIMENT_SPEC", "tickers invalid", details={"reason": "smoke_tickers_invalid"})
-    if tickers is not None and out_dir.exists() and (not out_dir.is_dir() or any(out_dir.iterdir())):
+    if not next(p for p in (out_dir, *out_dir.parents) if os.path.lexists(p)).is_dir():
+        raise fail("INVALID_EXPERIMENT_SPEC", "out dir not a directory", details={"reason": "out_dir_not_directory"})
+    if tickers is not None and out_dir.exists() and any(out_dir.iterdir()):
         raise fail("INVALID_EXPERIMENT_SPEC", "out dir not fresh", details={"reason": "smoke_out_dir_not_fresh"})
     spec, digest = load_spec(paths.get("spec_path", SPEC_PATH))
     if digest != guard["spec_hash"]:
