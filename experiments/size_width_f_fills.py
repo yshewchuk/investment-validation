@@ -24,6 +24,7 @@ Only legs of positive quantity go to F (F design section 6); a reference leg of 
 entry-date rows only (R6). Results are a function of the event and its resolved legs, so they are kept per chunk and
 reused across widths, arms and draws; a new chunk object drops them. Input refusals raised by ``quotes``
 (``f_quote_mismatch`` and F's R1) propagate unchanged.
+Model A (size_width_a_fills.AFills) subclasses FFills and adds f_fill_over_mid (SKIP_REASONS).
 """
 from experiments import fair_value_fills as fvf
 from experiments import size_pnl_shortvol as sv
@@ -31,6 +32,7 @@ from experiments.size_width_fills import Exit, Skip
 
 _STATUS_ORDER = ("unpriceable", "rate_unknown", "no_fair_value")
 ENTRY_REASONS = tuple(f"f_{name}" for name in _STATUS_ORDER + ("not_a_debit", "fill_over_fair", "spread_over_debit"))
+SKIP_REASONS = ENTRY_REASONS + ("f_fill_over_mid",)  # every model's entry skips; f_fill_over_mid is model A's guard in place of f_fill_over_fair
 EXIT_FLAGS = ("exit_fair_mid", "exit_negative")
 
 
@@ -48,6 +50,9 @@ class FFills:
         """True iff the ENTRY result of these legs is already computed for the trade's chunk (computes nothing)."""
         return trade.chunk is self._chunk and _memo_key(trade, trade.legs, False) in self._memo
 
+    def _structure(self, table, exit):
+        return fvf.structure_exit(table) if exit else fvf.structure_entry(table)
+
     def _result(self, trade, legs, exit):
         """F's structure result for the positive-quantity ``legs`` of ``trade``, computed once per chunk."""
         if trade.chunk is not self._chunk:
@@ -57,7 +62,7 @@ class FFills:
         if key not in self._memo:
             table = self.quotes.legs(trade.chunk, trade.i, legs, exit=exit)
             table = table.assign(side=[leg["side"] for leg in legs], qty=[leg["qty"] for leg in legs])
-            self._memo[key] = fvf.structure_exit(table) if exit else fvf.structure_entry(table)
+            self._memo[key] = self._structure(table, exit)
         return self._memo[key]
 
     def entry_result(self, trade):
