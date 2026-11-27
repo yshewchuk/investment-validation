@@ -131,7 +131,9 @@ def _install(monkeypatch, world, *, omit=(), regress=None, read=None, s_regress=
     of arm S (`s_regress` for arm S only)."""
     def fake_read(sealed, event_ids, labels_before):
         drop = set(omit) if labels_before == "2026-02-01" else set()
-        kept = [e for e in event_ids if e not in drop]
+        # As the real reader: a label counts only if it is available (event date + 1 day) before labels_before.
+        kept = [e for e in event_ids if e not in drop
+                and (date.fromisoformat(world["dates"][e]) + timedelta(days=1)).isoformat() < labels_before]
         return pd.DataFrame({"event_id": kept, "absolute_move_pct": [world["y"][e] for e in kept]})
     monkeypatch.setattr(walk, "training_labels", read or fake_read)
     monkeypatch.setattr(stage_a, "training_labels", read or fake_read)
@@ -572,21 +574,27 @@ def test_memory_error_in_calibration_refuses_resource_limit(monkeypatch, tmp_pat
 B0_COLS = [f"b0_q{round(a * 100)}" for a in LEVELS]
 
 
-def _b0_oracle(world):
+def _b0_oracle(world, frame=None):
     """B0's quantiles and bucket for each event, from the design rule in plain numpy (no ResidualPool, build_pool or
     pool_quantiles; only the MIN_POOL constant is taken from engine.pnl_sim).
     Donors: every fixture event dated strictly before the event, by event date, as the native pool is. Label
     availability is not a B0 filter (the open question in issue #3047). err_move = donor abs_move - donor pred_move.
+    An event with zero earlier donors is unscored: the oracle returns (None, None), as production's ResidualPool
+    refuses the draw (reason refused_draw) when the earlier pool is empty.
     Bucket edges are the earlier donors' pred_move quantiles on production's grid, np.linspace(0, 1, 11)[1:-1]
     (the same float values, not a re-derived 0.1..0.9 grid, which can differ by an ulp and move a donor sitting exactly
     on an edge into another bucket). Membership rule, as in ResidualPool.draw: a value v belongs to bucket
     searchsorted(edges, v, side="right"), so an edge value falls in the bucket ABOVE it, for donors and for the event's
     forecast alike. The event's bucket uses its fixture pred_move (with the +3 drift from 2023-07-01). The draw is the
     donors in that bucket, or every earlier donor when the bucket holds fewer than MIN_POOL."""
-    events = world["events"]
+    # The forecast table: its index is the event set (donors and scored events) and its pred_move the forecast.
+    # B3 passes its own series; the default is the production frame with every event.
+    frame = world["frame"] if frame is None else frame
+    members = set(frame.index)
+    events = [e for e in world["events"] if e["id"] in members]
     ids = [e["id"] for e in events]
     dates = np.array([e["date"] for e in events])  # ISO dates compare correctly as strings
-    pred = world["frame"].loc[ids, "pred_move"].to_numpy(float)
+    pred = frame.loc[ids, "pred_move"].to_numpy(float)
     err = np.array([world["y"][i] for i in ids], dtype=float) - pred
     position = {i: k for k, i in enumerate(ids)}
     grid = np.linspace(0, 1, 11)[1:-1]  # production's bucket grid (buckets=10), bit-for-bit
@@ -595,6 +603,8 @@ def _b0_oracle(world):
         k = position[event_id]
         earlier = dates < dates[k]
         donor_pred, donor_err = pred[earlier], err[earlier]
+        if donor_pred.size < MIN_POOL:  # fewer than MIN_POOL earlier donors: unscored, no quantiles and no bucket
+            return None, None
         edges = np.quantile(donor_pred, grid)
         f = pred[k]
         bucket = int(np.searchsorted(edges, f, side="right"))
@@ -643,25 +653,8 @@ def _b0_pool_oracle(world):
     A tail with under 30 donors makes the month thin. Returns (quantiles_of, pool_of); pool_of(month) is (d_lo, d_hi)
     or None."""
     oracle = _b0_oracle(world)
-    donors = [(date.fromisoformat(e["date"]), date.fromisoformat(e["label_end"]) + timedelta(days=1),
-               world["y"][e["id"]], oracle(e["id"])[0]) for e in world["events"] if e["date"] >= "2022-01-01"]
-    pools = {}
-
-    def pool_of(month):
-        if month not in pools:
-            start = month.replace(year=month.year - 1)
-            hi, lo = [], []
-            for day, ready, y, q in donors:
-                if not (start <= day < month and ready < month):
-                    continue
-                if y > q[6]:
-                    hi.append((y - q[6]) / max(q[6] - q[3], 0.5))
-                if y < q[0]:
-                    lo.append((y - q[0]) / max(q[3] - q[0], 0.5))
-            pools[month] = (np.array(lo), np.array(hi)) if min(len(lo), len(hi)) >= 30 else None
-        return pools[month]
-
-    return oracle, pool_of
+    quantiles = {e["id"]: oracle(e["id"])[0] for e in world["events"] if e["date"] >= "2022-01-01"}
+    return oracle, _tail_pool_of(world, quantiles)
 
 
 def test_b0_crps_in_the_quarter_table_matches_an_independent_oracle(full_run):
@@ -710,25 +703,174 @@ def test_crps_exclusions_and_pooled_crps_counts_match_the_oracles(full_run):
     assert pooled["Q_raw"]["b0_n_crps"] == b0_kept
 
 
+FLOOR, MIN_TAIL = 0.5, 30  # the design's scale floor and minimum tail donors
+
+
+def _in_period(text):
+    return "2023-07-01" <= text <= "2025-12-31"
+
+
+def _month(text):
+    return date.fromisoformat(text).replace(day=1)
+
+
 def _oracle_b2(world):
-    """B2 quantiles of the in-period events it scores, in plain numpy: donors dated in the 12 months before the
-    event's month, available (date + 1 day) before that month, with a positive implied move; at least 500 of them."""
+    """B2 quantiles of every event dated 2022+ that it scores, in plain numpy: donors dated in the 12 months before the
+    event's month, available (date + 1 day) before that month, with a positive implied move; at least 500 of them.
+    An event without a positive implied move has no quantiles."""
     events, implied = world["events"], world["implied"]
     day = {e["id"]: date.fromisoformat(e["date"]) for e in events}
     usable = {e["id"]: implied[e["id"]] is not None and implied[e["id"]] > 0 for e in events}
-    donors_of, out = {}, {}
+    ratio_of, out = {}, {}
     for event in events:
-        if not ("2023-07-01" <= event["date"] <= "2025-12-31") or not usable[event["id"]]:
+        if event["date"] < "2022-01-01" or not usable[event["id"]]:
             continue
-        month = date.fromisoformat(event["date"]).replace(day=1)
-        if month not in donors_of:
+        month = _month(event["date"])
+        if month not in ratio_of:
             start = month.replace(year=month.year - 1)
-            donors_of[month] = [e["id"] for e in events if start <= day[e["id"]] < month and usable[e["id"]]
-                                and day[e["id"]] + timedelta(days=1) < month]
-        donors = donors_of[month]
-        if len(donors) >= 500:
-            ratio = np.array([world["y"][d] / implied[d] for d in donors])
-            out[event["id"]] = implied[event["id"]] * np.quantile(ratio, LEVELS)
+            donors = [d for d in day if usable[d] and start <= day[d] < month and day[d] + timedelta(days=1) < month]
+            ratio_of[month] = (np.quantile([world["y"][d] / implied[d] for d in donors], LEVELS)
+                               if len(donors) >= 500 else None)
+        if ratio_of[month] is not None:
+            out[event["id"]] = implied[event["id"]] * ratio_of[month]
+    return out
+
+
+def _s_quantiles(world):
+    """Arm S's quantiles for the events dated 2023+ (2022 has no donors: it is the first year), in plain numpy. Both arm
+    S fits predict mu, so the median and the scale are mu and the 0.5 floor never binds. Month M's donors are the events
+    dated 2022+ in [M - 12 months, M) with label available before M (date + 1 day < M); under 500 donors leaves the month
+    unscored. The quantiles are max(sort(mu + mu * z), 0) with z = quantile((y - mu_d) / mu_d, LEVELS) over the donors."""
+    dated = [(date.fromisoformat(e["date"]), e["id"]) for e in world["events"] if e["date"] >= "2022-01-01"]
+    mu, y = world["mu"], world["y"]
+    z_of = {}
+
+    def z(month):
+        if month not in z_of:
+            start = month.replace(year=month.year - 1)
+            ids = [i for day, i in dated if start <= day < month and day + timedelta(days=1) < month]
+            z_of[month] = np.quantile([(y[i] - mu[i]) / mu[i] for i in ids], LEVELS) if len(ids) >= 500 else None
+        return z_of[month]
+
+    out = {}
+    for e in world["events"]:
+        if e["date"] < "2023-01-01":
+            continue
+        zz = z(_month(e["date"]))
+        if zz is not None:
+            m = mu[e["id"]]
+            out[e["id"]] = np.maximum(np.sort(m + m * zz), 0.0)
+    return out
+
+
+def _b1_quantiles(world):
+    """Arm B1's quantiles for the events dated 2022+, in plain numpy. Donors are every event with label available before
+    the month (date + 1 day < M), full history, x = the production pred_move and y = abs_move. The bucket edges are the
+    donors' quantiles at 0.2, 0.4, 0.6 and 0.8; a month is unscored when a bucket holds fewer than 20 donors. Quantiles
+    are max(f, 0.05) times the bucket's quantiles of ratio = y / max(x, 0.05)."""
+    dated = [(date.fromisoformat(e["date"]), e["id"]) for e in world["events"]]
+    x_of, y_of = world["frame"]["pred_move"].to_dict(), world["y"]
+    pools = {}
+
+    def pool(month):
+        if month not in pools:
+            ids = [i for day, i in dated if day + timedelta(days=1) < month]
+            x = np.array([x_of[i] for i in ids], dtype=float)
+            y = np.array([y_of[i] for i in ids], dtype=float)
+            edges = np.quantile(x, [0.2, 0.4, 0.6, 0.8])
+            bucket = np.digitize(x, edges)
+            if np.bincount(bucket, minlength=5).min() < 20:
+                pools[month] = None
+            else:
+                ratio = y / np.maximum(x, 0.05)
+                pools[month] = (edges, [np.quantile(ratio[bucket == b], LEVELS) for b in range(5)])
+        return pools[month]
+
+    out = {}
+    for e in world["events"]:
+        if e["date"] < "2022-01-01":
+            continue
+        found = pool(_month(e["date"]))
+        if found is not None:
+            edges, ratio_q = found
+            f = x_of[e["id"]]
+            out[e["id"]] = max(f, 0.05) * ratio_q[int(np.digitize(f, edges))]
+    return out
+
+
+def _tail_pool_of(world, quantiles):
+    """pool_of(month) -> (d_lo, d_hi) or None: the design's tail rule from one arm's own oracle quantiles (a dict of event
+    id -> seven quantiles, for its scored events). Donors are dated in [M - 12 months, M) with label_end + 1 day < M (the
+    availability donor_pool uses). d_hi is (y - q90) / max(q90 - q50, 0.5) over y > q90 and d_lo is (y - q10) /
+    max(q50 - q10, 0.5) over y < q10; a month with under 30 donors on either tail is thin (None)."""
+    donors = [(date.fromisoformat(e["date"]), date.fromisoformat(e["label_end"]) + timedelta(days=1),
+               world["y"][e["id"]], quantiles[e["id"]]) for e in world["events"] if e["id"] in quantiles]
+    pools = {}
+
+    def pool_of(month):
+        if month not in pools:
+            start = month.replace(year=month.year - 1)
+            hi, lo = [], []
+            for day, ready, y, q in donors:
+                if not (start <= day < month and ready < month):
+                    continue
+                if y > q[6]:
+                    hi.append((y - q[6]) / max(q[6] - q[3], FLOOR))
+                if y < q[0]:
+                    lo.append((y - q[0]) / max(q[3] - q[0], FLOOR))
+            pools[month] = (np.array(lo), np.array(hi)) if min(len(lo), len(hi)) >= MIN_TAIL else None
+        return pools[month]
+
+    return pool_of
+
+
+def _exact_crps(y, q, d_lo, d_hi):
+    """CRPS of one event's tailed quantile function, integrated exactly with no grid. The function is piecewise linear
+    through the lower-tail knots, the seven quantiles and the upper-tail knots, floored at zero. Each segment is cut where
+    the linear piece crosses zero or y, so on every piece the function is linear and the indicator 1{y < Q} is constant;
+    the integrand is then quadratic and Simpson's rule is exact."""
+    q = np.asarray(q, dtype=float)
+    s_lo, s_hi = max(q[3] - q[0], FLOOR), max(q[6] - q[3], FLOOR)
+    lo, hi = np.sort(np.asarray(d_lo, dtype=float)), np.sort(np.asarray(d_hi, dtype=float))
+    u = np.concatenate([np.linspace(0.0, 0.1, lo.size), LEVELS, np.linspace(0.9, 1.0, hi.size)])
+    x = np.concatenate([q[0] + s_lo * lo, q, q[6] + s_hi * hi])
+    keep = u[1:] > u[:-1]  # a zero-width step is a jump, with no area
+    a, b, xa, xb = u[:-1][keep], u[1:][keep], x[:-1][keep], x[1:][keep]
+    span = np.where(xb == xa, 1.0, xb - xa)
+    cuts = [np.zeros_like(a), np.ones_like(a)]
+    for level in (0.0, float(y)):
+        crossing = (xa - level) * (xb - level) < 0
+        cuts.append(np.where(crossing, (level - xa) / span, 0.0))
+    f = np.sort(np.stack(cuts, axis=1), axis=1)  # fractions along each segment, sorted, with zero-width pieces
+    p, r = f[:, :-1], f[:, 1:]
+    m = (p + r) / 2
+    width = (b - a)[:, None] * (r - p)
+
+    def at(t):
+        return a[:, None] + (b - a)[:, None] * t
+
+    def floored(t):
+        return np.maximum(xa[:, None] + (xb - xa)[:, None] * t, 0.0)
+
+    qp, qm, qr = floored(p), floored(m), floored(r)
+    below = (y < qm).astype(float)  # 1{y < Q}, constant on each piece
+
+    def loss(u_, q_):
+        return (y - q_) * (u_ - below)
+
+    total = width / 6 * (loss(at(p), qp) + 4 * loss(at(m), qm) + loss(at(r), qr))
+    return 2.0 * float(total.sum())
+
+
+def _arm_crps(world, quantiles, in_period):
+    """CRPS of each in-period event for one arm, from its oracle quantiles and the tail rule. None where the arm has no
+    quantile for the event or its month's tail pool is thin."""
+    pool_of = _tail_pool_of(world, quantiles)
+    out = {}
+    for event_id in in_period:
+        q = quantiles.get(event_id)
+        pool = None if q is None else pool_of(_month(world["dates"][event_id]))
+        out[event_id] = None if pool is None else _exact_crps(world["y"][event_id], q, *pool)
     return out
 
 
@@ -741,7 +883,7 @@ def _mean_pinball(y, q):
 
 def test_b2_table_pooled_n_and_mean_pinball_match_the_plain_numpy_oracle(full_run):
     world, doc = full_run["world"], full_run["doc"]
-    oracle = _oracle_b2(world)
+    oracle = {i: q for i, q in _oracle_b2(world).items() if _in_period(world["dates"][i])}
     row = next(t for t in doc["reported"]["B2"]["tables"] if t["slice"] == "pooled")
     assert row["n"] == len(oracle) > 0
     assert row["mean_pinball"] == pytest.approx(_mean_pinball([world["y"][i] for i in oracle], list(oracle.values())),
@@ -927,7 +1069,7 @@ def _nonnull_mean(rows, name):
     return float(np.mean(values))
 
 
-def test_crps_rows_hold_one_record_per_in_period_event_with_all_seven_frames(full_run):
+def test_crps_rows_hold_one_record_per_in_period_event_with_all_seven_frames(full_run, expected):
     doc, world = full_run["doc"], full_run["world"]
     in_period = sorted(e["id"] for e in world["events"] if "2023-07-01" <= e["date"] <= "2025-12-31")
     assert sorted(r["event_id"] for r in doc["crps_rows"]) == in_period
@@ -942,6 +1084,13 @@ def test_crps_rows_hold_one_record_per_in_period_event_with_all_seven_frames(ful
     for name in ("B1", "B3"):
         pooled = next(t for t in doc["reported"][name]["tables"] if t["slice"] == "pooled")
         assert _nonnull_mean(doc["crps_rows"], name) == pytest.approx(pooled["crps"], rel=1e-9), name
+    # B0 per event: each row's B0 CRPS is the oracle's for that event (Q has no per-event oracle here).
+    for row in doc["crps_rows"]:
+        want = expected["crps"]["B0"][row["event_id"]]
+        if want is None:
+            assert row["B0"] is None, row["event_id"]
+        else:
+            assert row["B0"] == pytest.approx(want, rel=1e-8, abs=1e-9), row["event_id"]
 
 
 def test_q_table_m3_column_is_the_b3_series_under_the_v14_rule(full_run):
@@ -961,5 +1110,71 @@ def test_lowest_inner_rule_leaves_the_q_m3_column_empty(monkeypatch, tmp_path):
     doc = _run(world, out, guard, b3={**_b3(world), "rule": "lowest_inner_mae_hmosxlp"})
     row = next(t for t in doc["arms"]["Q"]["tables"] if t["slice"] == "pooled")
     assert row["n_m3"] == 0 and row["mae_m3"] is None
+
+
+@pytest.fixture(scope="module")
+def expected(full_run):
+    """Oracle quantiles and CRPS of B0, S, B1, B2 and B3 per event, from the design rules in plain numpy (no production
+    code). The quantiles cover the events dated 2022+ that each arm scores; the CRPS covers the in-period events, None
+    where an arm has no quantile or its month's tail pool is thin."""
+    world = full_run["world"]
+    in_period = [e["id"] for e in world["events"] if _in_period(e["date"])]
+    b0 = _b0_oracle(world)
+    series = _b3(world)["series"]
+    b3 = _b0_oracle(world, pd.DataFrame({"pred_move": series.to_numpy(float)}, index=series.index))
+    quantiles = {"B0": {e["id"]: b0(e["id"])[0] for e in world["events"] if e["date"] >= "2022-01-01"},
+                 "S": _s_quantiles(world), "B1": _b1_quantiles(world), "B2": _oracle_b2(world),
+                 # an event with no earlier series donors is unscored (refused_draw): left out, so not a tail donor either
+                 "B3": {i: q for i in series.index if (q := b3(i)[0]) is not None}}
+    crps = {name: _arm_crps(world, q, in_period) for name, q in quantiles.items()}
+    return {"in_period": in_period, "quantiles": quantiles, "crps": crps}
+
+
+def _scored(expected, name):
+    """The in-period events an arm scores (each has an oracle quantile), in event order."""
+    return [i for i in expected["in_period"] if i in expected["quantiles"][name]]
+
+
+ARMS_NEW = ["S", "B1", "B2", "B3"]
+
+
+@pytest.mark.parametrize("name", ARMS_NEW)
+def test_crps_rows_match_the_oracle_per_event(full_run, expected, name):
+    got = {r["event_id"]: r[name] for r in full_run["doc"]["crps_rows"]}
+    want = expected["crps"][name]
+    assert sorted(got) == sorted(expected["in_period"])
+    for event_id in expected["in_period"]:
+        if want[event_id] is None:
+            assert got[event_id] is None, (name, event_id)
+        else:
+            assert got[event_id] is not None, (name, event_id)
+            assert got[event_id] == pytest.approx(want[event_id], rel=1e-8, abs=1e-9), (name, event_id)
+    values = [v for v in got.values() if v is not None]
+    assert len(values) > 1000 and len(set(values)) > 1, name
+
+
+@pytest.mark.parametrize("name", ARMS_NEW)
+def test_reported_pooled_row_matches_the_oracle(full_run, expected, name):
+    world, doc = full_run["world"], full_run["doc"]
+    ids = _scored(expected, name)
+    assert all(i in expected["quantiles"]["B0"] for i in ids)  # every event it scores is scored by B0 too
+    row = next(t for t in doc["reported"][name]["tables"] if t["slice"] == "pooled")
+    assert row["n"] == len(ids) > 0
+    q = [expected["quantiles"][name][i] for i in ids]
+    assert row["mean_pinball"] == pytest.approx(_mean_pinball([world["y"][i] for i in ids], q), rel=1e-9)
+    crps = [expected["crps"][name][i] for i in ids if expected["crps"][name][i] is not None]
+    assert row["n_crps"] == len(crps)
+    assert row["crps"] == pytest.approx(float(np.mean(crps)), rel=1e-8)
+
+
+@pytest.mark.parametrize("name", ARMS_NEW)
+def test_reported_quarter_row_matches_the_oracle(full_run, expected, name):
+    world = full_run["world"]
+    ids = [i for i in _scored(expected, name) if "2024-04-01" <= world["dates"][i] <= "2024-06-30"]
+    row = next(t for t in full_run["doc"]["reported"][name]["tables"]
+               if t["slice"] == "quarter" and t["label"] == "2024Q2")
+    assert row["n"] == len(ids) > 0
+    q = [expected["quantiles"][name][i] for i in ids]
+    assert row["mean_pinball"] == pytest.approx(_mean_pinball([world["y"][i] for i in ids], q), rel=1e-9)
 
 
