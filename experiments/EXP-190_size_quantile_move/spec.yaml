@@ -27,7 +27,7 @@ walk_forward:
   folds: "annual; refit yearly per level and configuration"
   range: "Y0 through 2025"
   y0_rule: "earliest year where every year Y0..2025 has at least chain_share_min admitted panel events with stored entry and exit option chains, and at least training_years_min earlier calendar years of training rows. A year counts only with at least one label training_labels qualifies (usable labels, after v14's label-end cutoff and embargo; user, 2026-11-26); these label reads are allowed before registration. A year whose annual_folds raises POPULATION_COLLAPSED fails the test and does not refuse the report. No year qualifies: refuse, reason y0_none, no fits, no report"
-  y0_late: "user, 2026-11-27: Y0 after 2023 keeps the full run's refusal stage_a_years_invalid (after run_inputs.json, before any fit): no fits, report or verdict; the smoke path does not make this check. The supervisor runs the Y0 report before the PLANNED row; if Y0 is after 2023, stop and return to the user, no registration"
+  y0_late: "user, 2026-11-27: Y0 after 2023 keeps the full run's refusal stage_a_years_invalid (after run_inputs.json, before any fit): no fits, report or verdict; the smoke path does not make this check. The supervisor runs the Y0 report before the PLANNED row (experiments.size_quantile_y0.y0_report, a library call with no command line); if Y0 is after 2023, stop and return to the user, no registration"
   chain_share_min: 0.5
   training_years_min: 3
   label_rule: "training row needs label available before fold cutoff (data dates, never computed_at)"
@@ -124,7 +124,7 @@ real_data_order: "SB0 (both parts), then PLANNED row, then 50-ticker smoke (a re
 
 stage_b:
   status: pending_decisions  # the guard accepts only 'settled', so registration is refused
-  open_decisions: {}  # all taken (user, 2026-11-27); status stays pending_decisions until code_alignment is met
+  open_decisions: {}  # none open before registration (user, 2026-11-27); f6_amendment.open_until_then is deferred to that amendment; status stays pending_decisions until code_alignment is met
   arm_roles: "user, 2026-11-27: when Stage A passes, both sources Q and Q_raw enter Stage B. A source whose own Stage A verdict is pass is deciding. The other is informational only: its results are reported, labelled informational, and never count toward Stage B's success verdict or any adoption. Only a passing source can give a deciding Stage B verdict. EQ runs only for a passing source. A source without quantiles (Q after a calibration failure) has no results to report"
   f6_amendment:
     gate: "Stage B must not run until the F6 Stage B amendment (F recalibrated from real fills) is in (user, 2026-11-27). SB9b enforces it: stage_b_amendment_pending, before any Stage B read, no output; no merged code does yet"
