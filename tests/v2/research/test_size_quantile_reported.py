@@ -8,6 +8,7 @@ import pytest
 
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import OpsError
+from engine.v2.research.magnitude_panel_qualified_table import recipe
 from experiments import size_quantile_reported as rep
 from experiments.size_quantile_calibration import QCOLS
 
@@ -59,6 +60,23 @@ def test_implied_table_refuses_unbound_inputs(rows, columns):
         rep.implied_table(_sealed(rows, columns))
     assert exc.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert exc.value.problem.details["reason"] == "implied_move_unbound"
+
+
+def test_implied_table_accepts_the_real_v14_feature_columns():
+    # Loader contract: "implied_move" is in recipe("HMOSXLP")["model_columns"] (what load_sealed_panel returns as
+    # sealed["model_columns"]) and in recipe("HMOSX")["model_columns"] (the columns experiments/size_quantile_sources.py
+    # `_panel_rows` and `_load` read the stored panel rows with).
+    assert "implied_move" in recipe("HMOSXLP")["model_columns"]
+    assert "implied_move" in recipe("HMOSX")["model_columns"]
+    columns = list(recipe("HMOSXLP")["model_columns"])
+    row_a = {column: None for column in recipe("HMOSX")["model_columns"]}
+    row_a.update({"event_id": "a", "implied_move": 2.5})
+    row_b = {column: None for column in recipe("HMOSX")["model_columns"]}
+    row_b.update({"event_id": "b", "implied_move": None})
+    frame, _ = rep.implied_table(_sealed([row_a, row_b], columns))
+    assert list(frame.index) == ["a", "b"]
+    assert frame.loc["a", "implied_move"] == 2.5
+    assert np.isnan(frame.loc["b", "implied_move"])
 
 
 # ---------- 2. s_frames ----------
