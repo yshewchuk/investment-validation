@@ -1,6 +1,6 @@
 """EXP-190 Q6c: `python -m experiments.size_quantile_run --sources-config CFG --out-dir DIR [--tickers 50]`. Writes
 run_inputs.json (size_quantile_run_inputs.v1) before any fit, then fits/ and stage_a_report.json; a smoke writes fits/
-and smoke_record.json (size_quantile_smoke.v1: timing, no verdict, score or ledger row). B3 is not read."""
+and smoke_record.json (size_quantile_smoke.v1: timing, no verdict, score or ledger row). Manual-only."""
 import argparse
 import functools
 import hashlib
