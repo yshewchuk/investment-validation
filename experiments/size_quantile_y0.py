@@ -9,10 +9,11 @@ from itertools import takewhile
 
 import pandas as pd
 
+from engine.v2.contracts.data import KeyPredicate
 from engine.v2.data.errors import DataError
 from engine.v2.ops.errors import fail
-from engine.v2.research._chains import read_chain_keys_for
 from engine.v2.research._pricing import AMC, BMO, trading_calendar_from_snapshot
+from engine.v2.research._scan import read_table
 from engine.v2.research.progress import Progress, decision, stage
 from experiments.size_pnl_sources import MAX_OBJECT_BYTES
 from experiments.size_pnl_tables import windows
@@ -22,14 +23,26 @@ from experiments.size_quantile_sources import _MALFORMED, _refuse, training_labe
 LAST_YEAR = 2025
 
 
-def _thresholds(spec):
+def _thresholds(spec, max_object_bytes):
     wf = spec.get("walk_forward") if isinstance(spec, dict) else None
     share, floor = (wf.get("chain_share_min"), wf.get("training_years_min")) if isinstance(wf, dict) else (None, None)
-    if not (isinstance(share, numbers.Real) and not isinstance(share, bool) and 0 < share <= 1
+    cap_ok = isinstance(max_object_bytes, int) and not isinstance(max_object_bytes, bool) and max_object_bytes > 0
+    if not (cap_ok and isinstance(share, numbers.Real) and not isinstance(share, bool) and 0 < share <= 1
             and isinstance(floor, int) and not isinstance(floor, bool) and floor >= 1):
-        raise fail("INVALID_EXPERIMENT_SPEC", "walk_forward needs chain_share_min in (0, 1], training_years_min >= 1",
-                   details={"reason": "y0_inputs_invalid"})
+        raise fail("INVALID_EXPERIMENT_SPEC", "walk_forward needs chain_share_min in (0, 1], training_years_min >= 1, "
+                   "max_object_bytes >= 1", details={"reason": "y0_inputs_invalid"})
     return share, floor
+
+
+def capped_chain_keys(repository, snapshot, keys, *, max_object_bytes):
+    wanted = {(str(t), pd.Timestamp(d).normalize()) for t, d in keys}
+    obs = tuple(sorted({d.strftime("%Y-%m-%d") for _, d in wanted}))
+    filters = (KeyPredicate(column="ticker", operator="in", values=tuple(sorted({t for t, _ in wanted}))),
+               KeyPredicate(column="obs_date", operator="in", values=obs))
+    frame = read_table(repository, snapshot, "option_chains", ("ticker", "obs_date"),
+                       partition_keys=sorted({str(d.year) for _, d in wanted}), key_filter=filters,
+                       batch_filter=lambda batch: batch.drop_duplicates(), max_object_bytes=max_object_bytes)
+    return {(str(t), pd.Timestamp(d).normalize()) for t, d in zip(frame["ticker"], frame["obs_date"])} & wanted
 
 
 def _parse(sealed):
@@ -68,7 +81,8 @@ def _report(sealed, share_min, floor, max_object_bytes, calendar, chain_keys, la
         months[(key[1].year, key[1].month)].add(key)
     present, progress = set(), Progress("quantile y0 chains", len(months))
     for ym in sorted(months):
-        present.update(chain_keys(sealed["repository"], sealed["snapshot"], sorted(months[ym])))
+        present.update(chain_keys(sealed["repository"], sealed["snapshot"], sorted(months[ym]),
+                                  max_object_bytes=max_object_bytes))
         progress.tick()
     years = [str(y) for y in range(min((ev[2].year for ev in events), default=LAST_YEAR + 1), LAST_YEAR + 1)]
     counts = {y: {"events": 0, "no_window": 0, "with_chains": 0} for y in years}
@@ -126,9 +140,9 @@ def _report(sealed, share_min, floor, max_object_bytes, calendar, chain_keys, la
 
 
 def y0_report(sealed, spec, *, max_object_bytes=MAX_OBJECT_BYTES, calendar=trading_calendar_from_snapshot,
-              chain_keys=read_chain_keys_for, labels=training_labels):
+              chain_keys=capped_chain_keys, labels=training_labels):
     with stage("quantile y0"):
-        share_min, floor = _thresholds(spec)
+        share_min, floor = _thresholds(spec, max_object_bytes)
         try:
             return _report(sealed, share_min, floor, max_object_bytes, calendar, chain_keys, labels)
         except MemoryError:

@@ -2,10 +2,13 @@
 import pandas as pd
 import pytest
 
+from engine.v2.data.errors import DataError
 from engine.v2.data.errors import fail as data_fail
+from engine.v2.data.repository import Repository
 from engine.v2.ops.errors import OpsError
 from engine.v2.research._pricing import TradingCalendar
-from experiments.size_quantile_y0 import y0_report
+from experiments.size_quantile_y0 import capped_chain_keys, y0_report
+from tests.test_v2_research_chain_read_cap import _commit_chains, _rows
 
 # (event_id, ticker, event_date, session, entry, exit, has_entry, has_exit). entry/exit are the hand-written calendar
 # dates for the event's own session: AMC = (day, next weekday); BMO = (previous weekday, day). Weekdays only.
@@ -97,14 +100,16 @@ class Recorder:
         self.present = _present() if present is None else present
         self.store = {r[0]: f"{_year(r)}-03-01" for r in ROWS} if store is None else store
         self.calendar_calls, self.chain_calls, self.label_calls = [], [], []
+        self.chain_caps = []
         self.chain_error = None
 
     def calendar(self, repository, snapshot, *, max_object_bytes):
         self.calendar_calls.append((repository, snapshot, max_object_bytes))
         return CAL
 
-    def chain_keys(self, repository, snapshot, keys):
+    def chain_keys(self, repository, snapshot, keys, *, max_object_bytes):
         self.chain_calls.append(list(keys))
+        self.chain_caps.append(max_object_bytes)
         if self.chain_error is not None:
             raise self.chain_error
         return {k for k in keys if k in self.present}
@@ -132,6 +137,7 @@ def test_happy_path_returns_the_hand_written_report_and_calls_each_source_once(c
     assert out == {"y0": "2021", "sealed_binding": "bind-y0", "chain_share_min": 0.5, "training_years_min": 2,
                    "years": HAPPY}
     assert rec.calendar_calls == [("repo", "snap", 1234)]
+    assert rec.chain_caps == [1234] * len(MONTHS)
     assert rec.label_calls == [(sorted(r[0] for r in ROWS if _year(r) <= "2024"), "2025-01-01")]
     assert [{(k[1].year, k[1].month) for k in call} for call in rec.chain_calls] == [{m} for m in MONTHS]
     err = capsys.readouterr().err
@@ -288,3 +294,40 @@ def test_events_after_2025_are_ignored():
     out = _run(rec, sealed=_sealed(rows))
     assert out["years"] == HAPPY and out["y0"] == "2021"
     assert all(k[1].year <= 2025 for call in rec.chain_calls for k in call)
+
+
+BAD_CAPS = [
+    pytest.param(None, id="none"),
+    pytest.param(0, id="zero"),
+    pytest.param(True, id="bool"),
+    pytest.param(1.5, id="float"),
+]
+
+
+@pytest.mark.parametrize("cap", BAD_CAPS)
+def test_bad_byte_cap_refuses_before_any_calendar_chain_or_label_access(cap):
+    rec = Recorder()
+    with pytest.raises(OpsError) as exc:
+        _run(rec, max_object_bytes=cap)
+    assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "y0_inputs_invalid")
+    assert rec.calendar_calls == [] and rec.chain_calls == [] and rec.label_calls == []
+
+
+def test_capped_chain_keys_returns_exact_present_pairs_and_propagates_the_cap_refusal(tmp_path):
+    entries = [
+        ("TEST", "2024-06-15", 10), ("TEST", "2024-06-15", 11),  # wanted pair, two rows: deduplicated
+        ("ZEBRA", "2024-09-01", 12),                             # wanted pair
+        ("TEST", "2024-09-01", 13),                              # wanted ticker and date, not wanted as a pair
+    ] + [(f"AAA{i}", f"2024-{i:02d}-10", 100 + i) for i in range(1, 13)]
+    conn, store, snap = _commit_chains(tmp_path, {"2024": _rows(2024, entries)}, maximum_batch_rows=2)
+    repository = Repository(conn, store)
+    # ZEBRA@2024-06-15: its ticker and its date both exist in the table, but never as this pair.
+    wanted = [("TEST", pd.Timestamp("2024-06-15")), ("ZEBRA", pd.Timestamp("2024-09-01")),
+              ("ZEBRA", pd.Timestamp("2024-06-15"))]
+    try:
+        found = capped_chain_keys(repository, snap, wanted, max_object_bytes=1 << 30)
+        assert found == {("TEST", pd.Timestamp("2024-06-15")), ("ZEBRA", pd.Timestamp("2024-09-01"))}
+        with pytest.raises(DataError):
+            capped_chain_keys(repository, snap, wanted, max_object_bytes=1)
+    finally:
+        conn.close()
