@@ -262,6 +262,11 @@ ERR = ((np.arange(600) * 37) % 101) / 10 - 5.0
 SCORED = ["d518", "d550"]
 
 
+def _available(dates):
+    """Label availability: the measured close plus one day, as ISO text."""
+    return [(pd.Timestamp(d) + pd.Timedelta(days=1)).strftime("%Y-%m-%d") for d in dates]
+
+
 def _world():
     """Donors d000-d599 from 2023-01-01 (series members), 2022 donors o000-o299 (not in the series), and x_missing."""
     dates = np.concatenate([
@@ -271,7 +276,7 @@ def _world():
     ids = DONOR_IDS + OLD_IDS + ["x_missing"]
     table = pd.DataFrame({"event_date": pd.to_datetime(dates), "pred_move": 50.0, "pred_crush": 0.0}, index=ids)
     abs_move = np.concatenate([M3 + ERR, np.full(300, 2.0), [1.0]])
-    labels = pd.DataFrame({"abs_move": abs_move, "crush_pct_iv30": 0.0}, index=ids)
+    labels = pd.DataFrame({"abs_move": abs_move, "crush_pct_iv30": 0.0, "available": _available(dates)}, index=ids)
     return table, labels
 
 
@@ -282,7 +287,9 @@ def _bound(years=None):
 
 def _events(table):
     ids = SCORED + ["x_missing", "o010"]
-    return pd.DataFrame({"event_date": table.loc[ids, "event_date"].to_numpy(), "pred_move": 0.0}, index=ids)
+    when = pd.to_datetime(table.loc[ids, "event_date"].to_numpy())
+    return pd.DataFrame({"event_date": when, "decision_date": when - pd.Timedelta(days=1), "pred_move": 0.0},
+                        index=ids)
 
 
 def test_b3_matches_pool_quantiles_on_m3_predictions_not_production():
@@ -392,9 +399,10 @@ def _oracle_world():
     pred, err = 10.0 + 0.25 * np.arange(n), ORACLE_ERR[np.arange(n) % 5]
     dates = (pd.Timestamp("2023-01-01") + pd.to_timedelta(np.arange(n), unit="D")).to_numpy()
     table = pd.DataFrame({"event_date": dates, "pred_move": 50.0, "pred_crush": 0.0}, index=ids)
-    labels = pd.DataFrame({"abs_move": pred + err, "crush_pct_iv30": 0.0}, index=ids)
+    labels = pd.DataFrame({"abs_move": pred + err, "crush_pct_iv30": 0.0, "available": _available(dates)}, index=ids)
     series = pd.Series(np.append(pred, 10.0), index=pd.Index(ids + ["s1"], name="event_id"))
-    events = pd.DataFrame({"event_date": [pd.Timestamp("2025-01-02")], "pred_move": [0.0]}, index=["s1"])
+    events = pd.DataFrame({"event_date": [pd.Timestamp("2025-01-02")], "decision_date": [pd.Timestamp("2025-01-01")],
+                           "pred_move": [0.0]}, index=["s1"])
     return table, labels, events, {"series": series, "years": dict(ALL_BOUND)}, err
 
 
@@ -410,3 +418,29 @@ def test_scored_b3_quantiles_match_hand_oracle_over_whole_earlier_pool():
     literal = dict(zip(ORACLE_COLS, [6.0, 8.5, 9.4, 10.0, 11.0, 12.5, 16.0]))
     for col, value in literal.items():
         assert out.loc["s1", col] == pytest.approx(value)
+
+
+def test_b3_excludes_a_donor_available_after_the_decision_date():
+    table, labels = _world()
+    late = labels.copy()
+    late.loc["d500", "available"] = table.loc["d518", "event_date"].strftime("%Y-%m-%d")  # after d518's decision day
+    out = b3_quantiles(table, late, _events(table), _bound())
+    base = b3_quantiles(table, labels, _events(table), _bound())
+    trimmed = b3_quantiles(table.drop("d500"), labels, _events(table), _bound())
+    pd.testing.assert_frame_equal(out.loc[["d518"]], trimmed.loc[["d518"]])
+    # d518 is scored, not an empty row, so the comparison above is not two blanks.
+    assert out.loc["d518", "reason"] is None and out.loc["d518", "n_rows"] > 0
+    assert np.isfinite(out.loc["d518", QCOLS].to_numpy(dtype=float)).all()
+    # Its forecast's bucket holds about 52 of the 517 eligible donors, under MIN_POOL, so the whole pool is drawn:
+    # excluding d500 removes exactly one row.
+    assert out.loc["d518", "fallback"]
+    assert out.loc["d518", "n_rows"] == base.loc["d518", "n_rows"] - 1
+    # Independent oracle: d518's forecast is its series value, 1 + 0.01 * 518. Donor dk is dated 2023-01-01 + k days
+    # and its label is available the next day. d518's decision date is 2024-06-01, so donors k <= 516 are eligible
+    # (k = 516 is dated 2024-05-31, available 2024-06-01); k = 517 onward are not. Drop d500. Each donor's error is
+    # ERR[k] (abs_move minus its M3 value). The bucket holds under MIN_POOL, so the whole eligible pool is drawn.
+    positions = list(range(0, 500)) + list(range(501, 517))
+    f = 1.0 + 0.01 * 518
+    expected = np.quantile(np.maximum(f + ERR[positions], 0.0), ORACLE_LEVELS)
+    assert out.loc["d518", "n_rows"] == len(positions) == 516
+    np.testing.assert_allclose(out.loc["d518", QCOLS].to_numpy(dtype=float), expected)

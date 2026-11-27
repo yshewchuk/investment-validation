@@ -270,7 +270,7 @@ def test_real_spec_has_the_design_levels_grid_and_pending_decisions():
                for b in spec["grid"]["axes"]["min_samples_leaf"]}
     assert len(product) == 4
     assert spec["stage_b"]["status"] == "pending_decisions"
-    assert set(spec["stage_b"]["open_decisions"]) == {"tau_window_aggregation", "buildability_fallback", "stage_b_arms"}
+    assert spec["stage_b"]["open_decisions"] == {}
     assert spec["preregistered_at"] is None
 
 
@@ -373,3 +373,41 @@ def test_real_spec_records_the_2026_11_26_decisions():
     assert "never paired or scored" in spec["stage_a"]["settlements"]["s4"]
     assert "unsorted fit outputs" in spec["stage_a"]["settlements"]["s9"]
     assert "its own common subset" in spec["stage_a"]["flags"]
+
+
+def test_real_spec_records_the_2026_11_27_decisions():
+    spec = load_spec()[0]
+    stage_a = spec["stage_a"]
+    stage_b = spec["stage_b"]
+    donor = spec["baselines"]["donor_eligibility"]
+    assert "available_as_of_date is on or before the target's lead-1 decision date" in donor
+    assert "experiments/size_pnl_pool.py, engine/pnl_sim.py and EXP-188/189 files do not change" in donor
+    assert "donor_eligibility" in spec["baselines"]["B0"]["rule"]
+    assert "native full-history" not in spec["baselines"]["B0"]["rule"]
+    assert "donor_eligibility" in spec["baselines"]["B3"]["rule"]
+    assert "stage_a_years_invalid" in spec["walk_forward"]["y0_late"]
+    assert "return to the user" in spec["walk_forward"]["y0_late"]
+    assert "Both Q and Q_raw then enter Stage B" in stage_a["verdict"]
+    assert "Disclosed, not fixed" in stage_a["anchor_disclosure"]
+    assert "informational only" in stage_b["arm_roles"]
+    assert "never count toward Stage B's success verdict or any adoption" in stage_b["arm_roles"]
+    assert "EQ runs only for a passing source" in stage_b["arm_roles"]
+    assert "12 if one passed Stage A and 24 if both" in stage_b["success"]["multiplicity"]
+    assert "No retry or other buildability fallback" in stage_b["exp189"]["arm_e"]
+    assert "must not run until the F6 Stage B amendment" in stage_b["f6_amendment"]["gate"]
+    assert "stage_b_amendment_pending" in stage_b["f6_amendment"]["gate"]
+    assert set(stage_b["f6_amendment"]["open_until_then"]) == {"residual_pools"}
+    assert "stage_b_amendment_pending" in stage_b["failure_semantics"]["R1"]
+    aggregation = stage_b["tau"]["aggregation"]
+    assert "objective = (1 + r_2023H2) * (1 + r_2024) - 1" in aggregation
+    assert "must exit before 2025" in aggregation
+    assert "a period with no trades returns 0" in aggregation
+    assert "if either 1 + r <= 0 the objective is -1" in aggregation
+    assert "100-trade minimum (over the whole window) and the tie rules are unchanged" in aggregation
+    assert "capital tied up across the period boundary" in aggregation
+    assert "whole-contract re-rounding" in aggregation
+    assert "combined by tau.aggregation" in stage_b["tau"]["windows"]["2025"]
+    raw = read_bounded_state(REAL_SPEC, 1 << 20).decode("utf-8")
+    assert "open_decisions.stage_b_arms" not in raw
+    assert "open_decisions.buildability_fallback" not in raw
+    assert "open_decisions.tau_window_aggregation" not in raw

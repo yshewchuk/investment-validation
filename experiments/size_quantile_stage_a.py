@@ -22,7 +22,7 @@ from experiments.size_pnl_readers import read_labels, read_production
 from experiments.size_quantile_arm_s import fit_arm_s
 from experiments.size_quantile_arm_verdict import judge_arm, stage_a_verdict
 from experiments.size_quantile_b3 import b3_quantiles, bind_series
-from experiments.size_quantile_baselines import band_quantiles, implied_quantiles, pool_quantiles
+from experiments.size_quantile_baselines import band_quantiles, implied_quantiles, lead1_decision_dates, pool_quantiles
 from experiments.size_quantile_binding import bind_b3
 from experiments.size_quantile_calibration import (MIN_TAIL, PERIOD, QCOLS, calibrate, predictions_from_receipts,
                                                   score_crps)
@@ -74,6 +74,7 @@ def _score(sealed, walk, production, fetch, admitted, s_results, implied, b3):
     events = targets.loc[ids, ["event_date", "ticker", "label_end"]].assign(y=y.reindex(ids).to_numpy(float),
         pred_move=production["frame"]["pred_move"].reindex(ids).to_numpy(float), m0=lambda d: d["pred_move"],
         m3=m3, implied_move=implied["implied_move"].reindex(ids).to_numpy(float))
+    events["decision_date"] = lead1_decision_dates(sealed["context"]["target_events"], events.index)
     arms, pools, floors = calibrate(predictions, events)
     with stage("stage A CRPS and verdicts"):
         labels = read_labels(fetch, admitted)  # after the walk: predictions are written before outcomes are read

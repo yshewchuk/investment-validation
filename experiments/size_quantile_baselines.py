@@ -3,20 +3,24 @@ B0 is the production forecast with a native ResidualPool.
 
 Each event gets the seven quantiles of max(f + err_move, 0) over the rows ``ResidualPool.draw`` samples,
 each once (not random draws): the forecast's bucket, or the whole earlier pool when the bucket is under MIN_POOL.
+B0 and B3 donors also need available_as_of_date (labels `available`, the measured close plus one
+day) <= the event's lead-1 `decision_date`.
 B1 is M0 with the v14 size_distribution.v1 band over the full history, labels before the event's month.
 B2 is option-implied: implied_move times trailing-12-month y / implied_move quantiles, from at least 500
 donors, labels before the month.
 Pure over caller-loaded frames of admitted events only; reads no files. Caller: size_quantile_stage_a.
 """
 from collections import Counter
+from datetime import date
 
 import numpy as np
 import pandas as pd
 
-from engine.pnl_sim import MIN_POOL
+from engine.pnl_sim import MIN_POOL, ResidualPool
+from engine.v2.ops.errors import fail
 from engine.v2.research.progress import Progress, decision, stage
 from experiments import size_distribution_report as v14
-from experiments.size_pnl_pool import build_pool
+from experiments.size_pnl_pool import pool_history
 from experiments.size_quantile_metrics import Rules
 
 BUCKETS = 10  # ResidualPool's default bucket count, as build_pool uses it
@@ -24,6 +28,7 @@ LEVELS = Rules().levels
 _EXTRA = ["bucket", "fallback", "n_rows", "reason"]
 _QCOLS = [f"q{round(a * 100)}" for a in LEVELS]
 MIN_IMPLIED_DONORS = 500
+_ROW_COLS = ["event_date", "pred_abs_move", "err_move", "err_crush"]  # ResidualPool's required columns
 
 
 class _EveryRow:
@@ -70,31 +75,90 @@ def _validate(table, labels, events):
         raise ValueError("events event_date must not be null")
 
 
+def _causal_inputs(events, labels):
+    """Decision dates and label availability as datetime64 arrays; a null, unparseable or non-causal value refuses."""
+    if "decision_date" not in events.columns:
+        raise ValueError("events must have a decision_date column")
+    decided = pd.to_datetime(events["decision_date"], errors="coerce").to_numpy()
+    if pd.isna(decided).any():
+        raise ValueError("events decision_date must not be null or unparseable")
+    if not (decided < pd.to_datetime(events["event_date"]).to_numpy()).all():
+        raise ValueError("events decision_date must be strictly before event_date")
+    if "available" not in labels.columns:
+        raise ValueError("labels must have an available column")
+    available = pd.to_datetime(labels["available"], errors="coerce").to_numpy()
+    if pd.isna(available).any():
+        raise ValueError("labels available must not be null or unparseable")
+    return decided, available
+
+
+def lead1_decision_dates(target_events, event_ids):
+    """Each event's lead-1 decision date, as a datetime64 Series in ``event_ids`` order.
+
+    The lead-1 decision date is the horizon-1 forecast's source_session_ceiling (the key forecast_cutoff stores;
+    eligibility groups copy it as decision_date).
+    Refuses unless the target has exactly one horizon-1 forecast, its source_session_ceiling parses, and that date is
+    strictly before the event date.
+    """
+    days, eid = [], None
+    try:
+        targets = {t["event_id"]: t for t in target_events}
+        for eid in event_ids:
+            target = targets[eid]
+            lead1 = [f for f in target["forecasts"] if f["horizon_sessions"] == 1]
+            if len(lead1) != 1:
+                raise ValueError("not exactly one lead-1 forecast")
+            day = date.fromisoformat(lead1[0]["source_session_ceiling"])
+            if not day < date.fromisoformat(target["event_date"]):
+                raise ValueError("decision_date not before event_date")
+            days.append(day.isoformat())
+    except (KeyError, TypeError, ValueError):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", f"decision_date_invalid: event {eid} has no valid lead-1 decision date",
+                   details={"reason": "decision_date_invalid"}) from None
+    return pd.Series(pd.to_datetime(days), index=event_ids)
+
+
 def pool_quantiles(table, labels, events, *, name="B0"):
-    """Per-event quantile forecast of ``events`` from the earlier donors in ``table`` and ``labels``.
+    """Per-event quantile forecast of ``events`` from the donors in ``table`` and ``labels``.
+
+    A donor counts only if its label's ``available`` is on or before the event's lead-1 ``decision_date`` (``<=``),
+    and its event date is strictly before the event's (ResidualPool's rule). Events that share an eligible donor
+    set share one pool; only one pool is held at a time.
 
     Returns a frame indexed like ``events`` with one column per level (q10, q25, ...), then bucket, fallback,
     n_rows and reason. Unscored rows have NaN quantiles.
     """
     _validate(table, labels, events)
+    decided, available = _causal_inputs(events, labels)
     dates = pd.to_datetime(events["event_date"])
     forecasts = [np.nan if v is None else float(v) for v in events["pred_move"]]
     cols = [f"q{round(a * 100)}" for a in LEVELS] + _EXTRA
-    rows, reasons, counts, fallbacks = [], [], Counter(), 0
+    count = len(events)
+    rows, reasons, counts, fallbacks, built = [None] * count, [None] * count, Counter(), 0, 0
+    sorted_available = np.sort(available)
     with stage(f"quantile {name}"):
-        pool = build_pool(table, labels, floor=None)
-        pred = np.array([r["pred_abs_move"] for r in pool.evidence_rows()], dtype=float)
-        cache = {}
-        progress = Progress(f"quantile {name}", len(events))
-        for cutoff, forecast in zip(dates, forecasts):
-            quant, bucket, fallback, n_rows, reason = _score(pool, pred, cutoff, forecast, cache)
-            rows.append([*quant, bucket, fallback, n_rows])
-            reasons.append(reason)
+        progress = Progress(f"quantile {name}", count)
+        key = None
+        for pos in np.argsort(decided, kind="stable"):
+            # Eligible donor sets are nested, so the count of labels available by the decision date names the set.
+            eligible = int(np.searchsorted(sorted_available, decided[pos], "right"))
+            if eligible != key:
+                key, built = eligible, built + 1
+                history = pool_history(table, labels[available <= decided[pos]], floor=None)
+                pool = ResidualPool(history)
+                # ResidualPool sorts its complete rows by event_date; pred follows that same order.
+                kept = history.dropna(subset=_ROW_COLS).sort_values("event_date")
+                pred = kept["pred_abs_move"].to_numpy(dtype=float)
+                cache = {}
+            found = _score(pool, pred, dates.iloc[pos], forecasts[pos], cache)
+            quant, bucket, fallback, n_rows, reason = found
+            rows[pos] = [*quant, bucket, fallback, n_rows]
+            reasons[pos] = reason
             counts[reason or "scored"] += 1
             fallbacks += bool(fallback)
             progress.tick()
-        decision(f"quantile {name}", f"events={len(events)} scored={counts['scored']} "
-                 f"fallback={fallbacks} by_reason={dict(sorted(counts.items()))}")
+        decision(f"quantile {name}", f"events={count} scored={counts['scored']} fallback={fallbacks} "
+                 f"by_reason={dict(sorted(counts.items()))} pools={built}")
     out = pd.DataFrame(rows, index=events.index, columns=cols[:-1])
     out = out.astype({"bucket": float, "fallback": bool, "n_rows": int})
     out["reason"] = pd.Series(reasons, index=events.index, dtype=object)

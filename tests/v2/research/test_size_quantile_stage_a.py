@@ -54,6 +54,13 @@ def _binding(table_hash, frame):
     return content_hash({"table": table_hash, "rows": rows})
 
 
+def _lead1(event):
+    """The event's lead-1 forecast, with only the keys forecast_cutoff stores: its source session ceiling is the
+    day before the event, which is the lead-1 decision date."""
+    ceiling = (date.fromisoformat(event["date"]) - timedelta(days=1)).isoformat()
+    return {"horizon_sessions": 1, "source_session_ceiling": ceiling}
+
+
 def _world():
     """Training 2020-2021 (20 events a month), then 2022-2025 (150 a month, days 1-28). mu ~ U(4, 10), s in
     {0.2, 1, 3} independent of mu, y = max(0, mu + s * normal). label_end is the next day, so all are before 2026."""
@@ -79,7 +86,7 @@ def _world():
         "binding": BINDING, "dictionary_hash": DICT, "model_columns": ["f_mu", "f_s", "f_empty", "implied_move"],
         "evaluation_labels_before": "2026-02-01", "events": [{"event_id": i} for i in ids],
         "context": {"target_events": [{"event_id": e["id"], "ticker": e["ticker"], "event_date": e["date"],
-                                       "label_end": e["label_end"]} for e in events],
+                                       "label_end": e["label_end"], "forecasts": [_lead1(e)]} for e in events],
                     "eligibility_plan": {"random_windows": []}},
         "fold_events": [{"event_id": e["id"], "ticker": e["ticker"], "event_date": e["date"],
                          "forecasts": [{"source_session_ceiling": e["date"]}]} for e in events],
@@ -661,10 +668,11 @@ B0_COLS = [f"b0_q{round(a * 100)}" for a in LEVELS]
 def _b0_oracle(world, frame=None):
     """B0's quantiles and bucket for each event, from the design rule in plain numpy (no ResidualPool, build_pool or
     pool_quantiles; only the MIN_POOL constant is taken from engine.pnl_sim).
-    Donors: every fixture event dated strictly before the event, by event date, as the native pool is. Label
-    availability is not a B0 filter (the open question in issue #3047). err_move = donor abs_move - donor pred_move.
-    An event with zero earlier donors is unscored: the oracle returns (None, None), as production's ResidualPool
-    refuses the draw (reason refused_draw) when the earlier pool is empty.
+    Donors: every fixture event dated strictly before the event whose label is available on or before the event's
+    decision date (its event date minus one day). Each label is available the day after its event (the fake fetch).
+    err_move = donor abs_move - donor pred_move. An event with fewer than MIN_POOL eligible earlier donors is unscored:
+    the oracle returns (None, None), as production refuses the draw (reason refused_draw) when the eligible earlier
+    pool has fewer than MIN_POOL rows.
     Bucket edges are the earlier donors' pred_move quantiles on production's grid, np.linspace(0, 1, 11)[1:-1]
     (the same float values, not a re-derived 0.1..0.9 grid, which can differ by an ulp and move a donor sitting exactly
     on an edge into another bucket). Membership rule, as in ResidualPool.draw: a value v belongs to bucket
@@ -678,6 +686,8 @@ def _b0_oracle(world, frame=None):
     events = [e for e in world["events"] if e["id"] in members]
     ids = [e["id"] for e in events]
     dates = np.array([e["date"] for e in events])  # ISO dates compare correctly as strings
+    avail = np.array([(date.fromisoformat(e["date"]) + timedelta(days=1)).isoformat() for e in events])
+    decision = np.array([(date.fromisoformat(e["date"]) - timedelta(days=1)).isoformat() for e in events])
     pred = frame.loc[ids, "pred_move"].to_numpy(float)
     err = np.array([world["y"][i] for i in ids], dtype=float) - pred
     position = {i: k for k, i in enumerate(ids)}
@@ -685,7 +695,7 @@ def _b0_oracle(world, frame=None):
 
     def oracle(event_id):
         k = position[event_id]
-        earlier = dates < dates[k]
+        earlier = (dates < dates[k]) & (avail <= decision[k])
         donor_pred, donor_err = pred[earlier], err[earlier]
         if donor_pred.size < MIN_POOL:  # fewer than MIN_POOL earlier donors: unscored, no quantiles and no bucket
             return None, None
@@ -1287,5 +1297,20 @@ def test_reported_quarter_row_matches_the_oracle(full_run, expected, name):
     assert row["n"] == len(ids) > 0
     q = [expected["quantiles"][name][i] for i in ids]
     assert row["mean_pinball"] == pytest.approx(_mean_pinball([world["y"][i] for i in ids], q), rel=1e-9)
+
+
+def test_b0_labels_hash_binds_each_label_availability(monkeypatch, tmp_path, full_run):
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    event = world["events"][-1]
+    _install(monkeypatch, world)
+    late = (date.fromisoformat(event["date"]) + timedelta(days=2)).isoformat()  # still after the event
+    doc = _run(world, out, guard, avail={event["id"]: late})
+    assert doc["inputs"]["b0_labels_hash"] != full_run["doc"]["inputs"]["b0_labels_hash"]
+    # Hand-built rows as in the full-run test, with only the changed event's availability replaced by `late`.
+    labels = world["labels"]
+    rows = sorted([e, float(labels.at[e, "abs_move"]), float(labels.at[e, "crush_pct_iv30"]),
+                   late if e == event["id"] else (date.fromisoformat(world["dates"][e]) + timedelta(days=1)).isoformat()]
+                  for e in labels.index)
+    assert doc["inputs"]["b0_labels_hash"] == content_hash(rows)
 
 
