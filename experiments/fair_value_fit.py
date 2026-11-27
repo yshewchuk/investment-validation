@@ -100,7 +100,8 @@ def _price(t: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     return d, {**counts, "used": len(d), **{g: int((d["group"] == g).sum()) for g in ("unflagged", "size_only", "oi_only", "both", "unknown")}}
 
 
-def price_fills(blob: bytes) -> tuple[pd.DataFrame, dict]:
+def price_fills(fills_path) -> tuple[pd.DataFrame, dict]:
+    blob = fvi._read_capped(Path(fills_path), 16 << 20, "fills")
     started = time.monotonic()
     logging.info("[fv_fit] load+price start")
     try:
@@ -111,17 +112,16 @@ def price_fills(blob: bytes) -> tuple[pd.DataFrame, dict]:
     logging.info("[fv_fit] load+price end: %.1f s, peak rss %.0f MB; counts %s", time.monotonic() - started,
                  fvr._peak_mb(), json.dumps(counts, sort_keys=True))
     dates = d["order"].dt.strftime("%Y-%m-%d")
-    receipt = {"input_sha256": hashlib.sha256(blob).hexdigest(), "base_fvf_id": fvr.fvf_id(), "window_minutes": 60,
+    return d, {"input_sha256": hashlib.sha256(blob).hexdigest(), "base_fvf_id": fvr.fvf_id(), "window_minutes": 60,
                "fit_source_sha256": hashlib.sha256(fvi._read_capped(Path(__file__), 1 << 20, "fair_value_fit")).hexdigest(), "counts": counts,
                "first_order_date": dates.min() if len(d) else None, "last_order_date": dates.max() if len(d) else None}
-    return d, receipt
 
 
 def run_fit(fills_path, out_dir) -> dict:
     out_dir = Path(out_dir)
     if out_dir.exists():
         raise fvi.FairValueRefusal("out_dir_exists", "the output directory already exists")
-    receipt = price_fills(fvi._read_capped(Path(fills_path), 16 << 20, "fills"))[1]
+    receipt = price_fills(fills_path)[1]
     with tempfile.TemporaryDirectory(dir=out_dir.parent, prefix=".fit-") as hold:
         Path(hold, "out").mkdir()
         (Path(hold, "out") / "fit_receipt.json").write_bytes(json.dumps(receipt, sort_keys=True, allow_nan=False, indent=1).encode())
