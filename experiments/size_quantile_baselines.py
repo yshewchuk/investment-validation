@@ -8,7 +8,7 @@ day) <= the event's lead-1 `decision_date`.
 B1 is M0 with the v14 size_distribution.v1 band over the full history, labels before the event's month.
 B2 is option-implied: implied_move times trailing-12-month y / implied_move quantiles, from at least 500
 donors, labels before the month.
-Pure over caller-loaded frames of admitted events only; reads no files. No production caller yet (Q5b/Q6 first).
+Pure over caller-loaded frames of admitted events only; reads no files. Caller: size_quantile_stage_a.
 """
 from collections import Counter
 from datetime import date

@@ -551,8 +551,11 @@ def skeleton():
                            index=ids)
     b0 = pool_quantiles(table, labels, targets)
     label_end = (dates + pd.Timedelta(days=5)).strftime("%Y-%m-%d").to_numpy()
+    event_avail = (dates + pd.Timedelta(days=6)).strftime("%Y-%m-%d").to_numpy()  # label_end + 1 day, as before
     qhat = pd.DataFrame(pred[:, None] + OFFS, index=ids, columns=QCOLS)
-    arms, _, _ = calibrate(qhat, pd.DataFrame({"event_date": dates, "y": y, "label_end": label_end}, index=ids))
+    events_for_calibrate = pd.DataFrame({"event_date": dates, "y": y, "label_end": label_end, "available": event_avail},
+                                        index=ids)
+    arms, _, _ = calibrate(qhat, events_for_calibrate)
     return events, arms["Q"], b0
 
 

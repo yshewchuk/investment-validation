@@ -2,6 +2,7 @@
 no store); the regression is faked except in the end-to-end test."""
 import copy
 import json
+from datetime import date, timedelta
 
 import numpy as np
 import pandas as pd
@@ -11,7 +12,7 @@ from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import OpsError
 from experiments import lib
 from experiments import size_quantile_arm_s as arm_s
-from experiments.label_availability import available_before
+from experiments.label_availability import available_before, printed_before
 from experiments.size_quantile_prereg import load_spec
 
 SPEC, _ = load_spec()
@@ -119,16 +120,29 @@ def _out_of_memory():
     raise MemoryError
 
 
-def _install(monkeypatch, out, labels=LABEL, fit=None, real=False):
-    """Fake the label reader (labels available before the cutoff) and, unless real, the regression fit."""
+def _availability(avail, ends=None):
+    """The test's own reading of each label's native availability: the day after its label end, overridden by avail.
+    `ends` maps event id to label end; it defaults to the module's EVENTS."""
+    if ends is None:
+        ends = {e: end for e, _, _, end in EVENTS}
+    days = {e: (date.fromisoformat(end) + timedelta(days=1)).isoformat() for e, end in ends.items()}
+    return {**days, **avail}
+
+
+def _install(monkeypatch, out, labels=LABEL, fit=None, real=False, avail=None):
+    """Fake the label reader (labels available before the cutoff, by label end and native availability) and, unless
+    real, the regression fit. `avail` overrides native availability per event id."""
     calls = {"labels": [], "fits": []}
 
     def read_labels(sealed, event_ids, labels_before):
         ends = {e["event_id"]: e["label_end"] for e in sealed["context"]["target_events"]}
-        kept = [e for e in event_ids if available_before(ends[e], labels_before)]
+        days = _availability(avail or {}, ends)
+        kept = [e for e in event_ids if available_before(ends[e], labels_before)
+                and printed_before(days[e], labels_before)]
         files = sorted(p.name for p in out.glob("arm_s_fit_*.json")) if out.is_dir() else []
         calls["labels"].append({"ids": list(event_ids), "before": labels_before, "returned": kept, "files": files})
-        return pd.DataFrame({"event_id": kept, "absolute_move_pct": [labels[e] for e in kept]})
+        return pd.DataFrame({"event_id": kept, "absolute_move_pct": [labels[e] for e in kept],
+                             "target_available_on": [days[e] for e in kept]})
 
     def fake_fit(recipe, train_x, y, eval_x, *, columns):
         calls["fits"].append({"recipe": recipe, "ids": _ids(train_x), "y": [float(v) for v in y],
@@ -145,7 +159,7 @@ def _install(monkeypatch, out, labels=LABEL, fit=None, real=False):
 
 def _fixed_fit(monkeypatch, median, scale):
     """Replace each year's model fit with fixed per-event values; the z_q arithmetic is what is under test."""
-    def fake(spec, sealed, config, ids, x, y, eval_x, targets):
+    def fake(spec, sealed, config, ids, x, y, eval_x, targets, available):
         names = _ids(eval_x)
         return np.array([median.get(e, 0.0) for e in names]), np.array([scale.get(e, 1.0) for e in names])
 
@@ -178,6 +192,44 @@ def test_inner_folds_fit_only_earlier_rows_labelled_before_the_held_out_year(mon
     assert scale["eval"] == E24
     assert median["ids"] == T24 and median["eval"] == E24
     assert median["y"] == [LABEL[e] for e in T24]
+
+
+def _inner_fit(calls, held):
+    """Training ids of the one fake fit that predicts the inner held-out year whose events are `held`."""
+    return next(c["ids"] for c in calls["fits"] if c["eval"] == held)
+
+
+def test_inner_fit_drops_a_label_available_in_the_held_out_year_until_the_next_inner_year(monkeypatch, tmp_path):
+    # e22b's label ends 2022-12-05 (before 2023-01-01) but its native availability is 2023-02-10: the 2023 inner
+    # fit must not see it, the 2024 inner fit must, and it stays a held-out row of its own year (2022).
+    calls = _install(monkeypatch, tmp_path / "arm", avail={"e22b": "2023-02-10"})
+    _run(_sealed(ends={"e22b": "2022-12-05"}), _spec(min_events=1), ["2025"], tmp_path / "arm")
+    assert _inner_fit(calls, E23) == ["e20a", "e20b", "e21a", "e21b", "e22a"]
+    assert _inner_fit(calls, E24) == T24
+    assert [c["eval"] for c in calls["fits"] if "e22b" in c["eval"]] == [["e22a", "e22b"]]
+
+
+def test_inner_fit_excludes_availability_on_jan_first_and_keeps_dec_thirty_first(monkeypatch, tmp_path):
+    calls = _install(monkeypatch, tmp_path / "arm", avail={"e21a": "2023-01-01", "e21b": "2022-12-31"})
+    _run(_sealed(), _spec(min_events=1), ["2025"], tmp_path / "arm")
+    assert _inner_fit(calls, E23) == ["e20a", "e20b", "e21b", "e22a", "e22b"]
+    assert _inner_fit(calls, E24) == T24
+
+
+def _training_hash(monkeypatch, out, avail):
+    calls = _install(monkeypatch, out, avail=avail)
+    result = _run(_sealed(), _spec(min_events=1), ["2024"], out)
+    return result["2024"]["receipt"]["inputs"]["training_availability_hash"], calls["labels"][0]["returned"]
+
+
+def test_receipt_binds_each_training_labels_availability_in_training_order(monkeypatch, tmp_path):
+    avail = {"e21a": "2023-01-02"}
+    digest, kept = _training_hash(monkeypatch, tmp_path / "a", avail)
+    days = _availability(avail)
+    assert kept == T24
+    assert digest == content_hash([[e, days[e]] for e in T24])
+    changed, _ = _training_hash(monkeypatch, tmp_path / "b", {"e21a": "2023-01-03"})
+    assert changed != digest
 
 
 def test_no_out_of_fold_row_is_fit_failed_and_later_years_still_run(monkeypatch, tmp_path):

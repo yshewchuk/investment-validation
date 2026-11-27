@@ -1,7 +1,7 @@
 """EXP-190 Q4b: baseline B3 (design guides/size_quantile_move_design.md sections 5 and 7).
 
 B3 is B0's construction on the sealed lead-1 predictions of the model bind_b3 chose. A year without a bound
-prediction is not_testable, not a refusal. Pure over caller-injected read and admit. No production caller yet.
+prediction is not_testable, not a refusal. Pure over caller-injected read and admit. Caller: size_quantile_run.
 """
 import numpy as np
 import pandas as pd
@@ -23,6 +23,11 @@ _EXTRA = ("bucket", "fallback", "n_rows", "reason")
 
 def _refuse(reason, message):
     return fail("EXPERIMENT_IDENTITY_CONFLICT", f"{reason}: {message}", details={"reason": reason})
+
+
+def series_digest(series):
+    """Content hash of a B3 series: its (id, repr(float(value))) pairs sorted by id."""
+    return content_hash(sorted([str(i), repr(float(v))] for i, v in series.items()))
 
 
 def _inner(plan, read, cids, kind, year, admit):
@@ -76,7 +81,8 @@ def _bind(plan, read, binding, admit):
     rows = [[year, status, entry["binding"] if status == "bound" else None] for year, status, entry in results]
     digest = content_hash({"plan_id": plan["plan_id"], "b3_candidate_id": cid, "years": rows})
     decision("quantile B3", f"id={cid} years={years} rows={len(series)}")
-    return {"b3_candidate_id": cid, "years": years, "series": series, "binding": digest}
+    return {"b3_candidate_id": cid, "years": years, "series": series, "binding": digest,
+            "series_hash": series_digest(series)}
 
 
 def bind_series(plan, read, binding, admit):
