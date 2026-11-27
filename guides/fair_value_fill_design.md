@@ -1,6 +1,6 @@
 # Fair-value marks and spread-aware fills, model F (shared design)
 
-**Status: design only.** A shared experiment-side module for EXP-190 Stage B (`guides/size_quantile_move_design.md`, section 6) and EXP-189 Amendment 1 (its owner's work); no EXP-188 or EXP-189 file or spec changes here. A consumer adopts F in its own spec and pre-registration. Content: user decisions of 2026-11-25; rules marked "mine" are my judgement calls inside them.
+**Status:** a design, partly built (section 12's slices, F6a and F6b among them, are in the code); section 9's model A is not built. A shared experiment-side module for EXP-190 Stage B (`guides/size_quantile_move_design.md`, section 6) and EXP-189 Amendment 1 (its owner's work); no EXP-188 or EXP-189 file or spec changes here. A consumer adopts F in its own spec and pre-registration. Content: user decisions of 2026-11-25; rules marked "mine" are my judgement calls inside them.
 
 **Carry and dividend amendment (2026-11-25, user decision).** Fair value uses ORATS's options-implied borrow as the carry rate, and ORATS's dividend inputs, to reprice consistently with the inputs behind `smvVol` (an aim: we have not confirmed which inputs ORATS used). It replaces the zero-dividend approximation (sections 3, 4 and their consequences in sections 7-12). The re-ingest tool (version 4) carries the fields. **New slice F7** consumes them; F1, F2 (#2901) and F3 stay as they are, pricing with carry equal to the risk-free rate and no dividend. F5 now follows F7, so no `fvf_id`, and so no consumer registration, predates it.
 
@@ -138,7 +138,7 @@ F is used in **selection and scoring alike**:
 
 **Guard (supervisor's judgement).** `fill_over_fair` becomes `fill_over_mid`, the same 25% rule against the mid debit: `debit_F - debit_mid > 0.25 * debit_mid`.
 
-**Why (user's near-close fills; aggregates from the supervisor's private run, 2026-11-27).** Fair value priced from the prior day's `smvVol` sits at the quote edge on 45% of fills. Every fair-value form fit worse than the mid anchor: mean absolute error 0.96-1.01 half-spreads against 0.90. The mid anchor's average bias is about 0; current F averages 0.13 too harsh. The spread weight fits to 0, but only 17 fills have a spread above 20%, hence the variant below.
+**Why (user's near-close fills; aggregates from the supervisor's private run, 2026-11-27).** Fair value priced from the prior day's `smvVol` sits at the quote edge on 45% of fills. Every fair-value form fit worse than the mid anchor: mean absolute error 0.96-1.01 half-spreads against 0.90. The mid anchor's average bias is about 0; current F averages 0.13 half-spreads too harsh. The spread weight fits to 0, but only 17 fills have a spread above 20%, hence the variant below.
 
 **Fills used (B1 window).** Each fill is matched to a quote snapshot, and only fills within 60 minutes of it enter (two-sided, 60 included: supervisor's judgement), so the snapshot's quote can be later than the fill. A fill outside the window, with an unusable quote or with an effective half-spread of at most 1e-9, which leaves `x` undefined, is excluded and counted (that threshold: F6a owner's judgement).
 
@@ -150,7 +150,7 @@ F is used in **selection and scoring alike**:
 - **Each thin penalty** (supervisor's judgement): with base and spread fixed, the grid value with the least same loss on fills with that flag set and the other known and 0; ties to the larger. It is fitted only with at least 30 such fills; otherwise the current value stays. Fills with both flags set or any unknown enter no fit.
 - **Not calibrated:** the spread scale, guard fraction, thin thresholds and unknown value 0.5. A multiplier fit for spread orders without leg prices is not built.
 
-**Constants id and variant.** Model A's constants get a **new constants id** (B2). The one named variant is **`spread050`** (spread = 0.50), a user-requested wide-leg sensitivity: it changes only the spread weight and leaves the primary id unchanged. A consumer needs a new spec hash and PLANNED row before a new run, pre-registers `spread050`, states the fills' date range and any overlap with its evaluation periods, and never re-scores an old run with constants chosen by that result.
+**Constants id and variant.** Model A's constants get a **new constants id** (B2). The one named variant is **`spread050`** (spread = 0.50), a user-requested wide-leg sensitivity: it changes only the spread weight and leaves the primary id unchanged. It replaces B2's earlier pair: model A has no `spread025`, which the built code still writes. A consumer needs a new spec hash and PLANNED row before a new run, pre-registers `spread050`, states the fills' date range and any overlap with its evaluation periods, and never re-scores an old run with constants chosen by that result.
 
 **F6c's slices, failure semantics and open questions** are in section 12.
 
@@ -205,7 +205,7 @@ Two PRs. Sizes are the amendment owner's estimates (added lines and words). The 
 | R1 inputs, in order | existing output directory, size cap, unreadable file, missing column, empty file, invalid value, then any `V`-input check Q1 keeps; all before output | constants document (`constants_invalid`), then id (`constants_id_mismatch`), then variant (`variant_unknown`), all before pricing; then input columns and legs (`column_missing`, `leg_invalid`) |
 | R1 per row | counted, first match: `outside_window`, `unpriceable`, any exclusion Q1 keeps, `zero_half_spread` | `unpriceable`; other statuses follow Q2 |
 | R2 resources | the built 16 MiB cap | section 10's chunking and limits; no new store |
-| R4 outputs | both files by one directory rename, receipt last, no partial output; an existing output directory refuses; no `fsync` | pure functions that store nothing; no partial result on a refusal |
+| R4 outputs | both files by one directory rename, receipt last, no partial output; an existing output directory refuses; no `fsync`, so all-or-nothing covers a process failure, not a power loss | pure functions that store nothing; no partial result on a refusal |
 | R5 identity | receipt binds the parsed fills bytes, the written constants bytes, the new constants id and the source hashes | the caller pins the constants id and variant (`spread050` or none); `fvf_id` follows Q3 |
 | R6 causality | the snapshot quote may follow the fill by up to 60 minutes (B1); any `vol_date` or `rates_date` Q1 keeps is strictly before the order date | entry values never read exit-date rows |
 | Stored artifacts | `constants.json` (section 9's four constants, F's unchanged ones, the id, `spread050`) and `fit_receipt.json` (those bindings, window, counts, used date range, per-group loss, tie counts, residual statistics) | none |
