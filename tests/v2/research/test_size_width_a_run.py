@@ -40,7 +40,7 @@ from tests.v2.research.test_size_width_run import FAKE, _argv, _gates, _install,
 
 DOC = fvk.constants_document(fvk.primary_constants(0.21, 0.0, 0.15, 0.10))  # base, spread, thin_size, thin_oi
 EXPERIMENTS = Path(__file__).resolve().parents[3] / "experiments"
-A_SOURCES = ("fair_value_apply.py", "fair_value_constants.py", "size_width_a_fills.py")
+A_SOURCES = ("fair_value_apply.py", "fair_value_constants.py", "size_width_a_fills.py", "size_width_f_fills.py", "size_width_f_quotes.py")
 WEIGHT = {"primary": 0.0, "spread050": 0.50}  # the spread weight each variant sets (the fixtures' sizes and open interest are not thin)
 MODEL = af.ModelA(DOC, DOC["constants_id"], "primary")
 

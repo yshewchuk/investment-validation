@@ -23,7 +23,8 @@ from experiments.size_width_f_fills import FFills
 HERE = Path(__file__).resolve().parent
 CONSTANTS_PATH = HERE / "EXP-189_short_vol_width_tuning" / "model_a_constants.json"  # read at call time (tests monkeypatch it)
 MAX_CONSTANTS_BYTES = 1 << 16
-SOURCE_FILES = ("fair_value_apply.py", "fair_value_constants.py", "size_width_a_fills.py")
+# every file of model A's pricing path outside fvf_id: the apply code, this module, and the F seam it prices through (quote tables, structure dispatch)
+SOURCE_FILES = ("fair_value_apply.py", "fair_value_constants.py", "size_width_a_fills.py", "size_width_f_fills.py", "size_width_f_quotes.py")
 
 
 class ModelA(typing.NamedTuple):
