@@ -8,7 +8,7 @@ day) <= the event's lead-1 `decision_date`.
 B1 is M0 with the v14 size_distribution.v1 band over the full history, labels before the event's month.
 B2 is option-implied: implied_move times trailing-12-month y / implied_move quantiles, from at least 500
 donors, labels before the month.
-Pure over caller-loaded frames of admitted events only; reads no files. No production caller yet (Q5b/Q6 first).
+Pure over caller-loaded frames of admitted events only; reads no files. Caller: size_quantile_stage_a.
 """
 from collections import Counter
 from datetime import date
@@ -118,6 +118,26 @@ def lead1_decision_dates(target_events, event_ids):
     return pd.Series(pd.to_datetime(days), index=event_ids)
 
 
+_DONOR_VALUES = ["event_date", "pred_move", "pred_crush", "abs_move", "crush_pct_iv30"]
+
+
+def _donor_rows_removed(table, labels, decided, event_dates):
+    """Distinct complete donor rows (the _DONOR_VALUES present after the inner join with labels) dated strictly before
+    some event whose decision date is earlier than the row's ``available``: the availability cut removed them from
+    that event's earlier-dated pool. ``available == decision_date`` is not removed. Zero events or rows give 0."""
+    joined = table[["event_date", "pred_move", "pred_crush"]].join(labels[["abs_move", "crush_pct_iv30", "available"]],
+                                                                    how="inner").dropna(subset=_DONOR_VALUES)
+    row_dates = pd.to_datetime(joined["event_date"]).to_numpy().astype("datetime64[ns]").astype(np.int64)
+    row_available = pd.to_datetime(joined["available"]).to_numpy().astype("datetime64[ns]").astype(np.int64)
+    order = np.argsort(decided, kind="stable")
+    sorted_decided = decided[order].astype("datetime64[ns]").astype(np.int64)
+    # running_max[p] is the latest event date among the p events decided earliest (the first p in decision order)
+    running_max = np.concatenate([np.array([np.iinfo(np.int64).min]),
+                                  np.maximum.accumulate(event_dates[order].astype("datetime64[ns]").astype(np.int64))])
+    cut = np.searchsorted(sorted_decided, row_available, side="left")  # events decided strictly before availability
+    return int((running_max[cut] > row_dates).sum())
+
+
 def pool_quantiles(table, labels, events, *, name="B0"):
     """Per-event quantile forecast of ``events`` from the donors in ``table`` and ``labels``.
 
@@ -125,12 +145,16 @@ def pool_quantiles(table, labels, events, *, name="B0"):
     and its event date is strictly before the event's (ResidualPool's rule). Events that share an eligible donor
     set share one pool; only one pool is held at a time.
 
+    Logs donor_rows_removed: the distinct complete donor rows that the availability cut removed from at least one
+    event's earlier-dated pool (dated before that event, but available after its decision date).
+
     Returns a frame indexed like ``events`` with one column per level (q10, q25, ...), then bucket, fallback,
     n_rows and reason. Unscored rows have NaN quantiles.
     """
     _validate(table, labels, events)
     decided, available = _causal_inputs(events, labels)
     dates = pd.to_datetime(events["event_date"])
+    removed = _donor_rows_removed(table, labels, decided, dates.to_numpy())
     forecasts = [np.nan if v is None else float(v) for v in events["pred_move"]]
     cols = [f"q{round(a * 100)}" for a in LEVELS] + _EXTRA
     count = len(events)
@@ -158,7 +182,7 @@ def pool_quantiles(table, labels, events, *, name="B0"):
             fallbacks += bool(fallback)
             progress.tick()
         decision(f"quantile {name}", f"events={count} scored={counts['scored']} fallback={fallbacks} "
-                 f"by_reason={dict(sorted(counts.items()))} pools={built}")
+                 f"by_reason={dict(sorted(counts.items()))} pools={built} donor_rows_removed={removed}")
     out = pd.DataFrame(rows, index=events.index, columns=cols[:-1])
     out = out.astype({"bucket": float, "fallback": bool, "n_rows": int})
     out["reason"] = pd.Series(reasons, index=events.index, dtype=object)

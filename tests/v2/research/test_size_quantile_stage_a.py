@@ -14,13 +14,16 @@ import yaml
 
 from engine.pnl_sim import MIN_POOL
 from engine.v2.foundation import content_hash
-from engine.v2.ops.errors import OpsError
+from engine.v2.ops.errors import OpsError, fail
 from experiments import lib
 from experiments import size_pnl_readers as readers
+from experiments import size_quantile_arm_s as arm_s
 from experiments import size_quantile_fits as fits
 from experiments import size_quantile_prereg as prereg
 from experiments import size_quantile_stage_a as stage_a
 from experiments import size_quantile_walk as walk
+
+Q_KEYS = ["q10", "q25", "q40", "q50", "q60", "q75", "q90"]  # the arm's quantile columns, as the report names them
 
 REPORT = "stage_a_report.json"
 REAL_SPEC = prereg.SPEC_PATH
@@ -74,13 +77,15 @@ def _world():
                                "label_end": (date.fromisoformat(text) + timedelta(days=1)).isoformat()})
     events.sort(key=lambda e: e["id"])
     ids = [e["id"] for e in events]
+    # implied_move (B2's option-implied move): None on every 97th event, 0.0 on every 89th, else mu.
+    implied = {e["id"]: None if k % 97 == 0 else 0.0 if k % 89 == 0 else e["mu"] for k, e in enumerate(events)}
     # Outer training lists are the annual rule's: every event dated before the year starts, in event order.
     folds = [{"outer": {"year": "2025", "training_candidate_event_ids": [
         e["id"] for e in events if e["date"] < "2025-01-01"]},
         "inner": [{"year": y, "training_candidate_event_ids": [
             e["id"] for e in events if e["date"] < f"{y}-01-01"]} for y in ("2023", "2024")]}]
     sealed = {
-        "binding": BINDING, "dictionary_hash": DICT, "model_columns": ["f_mu", "f_s", "f_empty"],
+        "binding": BINDING, "dictionary_hash": DICT, "model_columns": ["f_mu", "f_s", "f_empty", "implied_move"],
         "evaluation_labels_before": "2026-02-01", "events": [{"event_id": i} for i in ids],
         "context": {"target_events": [{"event_id": e["id"], "ticker": e["ticker"], "event_date": e["date"],
                                        "label_end": e["label_end"], "forecasts": [_lead1(e)]} for e in events],
@@ -88,7 +93,8 @@ def _world():
         "fold_events": [{"event_id": e["id"], "ticker": e["ticker"], "event_date": e["date"],
                          "forecasts": [{"source_session_ceiling": e["date"]}]} for e in events],
         "plan": {"plan_id": "P1", "candidates": _candidates(), "folds": folds},
-        "rows": [{"event_id": e["id"], "f_mu": e["mu"], "f_s": e["s"], "f_empty": None} for e in events],
+        "rows": [{"event_id": e["id"], "f_mu": e["mu"], "f_s": e["s"], "f_empty": None,
+                  "implied_move": implied[e["id"]]} for e in events],
     }
     # Production forecast drifts biased from 2023-07-01: its pooled earlier errors hide the bias, so its bands under/over-cover in the judged periods.
     frame = pd.DataFrame({"pred_move": [e["mu"] + (3.0 if e["date"] >= "2023-07-01" else 0.0) for e in events],
@@ -99,31 +105,89 @@ def _world():
         pd.Timestamp(e["date"]) for e in events]}), "excluded": {}})
     return {"events": events, "mu": {e["id"]: e["mu"] for e in events}, "s": {e["id"]: e["s"] for e in events},
             "y": {e["id"]: e["y"] for e in events}, "sealed": sealed, "frame": frame, "labels": labels,
-            "dates": {e["id"]: e["date"] for e in events}, "admitted": admitted}
+            "dates": {e["id"]: e["date"] for e in events}, "admitted": admitted, "implied": implied}
 
 
 PRODUCTION_BINDING = _binding(TABLE_HASH, _world()["frame"])
+B3_BINDING = "sha256:" + "c" * 64
+B3_YEARS = {"2023": "bound", "2024": "bound", "2025": "bound"}
+
+
+def _b3_read(_slot):
+    return "SELECTION"
+
+
+B3_READ, B3_ADMIT = _b3_read, object()  # dummy binder inputs: the binders are faked in every test
+
+
+def _digest(series):
+    """The B3 series hash, written in the test: sorted [id, repr(float(value))] pairs under content_hash."""
+    return content_hash(sorted([i, repr(float(v))] for i, v in series.items()))
+
+
+def _b3(world, years=None):
+    """A B3 binding: mu plus small noise for the events of each bound year (a year without a series is not bound)."""
+    years = B3_YEARS if years is None else years
+    rng = np.random.default_rng(190)
+    kept = [e for e in world["events"] if years.get(e["date"][:4]) == "bound"]
+    series = pd.Series([e["mu"] + 0.1 * float(rng.normal()) for e in kept], dtype=float,
+                       index=pd.Index([e["id"] for e in kept], name="event_id"))
+    return {"b3_candidate_id": "B3", "years": years, "series": series, "rule": "v14_mae_winner",
+            "m3_candidate_id": "M3", "binding": B3_BINDING, "series_hash": _digest(series)}
 
 
 def _fake_fit(boom=False):
     def regress(recipe, train_x, y, eval_x, *, columns):
         if boom:
             raise ValueError("boom")
-        z = statistics.NormalDist().inv_cdf(recipe["estimator"]["params"]["quantile"])
+        quantile = recipe["estimator"]["params"].get("quantile")  # arm S's absolute-error recipe has none: median
+        z = 0.0 if quantile is None else statistics.NormalDist().inv_cdf(quantile)
         values = np.asarray(eval_x, dtype=float)
         return {"predictions": (values[:, 0] + values[:, 1] * z).tolist()}
     return regress
 
 
-def _install(monkeypatch, world, *, omit=(), regress=None, read=None):
-    """Fake the label reader (dropping `omit` on the evaluation read only) and the walk's fit regression."""
+def _patch_b3(monkeypatch, b3, calls=None):
+    """Fake both binders: bind_b3 names b3's rule and M3, and bind_series returns b3 as the bound series. When calls is
+    given, each binder's arguments are appended to it, and bind_b3 also records the binding it returned."""
+    binding = {"rule": b3["rule"], "m3_candidate_id": b3["m3_candidate_id"],
+               "b3_candidate_id": b3["b3_candidate_id"]}
+
+    def fake_bind_b3(plan, selection):
+        if calls is not None:
+            calls.append(("bind_b3", plan, selection, binding))
+        return binding
+
+    def fake_bind_series(plan, read, bound, admit):
+        if calls is not None:
+            calls.append(("bind_series", plan, read, bound, admit))
+        return b3
+    monkeypatch.setattr(stage_a, "bind_b3", fake_bind_b3)
+    monkeypatch.setattr(stage_a, "bind_series", fake_bind_series)
+
+
+def _next_day(world, event_id):
+    """The event's label availability as the readers return it: event date + 1 day, ISO text."""
+    return (date.fromisoformat(world["dates"][event_id]) + timedelta(days=1)).isoformat()
+
+
+def _install(monkeypatch, world, *, omit=(), regress=None, read=None, s_regress=None, later=None):
+    """Fake the label reader (dropping `omit` on the evaluation read only), the fit regressions of the walk and of
+    arm S (`s_regress` for arm S only), and both B3 binders (returning _b3(world)). `later` maps event ids to a label
+    availability other than the next day (the reader's target_available_on)."""
     def fake_read(sealed, event_ids, labels_before):
         drop = set(omit) if labels_before == "2026-02-01" else set()
-        kept = [e for e in event_ids if e not in drop]
-        return pd.DataFrame({"event_id": kept, "absolute_move_pct": [world["y"][e] for e in kept]})
+        # As the real reader: a label counts only if it is available (event date + 1 day) before labels_before.
+        kept = [e for e in event_ids if e not in drop
+                and (date.fromisoformat(world["dates"][e]) + timedelta(days=1)).isoformat() < labels_before]
+        return pd.DataFrame({"event_id": kept, "absolute_move_pct": [world["y"][e] for e in kept],
+                             "target_available_on": [(later or {}).get(e) or _next_day(world, e) for e in kept]})
     monkeypatch.setattr(walk, "training_labels", read or fake_read)
     monkeypatch.setattr(stage_a, "training_labels", read or fake_read)
+    monkeypatch.setattr(arm_s, "training_labels", read or fake_read)
     monkeypatch.setattr(fits, "fit_regression_predictions", regress or _fake_fit())
+    monkeypatch.setattr(arm_s, "fit_regression_predictions", s_regress or _fake_fit())
+    _patch_b3(monkeypatch, _b3(world))
 
 
 def _spy(monkeypatch, world):
@@ -137,7 +201,7 @@ def _spy(monkeypatch, world):
     def no_fit(*_args, **_kwargs):
         calls.append("fit")
         raise AssertionError("no fit may run")
-    _install(monkeypatch, world, regress=no_fit, read=no_read)
+    _install(monkeypatch, world, regress=no_fit, read=no_read, s_regress=no_fit)
     return calls
 
 
@@ -148,11 +212,11 @@ def _planned_row(digest):
 
 def _guard(case, *, settled=True, min_donors=30):
     """A tmp copy of the real spec (settled unless told otherwise, tail minimum set to min_donors), its PLANNED ledger
-    row and one EXP-190 directory."""
+    row and one EXP-190 directory. stage_b.status is set explicitly either way."""
     spec = yaml.safe_load(REAL_SPEC.read_text(encoding="utf-8"))
     spec["distribution_tails"]["min_donors"] = min_donors
+    spec["stage_b"] = {**spec["stage_b"], "status": "settled" if settled else "pending_decisions"}
     if settled:
-        spec["stage_b"] = {**spec["stage_b"], "status": "settled"}
         spec["preregistered_at"] = STAMP
     spec_path = case / "spec.yaml"
     spec_path.write_text(yaml.safe_dump(spec, sort_keys=False), encoding="utf-8")
@@ -163,10 +227,11 @@ def _guard(case, *, settled=True, min_donors=30):
             "experiments_dir": case / "exps"}
 
 
-def _fake_fetch(world, out, calls, *, frame=None, avail=None, extra=None):
+def _fake_fetch(world, out, calls, *, frame=None, avail=None, extra=None, nan_crush=frozenset()):
     """The shared store as fetch(columns, ids), with literal column names and event_id plus the requested columns.
     Each call is recorded with whether every fit_<year>.json exists yet. frame replaces the production forecasts,
-    avail overrides label availability by id, extra adds one unrequested row to the answer."""
+    avail overrides label availability by id, extra adds one unrequested row to the answer, nan_crush lists the ids
+    whose crush_pct_iv30 is NaN (read_labels drops those labels)."""
     def fetch(columns, ids):
         calls.append({"columns": tuple(columns), "ids": list(ids),
                       "fits": all((out / "fits" / f"fit_{year}.json").exists() for year in YEARS)})
@@ -175,8 +240,9 @@ def _fake_fetch(world, out, calls, *, frame=None, avail=None, extra=None):
             got = {"pred_abs_move": src.loc[ids, "pred_move"].to_numpy(float),
                    "pred_iv_crush_30": src.loc[ids, "pred_crush"].to_numpy(float), "horizon_sessions": [1] * len(ids)}
         else:
+            crush = [np.nan if e in nan_crush else float(world["labels"].at[e, "crush_pct_iv30"]) for e in ids]
             got = {"abs_move": world["labels"].loc[ids, "abs_move"].to_numpy(float),
-                   "crush_pct_iv30": world["labels"].loc[ids, "crush_pct_iv30"].to_numpy(float),
+                   "crush_pct_iv30": np.array(crush, dtype=float),
                    "available_as_of_date": [(avail or {}).get(e) or (date.fromisoformat(world["dates"][e])
                                                                      + timedelta(days=1)).isoformat() for e in ids]}
         answer = pd.DataFrame({"event_id": ids, **{column: got[column] for column in columns}})
@@ -190,12 +256,18 @@ def _label_fetches(calls):
     return [call for call in calls if "abs_move" in call["columns"]]
 
 
-def _run(world, out, guard, *, calls=None, years=YEARS, production_hash=TABLE_HASH, table_hash=TABLE_HASH, **store):
-    """Stage A on the fake shared store; calls records every fetch and store goes to _fake_fetch."""
+def _run(world, out, guard, *, calls=None, years=YEARS, production_hash=TABLE_HASH, table_hash=TABLE_HASH,
+         b3=None, monkeypatch=None, bound_b3_binding=None, **store):
+    """Stage A on the fake shared store (calls records every fetch). b3, when given, replaces the faked binders' B3
+    (needs monkeypatch); bound_b3_binding is the binding run_inputs bound, if any."""
+    if b3 is not None:
+        _patch_b3(monkeypatch, b3)
     fetch = _fake_fetch(world, out, [] if calls is None else calls, **store)
-    return stage_a.run_stage_a(world["sealed"], years, world["admitted"], fetch, out, production_hash=production_hash,
-                               table_hash=table_hash, spec_path=guard["spec_path"], ledger_path=guard["ledger_path"],
-                               run_log_path=guard["run_log_path"], experiments_dir=guard["experiments_dir"])
+    return stage_a.run_stage_a(world["sealed"], years, world["admitted"], fetch, out,
+                               production_hash=production_hash, table_hash=table_hash, b3_read=B3_READ,
+                               b3_admit=B3_ADMIT, spec_path=guard["spec_path"], ledger_path=guard["ledger_path"],
+                               run_log_path=guard["run_log_path"], experiments_dir=guard["experiments_dir"],
+                               bound_b3_binding=bound_b3_binding)
 
 
 def _refusal(exc):
@@ -291,8 +363,7 @@ def test_full_run_passes_and_every_checked_number_matches_the_oracle(full_run):
     assert full_run["stdout"] == ""
     assert "[quantile stage A] start" in full_run["stderr"] and "done in" in full_run["stderr"]
     assert "stage_b_arms" not in doc and "stage_b_arms" not in (out / REPORT).read_text(encoding="utf-8")
-    assert doc["not_included"] == ["y0_check", "S", "B1", "B2", "B3", "headline_loss_flags", "b0_conditional_value",
-                                   "unconditional_width_terciles"]
+    assert doc["not_included"] == ["y0_check", "b0_conditional_value", "unconditional_width_terciles"]
     assert sorted(p.name for p in out.iterdir()) == ["fits", REPORT]
     inputs = doc["inputs"]
     assert inputs["production_binding"] == PRODUCTION_BINDING and inputs["production_table_hash"] == TABLE_HASH
@@ -373,6 +444,69 @@ def test_history_is_the_arms_own_scored_out_of_sample_rows(monkeypatch, tmp_path
     assert got_available == want_available
 
 
+def test_calibrate_gets_each_labels_native_availability_not_the_label_end_proxy(monkeypatch, tmp_path):
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    # The 2022-06-05 event's label is printed on 2022-06-20, not on its label_end + 1 day (2022-06-07).
+    late = next(e["id"] for e in world["events"] if e["date"] == "2022-06-05")
+    _install(monkeypatch, world, later={late: "2022-06-20"})
+    seen, real_calibrate = {}, stage_a.calibrate
+
+    def spy(predictions, events):
+        seen["events"] = events.copy()
+        return real_calibrate(predictions, events)
+    monkeypatch.setattr(stage_a, "calibrate", spy)
+    _run(world, out, guard)
+
+    events = seen["events"]
+    finite = [e for e in events.index if np.isfinite(events.at[e, "y"])]
+    assert late in finite and len(finite) > 1
+    for event_id in finite:
+        want = "2022-06-20" if event_id == late else _next_day(world, event_id)
+        assert events.at[event_id, "available"] == want
+    proxy = (pd.Timestamp(events.at[late, "label_end"]) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    assert events.at[late, "available"] == "2022-06-20" and proxy == "2022-06-07"
+
+
+def test_level_width_history_carries_the_later_native_availability(monkeypatch, tmp_path):
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    _install(monkeypatch, world)
+    delayed = next(e["id"] for e in world["events"] if e["date"] == "2024-03-05")
+    read = stage_a.training_labels  # the fake reader; only stage A's own label read is delayed
+
+    def delayed_native(sealed, event_ids, labels_before):
+        frame = read(sealed, event_ids, labels_before).copy()
+        frame.loc[frame["event_id"] == delayed, "target_available_on"] = "2024-09-01"
+        return frame
+    monkeypatch.setattr(stage_a, "training_labels", delayed_native)
+    judged, real_judge = {}, stage_a.judge_arm
+
+    def recording(*args, **kwargs):
+        judged[args[0]] = args[4].copy()
+        return real_judge(*args, **kwargs)
+    monkeypatch.setattr(stage_a, "judge_arm", recording)
+    _run(world, out, guard)
+
+    # label_end + 1 is 2024-03-07 for the delayed event; its native date 2024-09-01 is later, so it wins. Others unchanged.
+    window = [e for e in world["events"] if "2022-01-01" <= e["date"] <= "2025-12-31"]
+    want = [pd.Timestamp(e["date"]) + pd.Timedelta(days=2) for e in window if e["id"] != delayed]
+    want.append(pd.Timestamp("2024-09-01"))
+    assert sorted(pd.to_datetime(judged["Q_raw"]["label_available"])) == sorted(want)
+
+
+@pytest.mark.parametrize("bad_date", ["2023-08-05", "2025-06-05"])  # an in-period event, and a 2025 evaluation event
+def test_an_invalid_lead1_decision_date_refuses_before_any_fit_or_label_read(monkeypatch, tmp_path, bad_date):
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    target = next(t for t in world["sealed"]["context"]["target_events"] if t["event_date"] == bad_date)
+    target["forecasts"][0]["source_session_ceiling"] = bad_date  # lead-1 decision date not before the event
+    calls = _spy(monkeypatch, world)
+    fetched = []
+    with pytest.raises(OpsError) as exc:
+        _run(world, out, guard, calls=fetched)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "decision_date_invalid")
+    assert calls == [] and not _label_fetches(fetched)  # no Q fit, no arm S fit, no training_labels read
+    assert not out.exists()  # no report, no *.tmp, no fit receipt
+
+
 def test_replay_is_identical_and_a_changed_binding_refuses_without_touching_the_report(monkeypatch, tmp_path):
     world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
     _install(monkeypatch, world)
@@ -413,6 +547,46 @@ def test_unrequested_production_key_refuses_as_holdout_access_denied(monkeypatch
     with pytest.raises(OpsError) as exc:
         _run(world, out, guard, calls=fetched, extra="not-admitted-event")
     assert _refusal(exc) == ("HOLDOUT_ACCESS_DENIED", "unrequested_key_returned")
+    assert reads == [] and not _label_fetches(fetched) and not out.exists()
+
+
+def test_the_binders_receive_the_sealed_plan_the_reader_the_binding_and_the_admit(monkeypatch, tmp_path):
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    _install(monkeypatch, world)
+    calls = []
+    _patch_b3(monkeypatch, _b3(world), calls)
+    _run(world, out, guard)
+    assert [call[0] for call in calls] == ["bind_b3", "bind_series"]
+    _, plan, selection, binding = calls[0]
+    assert plan is world["sealed"]["plan"] and selection == B3_READ("selection") == "SELECTION"
+    _, bound_plan, read, bound, admit = calls[1]
+    assert bound_plan is world["sealed"]["plan"]
+    assert read is B3_READ and admit is B3_ADMIT
+    assert bound is binding
+
+
+@pytest.mark.parametrize("which", ["bind_b3", "bind_series"])
+def test_a_binder_refusal_propagates_with_no_label_read_fit_or_report(monkeypatch, tmp_path, which):
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    reads, fetched = _spy(monkeypatch, world), []
+    error = fail("EXPERIMENT_IDENTITY_CONFLICT", f"{which} refused", details={"reason": f"{which}_refused"})
+
+    def refuse(*_args):
+        raise error
+    monkeypatch.setattr(stage_a, which, refuse)
+    with pytest.raises(OpsError) as exc:
+        _run(world, out, guard, calls=fetched)
+    assert exc.value is error
+    assert reads == [] and not _label_fetches(fetched) and not out.exists()
+    assert not (out / REPORT).exists()
+
+
+def test_a_bound_b3_binding_other_than_the_bound_one_refuses_before_any_fit(monkeypatch, tmp_path):
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    reads, fetched = _spy(monkeypatch, world), []
+    with pytest.raises(OpsError) as exc:
+        _run(world, out, guard, calls=fetched, bound_b3_binding="sha256:" + "d" * 64)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "stage_a_b3_changed")
     assert reads == [] and not _label_fetches(fetched) and not out.exists()
 
 
@@ -534,7 +708,10 @@ def test_fit_failure_publishes_a_not_testable_report(monkeypatch, tmp_path):
     assert doc["inputs"]["b0_labels_hash"] is None and not _label_fetches(fetched)
     assert doc["arms"] == {} and doc["fit_status"] == {"2022": "fit_failed"} and doc["floor_report"] == []
     assert doc["unlabelled_in_period"] == {} and doc["crps_exclusions"] == []
-    assert doc["inputs"]["evaluation_labels_hash"] is None
+    assert doc["inputs"]["evaluation_labels_hash"] is None and doc["inputs"]["b1b2_labels_hash"] is None
+    assert doc["reported"] == {} and doc["arm_s"] == {} and doc["headline_flags"] == [] and doc["crps_rows"] == []
+    assert doc["inputs"]["arm_s_receipt_hashes"] == {} and isinstance(doc["inputs"]["b2_implied_hash"], str)
+    assert doc["inputs"]["b3"]["rule"] == "v14_mae_winner"
     assert json.loads((out / REPORT).read_text(encoding="utf-8")) == doc
 
 
@@ -554,24 +731,30 @@ def test_memory_error_in_calibration_refuses_resource_limit(monkeypatch, tmp_pat
 B0_COLS = [f"b0_q{round(a * 100)}" for a in LEVELS]
 
 
-def _b0_oracle(world):
+def _b0_oracle(world, frame=None):
     """B0's quantiles and bucket for each event, from the design rule in plain numpy (no ResidualPool, build_pool or
     pool_quantiles; only the MIN_POOL constant is taken from engine.pnl_sim).
     Donors: every fixture event dated strictly before the event whose label is available on or before the event's
     decision date (its event date minus one day). Each label is available the day after its event (the fake fetch).
-    err_move = donor abs_move - donor pred_move.
+    err_move = donor abs_move - donor pred_move. An event with fewer than MIN_POOL eligible earlier donors is unscored:
+    the oracle returns (None, None), as production refuses the draw (reason refused_draw) when the eligible earlier
+    pool has fewer than MIN_POOL rows.
     Bucket edges are the earlier donors' pred_move quantiles on production's grid, np.linspace(0, 1, 11)[1:-1]
     (the same float values, not a re-derived 0.1..0.9 grid, which can differ by an ulp and move a donor sitting exactly
     on an edge into another bucket). Membership rule, as in ResidualPool.draw: a value v belongs to bucket
     searchsorted(edges, v, side="right"), so an edge value falls in the bucket ABOVE it, for donors and for the event's
     forecast alike. The event's bucket uses its fixture pred_move (with the +3 drift from 2023-07-01). The draw is the
     donors in that bucket, or every earlier donor when the bucket holds fewer than MIN_POOL."""
-    events = world["events"]
+    # The forecast table: its index is the event set (donors and scored events) and its pred_move the forecast.
+    # B3 passes its own series; the default is the production frame with every event.
+    frame = world["frame"] if frame is None else frame
+    members = set(frame.index)
+    events = [e for e in world["events"] if e["id"] in members]
     ids = [e["id"] for e in events]
     dates = np.array([e["date"] for e in events])  # ISO dates compare correctly as strings
     avail = np.array([(date.fromisoformat(e["date"]) + timedelta(days=1)).isoformat() for e in events])
     decision = np.array([(date.fromisoformat(e["date"]) - timedelta(days=1)).isoformat() for e in events])
-    pred = world["frame"].loc[ids, "pred_move"].to_numpy(float)
+    pred = frame.loc[ids, "pred_move"].to_numpy(float)
     err = np.array([world["y"][i] for i in ids], dtype=float) - pred
     position = {i: k for k, i in enumerate(ids)}
     grid = np.linspace(0, 1, 11)[1:-1]  # production's bucket grid (buckets=10), bit-for-bit
@@ -580,6 +763,8 @@ def _b0_oracle(world):
         k = position[event_id]
         earlier = (dates < dates[k]) & (avail <= decision[k])
         donor_pred, donor_err = pred[earlier], err[earlier]
+        if donor_pred.size < MIN_POOL:  # fewer than MIN_POOL earlier donors: unscored, no quantiles and no bucket
+            return None, None
         edges = np.quantile(donor_pred, grid)
         f = pred[k]
         bucket = int(np.searchsorted(edges, f, side="right"))
@@ -613,13 +798,12 @@ def test_b0_rows_match_an_independent_design_rule_oracle(full_run):
 
 def test_arms_schema_and_not_included_list(full_run):
     doc = full_run["doc"]
-    assert doc["schema_version"] == "size_quantile_stage_a.v3"
+    assert doc["schema_version"] == "size_quantile_stage_a.v4"
     assert doc["inputs"]["run_inputs_hash"] is None  # library call: no entry point, so the y0 check stays listed
     assert set(doc["arms"]) == {"Q", "Q_raw"} and set(doc["arm_verdicts"]) == {"Q", "Q_raw"}
-    assert doc["not_included"] == ["y0_check", "S", "B1", "B2", "B3", "headline_loss_flags", "b0_conditional_value",
-                                   "unconditional_width_terciles"]
-    assert not {"arm_s", "headline_loss_flags"} & set(doc)
-    assert not {"arm_s_receipt_hashes", "b2_implied_hash"} & set(doc["inputs"])
+    assert doc["not_included"] == ["y0_check", "b0_conditional_value", "unconditional_width_terciles"]
+    assert {"arm_s", "reported", "headline_flags", "crps_rows"} <= set(doc)
+    assert {"arm_s_receipt_hashes", "b2_implied_hash", "b3"} <= set(doc["inputs"])
     assert {"crps_exclusions", "unlabelled_in_period", "floor_report"} <= set(doc)
 
 
@@ -629,25 +813,8 @@ def _b0_pool_oracle(world):
     A tail with under 30 donors makes the month thin. Returns (quantiles_of, pool_of); pool_of(month) is (d_lo, d_hi)
     or None."""
     oracle = _b0_oracle(world)
-    donors = [(date.fromisoformat(e["date"]), date.fromisoformat(e["label_end"]) + timedelta(days=1),
-               world["y"][e["id"]], oracle(e["id"])[0]) for e in world["events"] if e["date"] >= "2022-01-01"]
-    pools = {}
-
-    def pool_of(month):
-        if month not in pools:
-            start = month.replace(year=month.year - 1)
-            hi, lo = [], []
-            for day, ready, y, q in donors:
-                if not (start <= day < month and ready < month):
-                    continue
-                if y > q[6]:
-                    hi.append((y - q[6]) / max(q[6] - q[3], 0.5))
-                if y < q[0]:
-                    lo.append((y - q[0]) / max(q[3] - q[0], 0.5))
-            pools[month] = (np.array(lo), np.array(hi)) if min(len(lo), len(hi)) >= 30 else None
-        return pools[month]
-
-    return oracle, pool_of
+    quantiles = {e["id"]: oracle(e["id"])[0] for e in world["events"] if e["date"] >= "2022-01-01"}
+    return oracle, _tail_pool_of(world, quantiles)
 
 
 def test_b0_crps_in_the_quarter_table_matches_an_independent_oracle(full_run):
@@ -678,8 +845,9 @@ def test_crps_exclusions_and_pooled_crps_counts_match_the_oracles(full_run):
     _, pool_of = _b0_pool_oracle(world)
     excl = {(r["arm"], r["year"]): r for r in doc["crps_exclusions"]}
     # The report is JSON: row order is not part of the contract, so compare by (arm, year) and reject duplicate keys.
-    assert len(excl) == len(doc["crps_exclusions"]) == 9
-    assert sorted(excl) == sorted((arm, year) for arm in ("Q", "Q_raw", "B0") for year in (2023, 2024, 2025))
+    arms = ("Q", "Q_raw", "B0", "S", "B1", "B2", "B3")
+    assert len(excl) == len(doc["crps_exclusions"]) == 3 * len(arms)
+    assert sorted(excl) == sorted((arm, year) for arm in arms for year in (2023, 2024, 2025))
     in_period = [e for e in world["events"] if "2023-07-01" <= e["date"] <= "2025-12-31"]
     for year in (2023, 2024, 2025):
         events_of_year = [e for e in in_period if e["date"].startswith(str(year))]
@@ -693,6 +861,508 @@ def test_crps_exclusions_and_pooled_crps_counts_match_the_oracles(full_run):
         assert pooled[arm]["n_crps"] == kept
     b0_kept = sum(excl[("B0", year)]["scored"] - excl[("B0", year)]["crps_excluded"] for year in (2023, 2024, 2025))
     assert pooled["Q_raw"]["b0_n_crps"] == b0_kept
+
+
+FLOOR, MIN_TAIL = 0.5, 30  # the design's scale floor and minimum tail donors
+
+
+def _in_period(text):
+    return "2023-07-01" <= text <= "2025-12-31"
+
+
+def _month(text):
+    return date.fromisoformat(text).replace(day=1)
+
+
+def _oracle_b2(world):
+    """B2 quantiles of every event dated 2022+ that it scores, in plain numpy: donors dated in the 12 months before the
+    event's month, available (date + 1 day) before that month, with a positive implied move; at least 500 of them.
+    An event without a positive implied move has no quantiles."""
+    events, implied = world["events"], world["implied"]
+    day = {e["id"]: date.fromisoformat(e["date"]) for e in events}
+    usable = {e["id"]: implied[e["id"]] is not None and implied[e["id"]] > 0 for e in events}
+    ratio_of, out = {}, {}
+    for event in events:
+        if event["date"] < "2022-01-01" or not usable[event["id"]]:
+            continue
+        month = _month(event["date"])
+        if month not in ratio_of:
+            start = month.replace(year=month.year - 1)
+            donors = [d for d in day if usable[d] and start <= day[d] < month and day[d] + timedelta(days=1) < month]
+            ratio_of[month] = (np.quantile([world["y"][d] / implied[d] for d in donors], LEVELS)
+                               if len(donors) >= 500 else None)
+        if ratio_of[month] is not None:
+            out[event["id"]] = implied[event["id"]] * ratio_of[month]
+    return out
+
+
+def _s_quantiles(world):
+    """Arm S's quantiles for the events dated 2023+ (2022 has no donors: it is the first year), in plain numpy. Both arm
+    S fits predict mu, so the median and the scale are mu and the 0.5 floor never binds. Month M's donors are the events
+    dated 2022+ in [M - 12 months, M) with label available before M (date + 1 day < M); under 500 donors leaves the month
+    unscored. The quantiles are max(sort(mu + mu * z), 0) with z = quantile((y - mu_d) / mu_d, LEVELS) over the donors."""
+    dated = [(date.fromisoformat(e["date"]), e["id"]) for e in world["events"] if e["date"] >= "2022-01-01"]
+    mu, y = world["mu"], world["y"]
+    z_of = {}
+
+    def z(month):
+        if month not in z_of:
+            start = month.replace(year=month.year - 1)
+            ids = [i for day, i in dated if start <= day < month and day + timedelta(days=1) < month]
+            z_of[month] = np.quantile([(y[i] - mu[i]) / mu[i] for i in ids], LEVELS) if len(ids) >= 500 else None
+        return z_of[month]
+
+    out = {}
+    for e in world["events"]:
+        if e["date"] < "2023-01-01":
+            continue
+        zz = z(_month(e["date"]))
+        if zz is not None:
+            m = mu[e["id"]]
+            out[e["id"]] = np.maximum(np.sort(m + m * zz), 0.0)
+    return out
+
+
+def _b1_quantiles(world):
+    """Arm B1's quantiles for the events dated 2022+, in plain numpy. Donors are every event with label available before
+    the month (date + 1 day < M), full history, x = the production pred_move and y = abs_move. The bucket edges are the
+    donors' quantiles at 0.2, 0.4, 0.6 and 0.8; a month is unscored when a bucket holds fewer than 20 donors. Quantiles
+    are max(f, 0.05) times the bucket's quantiles of ratio = y / max(x, 0.05)."""
+    dated = [(date.fromisoformat(e["date"]), e["id"]) for e in world["events"]]
+    x_of, y_of = world["frame"]["pred_move"].to_dict(), world["y"]
+    pools = {}
+
+    def pool(month):
+        if month not in pools:
+            ids = [i for day, i in dated if day + timedelta(days=1) < month]
+            x = np.array([x_of[i] for i in ids], dtype=float)
+            y = np.array([y_of[i] for i in ids], dtype=float)
+            edges = np.quantile(x, [0.2, 0.4, 0.6, 0.8])
+            bucket = np.digitize(x, edges)
+            if np.bincount(bucket, minlength=5).min() < 20:
+                pools[month] = None
+            else:
+                ratio = y / np.maximum(x, 0.05)
+                pools[month] = (edges, [np.quantile(ratio[bucket == b], LEVELS) for b in range(5)])
+        return pools[month]
+
+    out = {}
+    for e in world["events"]:
+        if e["date"] < "2022-01-01":
+            continue
+        found = pool(_month(e["date"]))
+        if found is not None:
+            edges, ratio_q = found
+            f = x_of[e["id"]]
+            out[e["id"]] = max(f, 0.05) * ratio_q[int(np.digitize(f, edges))]
+    return out
+
+
+def _tail_pool_of(world, quantiles):
+    """pool_of(month) -> (d_lo, d_hi) or None: the design's tail rule from one arm's own oracle quantiles (a dict of event
+    id -> seven quantiles, for its scored events). Donors are dated in [M - 12 months, M) with label_end + 1 day < M (the
+    availability donor_pool uses). d_hi is (y - q90) / max(q90 - q50, 0.5) over y > q90 and d_lo is (y - q10) /
+    max(q50 - q10, 0.5) over y < q10; a month with under 30 donors on either tail is thin (None)."""
+    donors = [(date.fromisoformat(e["date"]), date.fromisoformat(e["label_end"]) + timedelta(days=1),
+               world["y"][e["id"]], quantiles[e["id"]]) for e in world["events"] if e["id"] in quantiles]
+    pools = {}
+
+    def pool_of(month):
+        if month not in pools:
+            start = month.replace(year=month.year - 1)
+            hi, lo = [], []
+            for day, ready, y, q in donors:
+                if not (start <= day < month and ready < month):
+                    continue
+                if y > q[6]:
+                    hi.append((y - q[6]) / max(q[6] - q[3], FLOOR))
+                if y < q[0]:
+                    lo.append((y - q[0]) / max(q[3] - q[0], FLOOR))
+            pools[month] = (np.array(lo), np.array(hi)) if min(len(lo), len(hi)) >= MIN_TAIL else None
+        return pools[month]
+
+    return pool_of
+
+
+def _exact_crps(y, q, d_lo, d_hi):
+    """CRPS of one event's tailed quantile function, integrated exactly with no grid. The function is piecewise linear
+    through the lower-tail knots, the seven quantiles and the upper-tail knots, floored at zero. Each segment is cut where
+    the linear piece crosses zero or y, so on every piece the function is linear and the indicator 1{y < Q} is constant;
+    the integrand is then quadratic and Simpson's rule is exact."""
+    q = np.asarray(q, dtype=float)
+    s_lo, s_hi = max(q[3] - q[0], FLOOR), max(q[6] - q[3], FLOOR)
+    lo, hi = np.sort(np.asarray(d_lo, dtype=float)), np.sort(np.asarray(d_hi, dtype=float))
+    u = np.concatenate([np.linspace(0.0, 0.1, lo.size), LEVELS, np.linspace(0.9, 1.0, hi.size)])
+    x = np.concatenate([q[0] + s_lo * lo, q, q[6] + s_hi * hi])
+    keep = u[1:] > u[:-1]  # a zero-width step is a jump, with no area
+    a, b, xa, xb = u[:-1][keep], u[1:][keep], x[:-1][keep], x[1:][keep]
+    span = np.where(xb == xa, 1.0, xb - xa)
+    cuts = [np.zeros_like(a), np.ones_like(a)]
+    for level in (0.0, float(y)):
+        crossing = (xa - level) * (xb - level) < 0
+        cuts.append(np.where(crossing, (level - xa) / span, 0.0))
+    f = np.sort(np.stack(cuts, axis=1), axis=1)  # fractions along each segment, sorted, with zero-width pieces
+    p, r = f[:, :-1], f[:, 1:]
+    m = (p + r) / 2
+    width = (b - a)[:, None] * (r - p)
+
+    def at(t):
+        return a[:, None] + (b - a)[:, None] * t
+
+    def floored(t):
+        return np.maximum(xa[:, None] + (xb - xa)[:, None] * t, 0.0)
+
+    qp, qm, qr = floored(p), floored(m), floored(r)
+    below = (y < qm).astype(float)  # 1{y < Q}, constant on each piece
+
+    def loss(u_, q_):
+        return (y - q_) * (u_ - below)
+
+    total = width / 6 * (loss(at(p), qp) + 4 * loss(at(m), qm) + loss(at(r), qr))
+    return 2.0 * float(total.sum())
+
+
+def _arm_crps(world, quantiles, in_period):
+    """CRPS of each in-period event for one arm, from its oracle quantiles and the tail rule. None where the arm has no
+    quantile for the event or its month's tail pool is thin."""
+    pool_of = _tail_pool_of(world, quantiles)
+    out = {}
+    for event_id in in_period:
+        q = quantiles.get(event_id)
+        pool = None if q is None else pool_of(_month(world["dates"][event_id]))
+        out[event_id] = None if pool is None else _exact_crps(world["y"][event_id], q, *pool)
+    return out
+
+
+def _mean_pinball(y, q):
+    """Mean over events and the seven levels of max(a * d, (a - 1) * d) with d = y - q, from the definition."""
+    d = np.asarray(y, float)[:, None] - np.asarray(q, float)
+    a = np.array(LEVELS)
+    return float(np.mean(np.maximum(a * d, (a - 1) * d)))
+
+
+def test_b2_table_pooled_n_and_mean_pinball_match_the_plain_numpy_oracle(full_run):
+    world, doc = full_run["world"], full_run["doc"]
+    oracle = {i: q for i, q in _oracle_b2(world).items() if _in_period(world["dates"][i])}
+    row = next(t for t in doc["reported"]["B2"]["tables"] if t["slice"] == "pooled")
+    assert row["n"] == len(oracle) > 0
+    assert row["mean_pinball"] == pytest.approx(_mean_pinball([world["y"][i] for i in oracle], list(oracle.values())),
+                                                rel=1e-9)
+
+
+def test_reported_tables_have_no_pass_flags_and_b1_b3_count_every_in_period_event(full_run):
+    doc = full_run["doc"]
+    assert set(doc["reported"]) == {"S", "B1", "B2", "B3"}
+    for table in doc["reported"].values():
+        assert set(table) == {"status", "not_testable_reasons", "share", "drops", "tables"}
+    in_period = sum("2023-07-01" <= e["date"] <= "2025-12-31" for e in full_run["world"]["events"])
+    assert in_period == 4500
+    for name in ("B1", "B3"):  # every in-period event has a band and a B3 forecast in this world
+        pooled = next(t for t in doc["reported"][name]["tables"] if t["slice"] == "pooled")
+        assert pooled["n"] == in_period, name
+
+
+def test_headline_flags_match_the_oracle(full_run):
+    doc, world = full_run["doc"], full_run["world"]
+    b2 = _oracle_b2(world)
+    flags = {(f["arm"], f["baseline"]): f for f in doc["headline_flags"]}
+    assert sorted(flags) == sorted((arm, base) for arm in ("Q", "Q_raw") for base in ("B1", "B2", "B3"))
+    for arm in ("Q", "Q_raw"):
+        rows = doc["arms"][arm]["conditional"]["rows"]
+        for base in ("B1", "B2", "B3"):  # B1 and B3 score every paired event here; B2 only the oracle's events
+            kept = [r for r in rows if base != "B2" or r["event_id"] in b2]
+            y = [r["y"] for r in kept]
+            arm_mean = _mean_pinball(y, [[r[k] for k in Q_KEYS] for r in kept])
+            flag = flags[(arm, base)]
+            assert flag["n"] == len(kept), (arm, base)
+            assert flag["arm_mean_pinball"] == pytest.approx(arm_mean, rel=1e-9)
+            if base == "B2":
+                base_mean = _mean_pinball(y, [b2[r["event_id"]] for r in kept])
+                assert flag["baseline_mean_pinball"] == pytest.approx(base_mean, rel=1e-9)
+            assert flag["lost"] == (arm_mean > flag["baseline_mean_pinball"]), (arm, base)
+
+
+def test_arm_s_publishes_status_and_scale_floor_shares_per_year(full_run):
+    doc = full_run["doc"]
+    assert sorted(doc["arm_s"]) == sorted(YEARS)
+    assert {year: doc["arm_s"][year]["status"] for year in YEARS} == {year: "ok" for year in YEARS}
+    # 2022 is the first year: no donors, nothing scored, so both shares are NaN (null in the JSON).
+    assert doc["arm_s"]["2022"]["floor"] == {"events": 0, "events_bound": 0, "donors": 0, "donors_bound": 0,
+                                             "events_share": None, "donors_share": None}
+    for year in YEARS:
+        floor = doc["arm_s"][year]["floor"]
+        assert floor["events_bound"] == 0 and floor["donors_bound"] == 0  # the scale is the forecast move, >= 4
+        assert floor["events_share"] == (0.0 if floor["events"] else None)
+        assert floor["donors_share"] == (0.0 if floor["donors"] else None)
+
+
+def test_inputs_record_the_arm_s_receipts_the_implied_table_and_the_b3_binding(full_run):
+    doc, out, world = full_run["doc"], full_run["out"], full_run["world"]
+    for year in YEARS:
+        receipt = json.loads((out / "fits" / f"arm_s_fit_{year}.json").read_text(encoding="utf-8"))
+        assert doc["inputs"]["arm_s_receipt_hashes"][year] == receipt["content_hash"]
+    implied = [[e, world["dates"][e], world["implied"][e]] for e in sorted(world["implied"])]
+    assert doc["inputs"]["b2_implied_hash"] == content_hash(implied)
+    assert doc["inputs"]["b3"] == {"binding": B3_BINDING, "b3_candidate_id": "B3", "m3_candidate_id": "M3",
+                                   "rule": "v14_mae_winner", "years": B3_YEARS,
+                                   "series_hash": _digest(_b3(world)["series"])}
+
+
+def test_b0_labels_hash_covers_the_available_date(monkeypatch, tmp_path, full_run):
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    _install(monkeypatch, world)
+    event = world["events"][-1]["id"]
+    changed = (date.fromisoformat(world["dates"][event]) + timedelta(days=5)).isoformat()  # still after the event
+    doc = _run(world, out, guard, avail={event: changed})
+    labels = world["labels"]
+    b0 = sorted([e, float(labels.at[e, "abs_move"]), float(labels.at[e, "crush_pct_iv30"]),
+                 changed if e == event else (date.fromisoformat(world["dates"][e]) + timedelta(days=1)).isoformat()]
+                for e in labels.index)
+    assert doc["inputs"]["b0_labels_hash"] == content_hash(b0)
+    assert doc["inputs"]["b0_labels_hash"] != full_run["doc"]["inputs"]["b0_labels_hash"]
+
+
+def test_b1_and_b2_do_not_depend_on_crush_or_its_availability(monkeypatch, tmp_path, full_run):
+    """B1 and B2 donors carry only the move label. Crush is missing for all of 2021 (read_labels drops those rows) and
+    delayed for 2020 H2; B1 and B2 pooled n and mean pinball stay those of the full run. B0 may change, so it is not
+    compared."""
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    _install(monkeypatch, world)
+    no_crush = {e["id"] for e in world["events"] if e["date"].startswith("2021")}
+    late = {e["id"]: (date.fromisoformat(e["date"]) + timedelta(days=5)).isoformat() for e in world["events"]
+            if "2020-07-01" <= e["date"] <= "2020-12-31"}
+    doc = _run(world, out, guard, nan_crush=no_crush, avail=late)
+    for name in ("B1", "B2"):
+        want = next(t for t in full_run["doc"]["reported"][name]["tables"] if t["slice"] == "pooled")
+        got = next(t for t in doc["reported"][name]["tables"] if t["slice"] == "pooled")
+        assert want["n"] > 0 and got["n"] == want["n"], name
+        assert got["mean_pinball"] == pytest.approx(want["mean_pinball"], rel=1e-12), name
+
+
+def test_b1b2_labels_hash_binds_every_sealed_event_move_and_availability(full_run):
+    world, doc = full_run["world"], full_run["doc"]
+    want = content_hash(sorted([e["id"], world["y"][e["id"]], _next_day(world, e["id"])] for e in world["events"]))
+    assert doc["inputs"]["b1b2_labels_hash"] == want
+
+
+def test_every_arm_s_fit_failing_still_publishes_with_s_not_testable(monkeypatch, tmp_path, full_run):
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    _install(monkeypatch, world, s_regress=_fake_fit(boom=True))
+    doc = _run(world, out, guard)
+    assert json.loads((out / REPORT).read_text(encoding="utf-8")) == doc
+    assert doc["status"] == full_run["doc"]["status"] and doc["arm_verdicts"] == full_run["doc"]["arm_verdicts"]
+    assert doc["reported"]["S"]["status"] == "not_testable"
+    pooled = next(t for t in doc["reported"]["S"]["tables"] if t["slice"] == "pooled")
+    assert pooled["n"] == 0
+    assert {year: doc["arm_s"][year]["status"] for year in doc["arm_s"]} == {year: "fit_failed" for year in YEARS}
+
+
+def test_arm_s_fits_before_any_evaluation_label_read_or_b0_label_fetch(monkeypatch, tmp_path):
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    order, fetched, marks = [], [], []
+
+    def logged_read(sealed, event_ids, labels_before):
+        if labels_before == "2026-02-01":
+            order.append("evaluation_labels")
+        return pd.DataFrame({"event_id": list(event_ids), "absolute_move_pct": [world["y"][e] for e in event_ids],
+                             "target_available_on": [_next_day(world, e) for e in event_ids]})
+    _install(monkeypatch, world, read=logged_read)
+    real = stage_a.fit_arm_s
+
+    def logged_fit(*args):
+        order.append("arm_s")
+        marks.append(len(fetched))
+        return real(*args)
+    monkeypatch.setattr(stage_a, "fit_arm_s", logged_fit)
+    _run(world, out, guard, calls=fetched)
+    assert order.index("arm_s") < order.index("evaluation_labels")
+    labels = _label_fetches(fetched)
+    assert labels and fetched.index(labels[0]) >= marks[0]
+
+
+def test_arm_s_refusal_propagates_and_publishes_no_report(monkeypatch, tmp_path):
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    _install(monkeypatch, world)
+    error = fail("EXPERIMENT_IDENTITY_CONFLICT", "raw_receipt_mismatch: refused",
+                 details={"reason": "raw_receipt_mismatch"})
+
+    def refuse(*_args):
+        raise error
+    monkeypatch.setattr(stage_a, "fit_arm_s", refuse)
+    with pytest.raises(OpsError) as exc:
+        _run(world, out, guard)
+    assert exc.value is error
+    assert not (out / REPORT).exists() and not list(out.glob("*.tmp"))
+
+
+def test_q_walk_fit_failure_never_calls_arm_s(monkeypatch, tmp_path):
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    _install(monkeypatch, world, regress=_fake_fit(boom=True))
+
+    def never(*_args):
+        raise AssertionError("arm S must not run when the Q walk failed")
+    monkeypatch.setattr(stage_a, "fit_arm_s", never)
+    doc = _run(world, out, guard)
+    assert doc["status"] == "not_testable" and doc["arm_s"] == {} and doc["reported"] == {}
+    assert doc["headline_flags"] == [] and doc["crps_rows"] == []
+    assert doc["inputs"]["arm_s_receipt_hashes"] == {} and doc["inputs"]["b3"]["rule"] == "v14_mae_winner"
+
+
+def test_unbound_implied_move_refuses_before_any_walk_fit(monkeypatch, tmp_path):
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    world["sealed"]["model_columns"] = ["f_mu", "f_s", "f_empty"]
+    reads = _spy(monkeypatch, world)
+    with pytest.raises(OpsError) as exc:
+        _run(world, out, guard)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "implied_move_unbound")
+    assert reads == [] and not out.exists()
+
+
+def test_unbound_b3_year_is_not_testable_and_the_report_still_publishes(monkeypatch, tmp_path):
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    _install(monkeypatch, world)
+    doc = _run(world, out, guard, monkeypatch=monkeypatch,
+               b3=_b3(world, years={"2023": "bound", "2024": "missing", "2025": "bound"}))
+    assert json.loads((out / REPORT).read_text(encoding="utf-8")) == doc
+    table = doc["reported"]["B3"]
+    assert table["status"] == "not_testable"
+    assert [d["n"] for d in table["drops"] if d["year"] == 2024 and d["arm_reason"] == "not_testable"] == [1800]
+    pooled = next(t for t in table["tables"] if t["slice"] == "pooled")
+    assert pooled["n"] == 2700  # 2023 H2 and 2025 only
+    bound = [r for r in doc["arms"]["Q"]["conditional"]["rows"] if r["quarter"][:4] in ("2023", "2025")]
+    flag = next(f for f in doc["headline_flags"] if f["arm"] == "Q" and f["baseline"] == "B3")
+    assert flag["n"] == len(bound)
+    assert doc["inputs"]["b3"]["years"] == {"2023": "bound", "2024": "missing", "2025": "bound"}
+
+
+def test_b3_with_every_year_unbound_and_an_empty_series_still_publishes(monkeypatch, tmp_path):
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    _install(monkeypatch, world)
+    empty = pd.Series([], dtype=float, index=pd.Index([], name="event_id"))
+    b3 = {**_b3(world), "years": {"2023": "missing", "2024": "missing", "2025": "missing"}, "series": empty,
+          "series_hash": content_hash([])}
+    doc = _run(world, out, guard, b3=b3, monkeypatch=monkeypatch)
+    assert json.loads((out / REPORT).read_text(encoding="utf-8")) == doc
+    assert doc["reported"]["B3"]["status"] == "not_testable"
+    pooled = next(t for t in doc["reported"]["B3"]["tables"] if t["slice"] == "pooled")
+    assert pooled["n"] == 0
+    flag = next(f for f in doc["headline_flags"] if f["arm"] == "Q" and f["baseline"] == "B3")
+    assert flag["n"] == 0 and flag["lost"] is None and flag["arm_mean_pinball"] is None  # NaN is null in JSON
+
+
+def _nonnull_mean(rows, name):
+    """Mean of the non-null values of one column over the rows (null is None or NaN)."""
+    values = [r[name] for r in rows if r[name] is not None and not math.isnan(r[name])]
+    return float(np.mean(values))
+
+
+def test_crps_rows_hold_one_record_per_in_period_event_with_all_seven_frames(full_run, expected):
+    doc, world = full_run["doc"], full_run["world"]
+    in_period = sorted(e["id"] for e in world["events"] if "2023-07-01" <= e["date"] <= "2025-12-31")
+    assert sorted(r["event_id"] for r in doc["crps_rows"]) == in_period
+    assert all(set(r) == {"event_id", "Q", "Q_raw", "B0", "S", "B1", "B2", "B3"} for r in doc["crps_rows"])
+    # Q and B0 are scored on the Q arm's paired ids: their crps_rows means equal Q's pooled crps and b0_crps.
+    paired = {r["event_id"] for r in doc["arms"]["Q"]["conditional"]["rows"]}
+    paired_rows = [r for r in doc["crps_rows"] if r["event_id"] in paired]
+    q_pooled = next(t for t in doc["arms"]["Q"]["tables"] if t["slice"] == "pooled")
+    assert _nonnull_mean(paired_rows, "Q") == pytest.approx(q_pooled["crps"], rel=1e-9)
+    assert _nonnull_mean(paired_rows, "B0") == pytest.approx(q_pooled["b0_crps"], rel=1e-9)
+    # B1 and B3 score every in-period event, so their crps_rows means equal their reported pooled crps.
+    for name in ("B1", "B3"):
+        pooled = next(t for t in doc["reported"][name]["tables"] if t["slice"] == "pooled")
+        assert _nonnull_mean(doc["crps_rows"], name) == pytest.approx(pooled["crps"], rel=1e-9), name
+    # B0 per event: each row's B0 CRPS is the oracle's for that event (Q has no per-event oracle here).
+    for row in doc["crps_rows"]:
+        want = expected["crps"]["B0"][row["event_id"]]
+        if want is None:
+            assert row["B0"] is None, row["event_id"]
+        else:
+            assert row["B0"] == pytest.approx(want, rel=1e-8, abs=1e-9), row["event_id"]
+
+
+def test_q_table_m3_column_is_the_b3_series_under_the_v14_rule(full_run):
+    world, doc = full_run["world"], full_run["doc"]
+    series = _b3(world)["series"]
+    m3 = {event: value for event, value in zip(series.index, series.to_numpy(float))}
+    ids = [r["event_id"] for r in doc["arms"]["Q"]["conditional"]["rows"]]
+    assert all(i in m3 for i in ids)
+    row = next(t for t in doc["arms"]["Q"]["tables"] if t["slice"] == "pooled")
+    assert row["n_m3"] == row["n"] == len(ids) > 0
+    assert row["mae_m3"] == pytest.approx(float(np.mean([abs(world["y"][i] - m3[i]) for i in ids])), rel=1e-9)
+
+
+def test_lowest_inner_rule_leaves_the_q_m3_column_empty(monkeypatch, tmp_path):
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    _install(monkeypatch, world)
+    doc = _run(world, out, guard, b3={**_b3(world), "rule": "lowest_inner_mae_hmosxlp"}, monkeypatch=monkeypatch)
+    row = next(t for t in doc["arms"]["Q"]["tables"] if t["slice"] == "pooled")
+    assert row["n_m3"] == 0 and row["mae_m3"] is None
+
+
+@pytest.fixture(scope="module")
+def expected(full_run):
+    """Oracle quantiles and CRPS of B0, S, B1, B2 and B3 per event, from the design rules in plain numpy (no production
+    code). The quantiles cover the events dated 2022+ that each arm scores; the CRPS covers the in-period events, None
+    where an arm has no quantile or its month's tail pool is thin."""
+    world = full_run["world"]
+    in_period = [e["id"] for e in world["events"] if _in_period(e["date"])]
+    b0 = _b0_oracle(world)
+    series = _b3(world)["series"]
+    b3 = _b0_oracle(world, pd.DataFrame({"pred_move": series.to_numpy(float)}, index=series.index))
+    quantiles = {"B0": {e["id"]: b0(e["id"])[0] for e in world["events"] if e["date"] >= "2022-01-01"},
+                 "S": _s_quantiles(world), "B1": _b1_quantiles(world), "B2": _oracle_b2(world),
+                 # an event with no earlier series donors is unscored (refused_draw): left out, so not a tail donor either
+                 "B3": {i: q for i in series.index if (q := b3(i)[0]) is not None}}
+    crps = {name: _arm_crps(world, q, in_period) for name, q in quantiles.items()}
+    return {"in_period": in_period, "quantiles": quantiles, "crps": crps}
+
+
+def _scored(expected, name):
+    """The in-period events an arm scores (each has an oracle quantile), in event order."""
+    return [i for i in expected["in_period"] if i in expected["quantiles"][name]]
+
+
+ARMS_NEW = ["S", "B1", "B2", "B3"]
+
+
+@pytest.mark.parametrize("name", ARMS_NEW)
+def test_crps_rows_match_the_oracle_per_event(full_run, expected, name):
+    got = {r["event_id"]: r[name] for r in full_run["doc"]["crps_rows"]}
+    want = expected["crps"][name]
+    assert sorted(got) == sorted(expected["in_period"])
+    for event_id in expected["in_period"]:
+        if want[event_id] is None:
+            assert got[event_id] is None, (name, event_id)
+        else:
+            assert got[event_id] is not None, (name, event_id)
+            assert got[event_id] == pytest.approx(want[event_id], rel=1e-8, abs=1e-9), (name, event_id)
+    values = [v for v in got.values() if v is not None]
+    assert len(values) > 1000 and len(set(values)) > 1, name
+
+
+@pytest.mark.parametrize("name", ARMS_NEW)
+def test_reported_pooled_row_matches_the_oracle(full_run, expected, name):
+    world, doc = full_run["world"], full_run["doc"]
+    ids = _scored(expected, name)
+    assert all(i in expected["quantiles"]["B0"] for i in ids)  # every event it scores is scored by B0 too
+    row = next(t for t in doc["reported"][name]["tables"] if t["slice"] == "pooled")
+    assert row["n"] == len(ids) > 0
+    q = [expected["quantiles"][name][i] for i in ids]
+    assert row["mean_pinball"] == pytest.approx(_mean_pinball([world["y"][i] for i in ids], q), rel=1e-9)
+    crps = [expected["crps"][name][i] for i in ids if expected["crps"][name][i] is not None]
+    assert row["n_crps"] == len(crps)
+    assert row["crps"] == pytest.approx(float(np.mean(crps)), rel=1e-8)
+
+
+@pytest.mark.parametrize("name", ARMS_NEW)
+def test_reported_quarter_row_matches_the_oracle(full_run, expected, name):
+    world = full_run["world"]
+    ids = [i for i in _scored(expected, name) if "2024-04-01" <= world["dates"][i] <= "2024-06-30"]
+    row = next(t for t in full_run["doc"]["reported"][name]["tables"]
+               if t["slice"] == "quarter" and t["label"] == "2024Q2")
+    assert row["n"] == len(ids) > 0
+    q = [expected["quantiles"][name][i] for i in ids]
+    assert row["mean_pinball"] == pytest.approx(_mean_pinball([world["y"][i] for i in ids], q), rel=1e-9)
 
 
 def test_b0_labels_hash_binds_each_label_availability(monkeypatch, tmp_path, full_run):

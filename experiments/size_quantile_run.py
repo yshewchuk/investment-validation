@@ -1,5 +1,5 @@
 """EXP-190 Q6c: `python -m experiments.size_quantile_run --sources-config CFG --out-dir DIR [--tickers 50]`. Writes
-run_inputs.json (size_quantile_run_inputs.v1) before any fit, then fits/ and stage_a_report.json; a smoke writes fits/
+run_inputs.json (size_quantile_run_inputs.v2) before any fit, then fits/ and stage_a_report.json; a smoke writes fits/
 and smoke_record.json (size_quantile_smoke.v1: timing, no verdict, score or ledger row). Manual-only."""
 import argparse
 import functools
@@ -18,12 +18,15 @@ from engine.v2.foundation import DocumentError, content_hash, from_document
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import experiment_spec_from_document
 from engine.v2.research.progress import decision, stage
-from experiments import size_pnl_sources as sources, size_pnl_tables
+from experiments import size_pnl_inputs, size_pnl_sources as sources, size_pnl_tables
+from experiments.magnitude_search_records import read_record
 from experiments.memory_guard import rss_watchdog
 from experiments.size_pnl_readers import admit_events, read_production
+from experiments.size_quantile_b3 import bind_series
+from experiments.size_quantile_binding import bind_b3
 from experiments.size_quantile_prereg import SPEC_PATH, load_spec, require_preregistration
 from experiments.size_quantile_sources import load_sealed_panel
-from experiments.size_quantile_stage_a import _publish, run_stage_a
+from experiments.size_quantile_stage_a import _publish, check_decision_dates, run_stage_a
 from experiments.size_quantile_walk import fit_walk_forward
 from experiments.size_quantile_y0 import y0_report
 
@@ -50,8 +53,13 @@ def load_inputs(cfg, conn, store):
     def fetch(columns, ids):  # one read per key: the production rows bound in run_inputs.json are the rows Stage A uses
         return cached(tuple(columns), tuple(ids)).copy()
     production = read_production(fetch, admitted, expected_hash=cfg["production_hash"], table_hash=tables.table_hash)
+    read = functools.partial(read_record, conn, store, sealed["plan"]["anchor"]["run_id"])
+    binding = bind_b3(sealed["plan"], read("selection"))
+    admit = size_pnl_inputs.population_admit(repo, snap, sealed["as_of_month"], max_object_bytes=cap)
+    b3 = {**bind_series(sealed["plan"], read, binding, admit), "rule": binding["rule"],
+          "m3_candidate_id": binding["m3_candidate_id"]}
     return {"sealed": sealed, "admitted": admitted, "fetch": fetch, "production": production,
-            "table_hash": tables.table_hash}
+            "table_hash": tables.table_hash, "b3": b3, "b3_read": read, "b3_admit": admit}
 
 
 def smoke_subset(sealed, count):
@@ -84,16 +92,20 @@ def _run(sources_config, out_dir, tickers, **paths):
         y0 = y0_report(inputs["sealed"], spec)
         years = [str(y) for y in range(int(y0["y0"]), END_YEAR + 1)]
         sealed, chosen = (inputs["sealed"], None) if tickers is None else smoke_subset(inputs["sealed"], tickers)
-        body = {"schema_version": "size_quantile_run_inputs.v1", "mode": "full" if tickers is None else "smoke",
+        if tickers is not None:  # the full path runs this in run_stage_a, after run_inputs.json
+            check_decision_dates(sealed, years)
+        body = {"schema_version": "size_quantile_run_inputs.v2", "mode": "full" if tickers is None else "smoke",
                 "spec_hash": guard["spec_hash"], "preregistered_at": guard["preregistered_at"],
                 "plan_id": sealed["plan"]["plan_id"], "sealed_binding": sealed["binding"], "years": years, "y0": y0,
                 "production_binding": inputs["production"]["binding"], "production_table_hash": inputs["table_hash"],
-                "smoke_tickers": chosen}
+                "b3_binding": inputs["b3"]["binding"], "smoke_tickers": chosen}
         record = _publish(out_dir, body, "run_inputs.json", "run_inputs_changed")
         if tickers is None:
             doc = run_stage_a(sealed, years, inputs["admitted"], inputs["fetch"], out_dir,
                               production_hash=cfg["production_hash"], table_hash=inputs["table_hash"],
-                              run_inputs_hash=record["content_hash"], bound_spec_hash=guard["spec_hash"], **paths)
+                              b3_read=inputs["b3_read"], b3_admit=inputs["b3_admit"],
+                              bound_b3_binding=inputs["b3"]["binding"], run_inputs_hash=record["content_hash"],
+                              bound_spec_hash=guard["spec_hash"], **paths)
             return {"mode": "full", "status": doc["status"], "reasons": doc["reasons"],
                     "content_hash": doc["content_hash"], "report": str(out_dir / "stage_a_report.json")}
         started = time.monotonic()

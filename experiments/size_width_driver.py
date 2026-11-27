@@ -143,7 +143,8 @@ def _load(src, stage, ids, receipt, f=None):
     if f is not None:
         body["fill_model"] = f.binding
     inputs_hash = content_hash(body)
-    inputs = {**body, "inputs_hash": inputs_hash, "table": base._table_binding(ready["M0"], ids),
+    # recorded per stage, outside inputs_hash and fill_model
+    inputs = {**body, **(f.recorded if f is not None else {}), "inputs_hash": inputs_hash, "table": base._table_binding(ready["M0"], ids),
               "plan": content_hash(base._plan_rows(plan)), "facts": content_hash(base._facts_rows(survivors, stage_ids))}
     return {"ids": ids, "plan": plan, "table": table, "labels": labels, "facts_all": facts_all, "sessions": base._sessions(src),
             "exits": base._exits(src), "inputs_hash": inputs_hash, "inputs": inputs, "pricing": f.pricing if f is not None else PRICING}
@@ -282,7 +283,7 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_width_prereg.require
     ids = base._smoke(src, event_ids)
     _log(f"scope={'smoke' if ids is not None else 'full'} events={'all' if ids is None else len(ids)}")
     f = size_width_f_select.open_run(receipt.get("fill_model"), f_inputs, src.plan_frame, src.snapshot_id)  # refuses before any load or write
-    _log(f"fill_model=F fvf_id={f.binding['fvf_id']}" if f is not None else "fill_model=current")
+    _log(f"fill_model={f.binding['fill_model_id']} variant={f.binding.get('variant')} constants_id={f.binding.get('constants_id')} fvf_id={f.binding['fvf_id']}" if f is not None else "fill_model=current")
     loaded = _load(src, stage, ids, receipt, f)
     if stage == "outer":
         _preflight(out, loaded)  # before the receipt: a failed preflight leaves no inputs_outer.json

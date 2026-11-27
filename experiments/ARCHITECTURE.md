@@ -985,12 +985,12 @@ EXP-190 (`guides/size_quantile_move_design.md`): `size_quantile_prereg` never wr
 `size_quantile_walk.fit_walk_forward` write-once `fit_<year>.json`: gap→`years_not_contiguous`; changed/invalid receipt→`fit_receipt_{changed,unreadable}`; memory/oversize-publish→`RESOURCE_LIMIT_EXCEEDED`; fit `ValueError`→`fit_failed`, stops.
 `size_quantile_arm_s.fit_arm_s` write-once `arm_s_fit_<year>.json`: `raw_receipt_mismatch`, walk refusals, `RESOURCE_LIMIT_EXCEEDED`; `fit_failed` year continues; `scale_burn_in`.
 `size_quantile_calibration`: unscored `non_finite_output`/`calibration_burn_in`; `tail_pool_thin`→no-CRPS. `size_quantile_arm_{tables.evaluate_arm,verdict.{judge_arm,stage_a_verdict}}`: `scored_share_below_floor`/`period_no_paired_events`/`bootstrap_too_few_groups`/`no_usable_cell`/`conditional_bootstrap_too_few_groups`/`calibration_failed`(Q-arm-only)/`fit_failed`(also-Stage-A)→`not_testable`. Both: bad input `ValueError`; `RESOURCE_LIMIT_EXCEEDED`.
-`size_quantile_stage_a.run_stage_a`: `stage_a_{years_invalid,report_changed,tails_mismatch}`, `spec_changed`, reader-refusals; atomic v3 report (`unlabelled_in_period`: denominator-only, unpaired; `crps_exclusions`).
-`size_quantile_run` (manual-only entry/smoke; 8 GiB watchdog→`RESOURCE_LIMIT_EXCEEDED`): `smoke_{tickers_invalid,out_dir_not_fresh}`, `{input_unreadable,out_dir_not_directory,run_inputs_changed}`; guard, pre-label refusals precede fits; smoke: no verdict; `--no-ledger` no-op.
+`size_quantile_stage_a.run_stage_a`: `stage_a_{years_invalid,report_changed,tails_mismatch,b3_changed}`, `spec_changed`, `implied_move_unbound`, reader/B3/arm-S-refusals; atomic v4 report (`unlabelled_in_period`: denominator-only; `crps_exclusions`) reports S/B1-B3/flags.
+`size_quantile_run` (manual-only entry/smoke; 8 GiB watchdog→`RESOURCE_LIMIT_EXCEEDED`): `smoke_{tickers_invalid,out_dir_not_fresh}`, `{input_unreadable,out_dir_not_directory,run_inputs_changed}`; guard, pre-label/B3 refusals precede fits; smoke: no verdict.
 
 ## Fill model F
 
-EXP-189 ([design](../guides/fair_value_fill_design.md)). `fair_value_carry` prices; `fair_value_legs` clamps; `fair_value_fills` fills (uses `engine.fills.MIN_MEANINGFUL_COST`; [README](README.md)). Unwired `fair_value_apply` applies fitted fills.
+EXP-189 ([design](../guides/fair_value_fill_design.md)). `fair_value_carry` prices; `fair_value_legs` clamps; `fair_value_fills` fills (uses `engine.fills.MIN_MEANINGFUL_COST`; [README](README.md)). `size_width_a_fills` wires `fair_value_apply`.
 
 |Condition|Outcome|
 |-|-|
@@ -1000,11 +1000,11 @@ EXP-189 ([design](../guides/fair_value_fill_design.md)). `fair_value_carry` pric
 |Entry leg not `ok`|`undetermined`|
 |Guard `not_a_debit`/`fill_over_fair`/`spread_over_debit`|`skip`|
 |`fair_value_apply` guard: `fill_over_mid` replaces `fill_over_fair`|`skip`|
-|`fair_value_apply`: `constants_invalid`/`constants_id_mismatch`/`variant_unknown`/`legs_unbound`/`legs_constants_mismatch`|`FairValueRefusal`, no output|
+|`size_width_a_fills`(`constants_unreadable`)/`fair_value_apply`: `constants_invalid`/`constants_id_mismatch`/`variant_unknown`/`legs_unbound`/`legs_constants_mismatch`|`FairValueRefusal`, no output|
 |Exit leg `unpriceable`|`unpriceable`|
 |Exit fair value unavailable|mid, `exit_fair_mid`|
 |`exit_negative`|kept|
 |Invalid pricer input|NaN|
 |Missing column, duplicate quote/vol key, invalid `right`/`quote_repaired`|`FairValueRefusal` (`EXPERIMENT_IDENTITY_CONFLICT`), no partial output|
-|`fair_value_inputs`/`fair_value_run`/`fair_value_fit`/`size_width_f_quotes`/`size_width_f_select` check fails|`EXPERIMENT_IDENTITY_CONFLICT`|
-|`fair_value_inputs`/`fair_value_run`/`fair_value_fit`/`size_width_f_quotes`/`size_width_f_select` cap exceeded|`RESOURCE_LIMIT_EXCEEDED`|
+|`fair_value_inputs`/`fair_value_run`/`fair_value_fit`/`size_width_f_quotes`/`size_width_f_select`(`fill_variant_unexpected`) check fails|`EXPERIMENT_IDENTITY_CONFLICT`|
+|`fair_value_inputs`/`fair_value_run`/`fair_value_fit`/`size_width_f_quotes`/`size_width_f_select`/`size_width_a_fills`(`input_too_large`) cap exceeded|`RESOURCE_LIMIT_EXCEEDED`|

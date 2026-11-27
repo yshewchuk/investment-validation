@@ -1,4 +1,4 @@
-"""EXP-190 Q3c, arm S (reported only, cannot pass). No production caller (Q6 driver is first); a caller fitting real
+"""EXP-190 Q3c, arm S (reported only, cannot pass). Caller: size_quantile_stage_a; a caller fitting real
 data must first pass `size_quantile_prereg.require_preregistration`. Rules: user decisions of 2026-11-26 on issue #2879
 (separate design PR); the 0.5 floor is provisional. Monthly outputs are returned, not persisted."""
 from pathlib import Path
@@ -12,14 +12,14 @@ from engine.v2.models.training.magnitude_ridge_hgb import fit_regression_predict
 from engine.v2.ops.errors import fail
 from engine.v2.research.progress import Progress, decision, stage
 from experiments import lib
-from experiments.label_availability import label_cutoff_reason
+from experiments.label_availability import label_cutoff_reason, printed_before
 from experiments.size_quantile_binding import bind_grid
 from experiments.size_quantile_fits import _label_array, _matrix, arm_id, fit_fold, q_raw
 from experiments.size_quantile_folds import annual_folds
 from experiments.size_quantile_sources import training_labels
 from experiments.size_quantile_walk import _labels, _load, _publish
 
-SCHEMA, SOURCE, SCALE_FLOOR, BURN_IN = "size_quantile_arm_s_fit.v1", "S", 0.5, "scale_burn_in"
+SCHEMA, SOURCE, SCALE_FLOOR, BURN_IN = "size_quantile_arm_s_fit.v2", "S", 0.5, "scale_burn_in"
 COLUMNS = ["median", "scale"]
 
 
@@ -37,7 +37,7 @@ def _admit(sealed, spec, raw_receipts):
     return folds
 
 
-def _fit(spec, sealed, config, ids, x, y, eval_x, targets):
+def _fit(spec, sealed, config, ids, x, y, eval_x, targets, available):
     fixed, cols = spec["grid"]["fixed"], sealed["model_columns"]
     recipe = regression_recipe(target_domain="signed", model="history_hgb", loss="absolute_error", columns=cols,
                                feature_dictionary_hash=sealed["dictionary_hash"], max_leaf_nodes=config[0],
@@ -52,7 +52,8 @@ def _fit(spec, sealed, config, ids, x, y, eval_x, targets):
     for year in years:
         held = [i for i, e in enumerate(ids) if targets[e]["event_date"][:4] == year]
         inner = [i for i, e in enumerate(ids) if targets[e]["event_date"][:4] < year
-                 and label_cutoff_reason(targets[e]["label_end"], f"{year}-01-01") is None]
+                 and label_cutoff_reason(targets[e]["label_end"], f"{year}-01-01") is None
+                 and printed_before(available[e], f"{year}-01-01")]
         progress.tick()
         if inner:
             held_rows += held
@@ -95,7 +96,9 @@ def _months(sealed, spec, evaluation, first, state):
 
 def _year(sealed, spec, raw_receipts, fold, year, first, state):
     config, cols = tuple(raw_receipts[year]["configuration"]), sealed["model_columns"]
-    train = _labels(training_labels(sealed, fold["training_event_ids"], fold["training_labels_before"]))
+    frame = training_labels(sealed, fold["training_event_ids"], fold["training_labels_before"])
+    train = _labels(frame)
+    available = {str(e): str(a) for e, a in zip(frame["event_id"], frame["target_available_on"])}
     evaluation, ids = fold["evaluation_event_ids"], [e for e, _ in train]
     fit_fold(spec, sealed, train, evaluation, validate_only=True)
     x, eval_x = _matrix(state["by_id"], ids, cols), _matrix(state["by_id"], evaluation, cols)
@@ -104,6 +107,7 @@ def _year(sealed, spec, raw_receipts, fold, year, first, state):
     inputs = {"sealed_binding": sealed["binding"], "spec_hash": lib.spec_hash(spec), "year": year,
               "sklearn_version": sklearn.__version__, "training_labels_before": fold["training_labels_before"],
               "training_labels_hash": content_hash([list(p) for p in train]),
+              "training_availability_hash": content_hash([[e, available[e]] for e in ids]),
               "evaluation_event_ids_hash": content_hash(list(evaluation)),
               "raw_receipt_hash": raw_receipts[year]["content_hash"]}
     fixed = {"schema_version": SCHEMA, "inputs": inputs, "levels": COLUMNS, "configuration": list(config),
@@ -114,7 +118,7 @@ def _year(sealed, spec, raw_receipts, fold, year, first, state):
         decision("arm S", f"year={year} replay, no refit")
     else:
         try:
-            median, scale = _fit(spec, sealed, config, ids, x, y, eval_x, state["targets"])
+            median, scale = _fit(spec, sealed, config, ids, x, y, eval_x, state["targets"], available)
             status, failure, raw = "ok", None, {SOURCE: np.column_stack([median, scale]).tolist()}
         except ValueError as exc:
             status, failure, raw = "fit_failed", str(exc)[:200], {}
