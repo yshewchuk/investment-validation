@@ -57,6 +57,7 @@ def _score(sealed, walk, production, fetch, admitted, s_results, implied, b3):
         moves = training_labels(sealed, [e["event_id"] for e in sealed["events"]], sealed["evaluation_labels_before"])
         frame = moves[moves["event_id"].astype(str).isin(ids)]
         y = pd.Series(frame["absolute_move_pct"].to_numpy(float), index=frame["event_id"].astype(str))
+        available = pd.Series(frame["target_available_on"].to_numpy(object), index=frame["event_id"].astype(str))
         labels_hash = content_hash(sorted(_plain(frame[["event_id", "absolute_move_pct"]].values.tolist())))
         # B1/B2 donors need only the move label and its availability, so they never read crush (read_labels).
         donors = moves.rename(columns={"absolute_move_pct": "abs_move"})
@@ -72,6 +73,7 @@ def _score(sealed, walk, production, fetch, admitted, s_results, implied, b3):
              f"unlabelled={len(unlabelled)} unlabelled_in_period={per_year}")
     m3 = b3["series"].reindex(ids).to_numpy(float) if b3["rule"] == "v14_mae_winner" else np.nan
     events = targets.loc[ids, ["event_date", "ticker", "label_end"]].assign(y=y.reindex(ids).to_numpy(float),
+        available=available.reindex(ids).to_numpy(object),
         pred_move=production["frame"]["pred_move"].reindex(ids).to_numpy(float), m0=lambda d: d["pred_move"],
         m3=m3, implied_move=implied["implied_move"].reindex(ids).to_numpy(float))
     events["decision_date"] = lead1_decision_dates(sealed["context"]["target_events"], events.index)

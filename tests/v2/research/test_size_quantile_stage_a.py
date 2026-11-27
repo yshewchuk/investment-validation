@@ -169,16 +169,17 @@ def _next_day(world, event_id):
     return (date.fromisoformat(world["dates"][event_id]) + timedelta(days=1)).isoformat()
 
 
-def _install(monkeypatch, world, *, omit=(), regress=None, read=None, s_regress=None):
+def _install(monkeypatch, world, *, omit=(), regress=None, read=None, s_regress=None, later=None):
     """Fake the label reader (dropping `omit` on the evaluation read only), the fit regressions of the walk and of
-    arm S (`s_regress` for arm S only), and both B3 binders (returning _b3(world))."""
+    arm S (`s_regress` for arm S only), and both B3 binders (returning _b3(world)). `later` maps event ids to a label
+    availability other than the next day (the reader's target_available_on)."""
     def fake_read(sealed, event_ids, labels_before):
         drop = set(omit) if labels_before == "2026-02-01" else set()
         # As the real reader: a label counts only if it is available (event date + 1 day) before labels_before.
         kept = [e for e in event_ids if e not in drop
                 and (date.fromisoformat(world["dates"][e]) + timedelta(days=1)).isoformat() < labels_before]
         return pd.DataFrame({"event_id": kept, "absolute_move_pct": [world["y"][e] for e in kept],
-                             "target_available_on": [_next_day(world, e) for e in kept]})
+                             "target_available_on": [(later or {}).get(e) or _next_day(world, e) for e in kept]})
     monkeypatch.setattr(walk, "training_labels", read or fake_read)
     monkeypatch.setattr(stage_a, "training_labels", read or fake_read)
     monkeypatch.setattr(arm_s, "training_labels", read or fake_read)
@@ -439,6 +440,29 @@ def test_history_is_the_arms_own_scored_out_of_sample_rows(monkeypatch, tmp_path
     got_available = sorted(pd.to_datetime(history["label_available"]))
     want_available = sorted(pd.Timestamp(e["date"]) + pd.Timedelta(days=2) for e in window)
     assert got_available == want_available
+
+
+def test_calibrate_gets_each_labels_native_availability_not_the_label_end_proxy(monkeypatch, tmp_path):
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    # The 2022-06-05 event's label is printed on 2022-06-20, not on its label_end + 1 day (2022-06-07).
+    late = next(e["id"] for e in world["events"] if e["date"] == "2022-06-05")
+    _install(monkeypatch, world, later={late: "2022-06-20"})
+    seen, real_calibrate = {}, stage_a.calibrate
+
+    def spy(predictions, events):
+        seen["events"] = events.copy()
+        return real_calibrate(predictions, events)
+    monkeypatch.setattr(stage_a, "calibrate", spy)
+    _run(world, out, guard)
+
+    events = seen["events"]
+    finite = [e for e in events.index if np.isfinite(events.at[e, "y"])]
+    assert late in finite and len(finite) > 1
+    for event_id in finite:
+        want = "2022-06-20" if event_id == late else _next_day(world, event_id)
+        assert events.at[event_id, "available"] == want
+    proxy = (pd.Timestamp(events.at[late, "label_end"]) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    assert events.at[late, "available"] == "2022-06-20" and proxy == "2022-06-07"
 
 
 def test_replay_is_identical_and_a_changed_binding_refuses_without_touching_the_report(monkeypatch, tmp_path):
