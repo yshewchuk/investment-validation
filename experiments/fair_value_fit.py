@@ -1,4 +1,4 @@
-"""Fill model F, slices F6a and F6b (design section 9): validates fills, fits price-space constants and the one-tick floor, writes constants.json and fit_receipt.json.
+"""Fill model F, slices F6a and F6b (design section 9): validates fills, fits mid-anchored concession constants, writes constants.json and fit_receipt.json.
 User decisions: V at the quote snapshot's own spot, 60-minute window. No F constant changes; schema in experiments/README.md."""
 import argparse
 import hashlib
@@ -124,9 +124,10 @@ def run_fit(fills_path, out_dir) -> dict:
         raise fvi.FairValueRefusal("out_dir_exists", "the output directory already exists")
     d, receipt = price_fills(fills_path)
     constants, fit, residuals = fvs.solve(d)
-    blob = json.dumps(fvk.constants_document(constants), sort_keys=True, allow_nan=False, indent=1).encode()
+    document = fvk.constants_document(constants)
+    blob = json.dumps(document, sort_keys=True, allow_nan=False, indent=1).encode()
     src = {m: hashlib.sha256(fvi._read_capped(Path(p), 1 << 20, m)).hexdigest() for m, p in (("fair_value_constants", fvk.__file__), ("fair_value_solve", fvs.__file__))}
-    receipt.update(constants_id=fvk.constants_id(constants), constants_sha256=hashlib.sha256(blob).hexdigest(), fit=fit, residuals=residuals,
+    receipt.update(constants_id=document["constants_id"], constants_sha256=hashlib.sha256(blob).hexdigest(), fit=fit, residuals=residuals,
                    constants_source_sha256=src["fair_value_constants"], solve_source_sha256=src["fair_value_solve"])
     with tempfile.TemporaryDirectory(dir=out_dir.parent, prefix=".fit-") as hold:
         Path(hold, "out").mkdir()

@@ -20,6 +20,7 @@ from experiments.size_quantile_folds import annual_folds
 from experiments.size_quantile_sources import _MALFORMED, _refuse, training_labels
 
 LAST_YEAR = 2025
+CHAIN_MAX_OBJECT_BYTES = 1 << 29  # the snapshot's option_chains '2026' partition is one 346 MiB object
 
 
 def _thresholds(spec):
@@ -66,7 +67,7 @@ def _parse(sealed):
         raise _refuse("sealed_malformed", f"a sealed event is malformed ({type(exc).__name__})") from None
 
 
-def _report(sealed, share_min, floor, max_object_bytes, calendar, chain_keys, labels):
+def _report(sealed, share_min, floor, max_object_bytes, chain_max_object_bytes, calendar, chain_keys, labels):
     events = [ev for ev in _parse(sealed) if ev[2].year <= LAST_YEAR]
     cal = calendar(sealed["repository"], sealed["snapshot"], max_object_bytes=max_object_bytes)
     scanned = []
@@ -82,7 +83,7 @@ def _report(sealed, share_min, floor, max_object_bytes, calendar, chain_keys, la
     present, progress = set(), Progress("quantile y0 chains", len(months))
     for ym in sorted(months):
         present.update(chain_keys(sealed["repository"], sealed["snapshot"], sorted(months[ym]),
-                                  max_object_bytes=max_object_bytes))
+                                  max_object_bytes=chain_max_object_bytes))
         progress.tick()
     years = [str(y) for y in range(min((ev[2].year for ev in events), default=LAST_YEAR + 1), LAST_YEAR + 1)]
     counts = {y: {"events": 0, "no_window": 0, "with_chains": 0} for y in years}
@@ -138,12 +139,14 @@ def _report(sealed, share_min, floor, max_object_bytes, calendar, chain_keys, la
             "training_years_min": floor, "years": rows}
 
 
-def y0_report(sealed, spec, *, max_object_bytes=MAX_OBJECT_BYTES, calendar=trading_calendar_from_snapshot,
-              chain_keys=capped_chain_keys, labels=training_labels):
+def y0_report(sealed, spec, *, max_object_bytes=MAX_OBJECT_BYTES, chain_max_object_bytes=CHAIN_MAX_OBJECT_BYTES,
+              calendar=trading_calendar_from_snapshot, chain_keys=capped_chain_keys, labels=training_labels):
     with stage("quantile y0"):
         share_min, floor = _thresholds(spec)
         objects.validate_max_object_bytes(max_object_bytes)
+        objects.validate_max_object_bytes(chain_max_object_bytes)
         try:
-            return _report(sealed, share_min, floor, max_object_bytes, calendar, chain_keys, labels)
+            return _report(sealed, share_min, floor, max_object_bytes, chain_max_object_bytes, calendar, chain_keys,
+                           labels)
         except MemoryError:
             raise fail("RESOURCE_LIMIT_EXCEEDED", "the Y0 report ran out of memory") from None
