@@ -337,7 +337,7 @@ def test_run_fit_writes_only_the_receipt(tmp_path):
     out = tmp_path / "out"
     receipt = ff.run_fit(p, out)
     assert json.loads((out / "fit_receipt.json").read_text()) == receipt
-    assert sorted(x.name for x in out.iterdir()) == ["fit_receipt.json"]  # no fit_receipt.json.tmp left behind
+    assert sorted(x.name for x in out.iterdir()) == ["constants.json", "fit_receipt.json"]  # no staging file left behind
     assert sorted(x.name for x in tmp_path.iterdir()) == ["fills.csv", "out"]
 
 
