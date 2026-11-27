@@ -295,6 +295,10 @@ def test_fill_model_is_pinned_to_fvf_literals():
     assert fill["fvf_id"] == FVF_ID
     assert fill["carry_dividend_mode"] == "f7_orats_borrow_discrete_dividend"
     assert fill["reingest"]["manifest_sha256"] == MANIFEST_SHA
+    assert fill["rate_rules"] == {"rate_out_of_range": "missing", "rate_empty_row": "rate_unknown"}
+    assert fill["vol_scale"] == 1.0
+    assert fill["rate_scale"] == 0.01
+    assert fill["reingest"]["tool_version"] == "4"
 
 
 def test_arms_taus_and_universe_literals():
@@ -303,11 +307,23 @@ def test_arms_taus_and_universe_literals():
     assert spec["stage_b"]["tau"]["set"] == TAUS
     assert spec["stage_b"]["universe"]["centre_peaked"] == ["CND-PS", "BFLY-P", "BFLY-P5", "RAMP7", "CTR5"]
     assert spec["stage_b"]["universe"]["twin"] == ["TWIN-P", "TWIN-P5"]
+    assert "10e9" in spec["stage_b"]["universe"]["short_vol_terms"]
+    assert "0.25" in spec["stage_b"]["universe"]["short_vol_terms"]
+    assert "1e9" in spec["stage_b"]["universe"]["straddle"]
 
 
 def test_success_rules_partition_the_arms():
     success = load_spec()[0]["stage_b"]["success"]
     assert success["controls"] == CONTROLS
+    assert success["judged"] == {
+        "W": ["centre_peaked", "twin"],
+        "D": ["centre_peaked", "twin"],
+        "WD": ["centre_peaked", "twin"],
+        "N1": ["centre_peaked", "twin"],
+        "EQ": ["centre_peaked", "twin"],
+        "TF": ["twin"],
+        "ST": ["straddle"],
+    }
     assert set(success["judged"]) == set(success["controls"])
     never = set(success["never_candidates"])
     assert never.isdisjoint(success["judged"])
