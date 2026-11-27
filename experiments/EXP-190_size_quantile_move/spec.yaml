@@ -1,9 +1,9 @@
 id: "EXP-190"
-title: "Earnings-move quantile model (Stage A)"
+title: "Earnings-move quantile model (Stage A) and its trading test (Stage B)"
 hypothesis: "Can one model beat production's per-event |move| distribution?"
 type: distribution_skill
 strategy: "*"
-price_source: "none in Stage A"
+price_source: "none in Stage A; Stage B: fill model F (stage_b.fill_model)"
 design: "guides/size_quantile_move_design.md"
 data_snapshot: "sealed SIZE v14 panel and records, read by content hash, bound by Q2"
 preregistered_at: null
@@ -14,7 +14,7 @@ constraints:
 
 target: {column: abs_move, units: percent_points, lead: 1}
 levels: [0.1, 0.25, 0.4, 0.5, 0.6, 0.75, 0.9]
-note: "every quantile uses numpy's default linear method; no coverage guarantee. The 500-event minima (calibration, S z_q, level_width_L, B2 donors), the 50 tail donors and min(20, n // 100) L bins are pre-registered judgement values: no derivation or study supports them; fixed before any quantile-model run"
+note: "every quantile uses numpy's default linear method; no coverage guarantee. The 500-event minima (calibration, S z_q, level_width_L, B2 donors), the 30 tail donors (user, 2026-11-26) and min(20, n // 100) L bins are pre-registered judgement values: no derivation or study supports them; fixed before any quantile-model run"
 features:
   panel: "sealed v14 SIZE panel"
   set: HMOSXLP
@@ -26,7 +26,7 @@ features:
 walk_forward:
   folds: "annual; refit yearly per level and configuration"
   range: "Y0 through 2025"
-  y0_rule: "earliest year where every year Y0..2025 has at least chain_share_min admitted panel events with stored entry and exit option chains, and panel holds at least training_years_min earlier calendar years of training rows"
+  y0_rule: "earliest year where every year Y0..2025 has at least chain_share_min admitted panel events with stored entry and exit option chains, and at least training_years_min earlier calendar years of training rows. A year counts only with at least one label training_labels qualifies (usable labels, after v14's label-end cutoff and embargo; user, 2026-11-26); these label reads are allowed before registration. A year whose annual_folds raises POPULATION_COLLAPSED fails the test and does not refuse the report. No year qualifies: refuse, reason y0_none, no fits, no report"
   chain_share_min: 0.5
   training_years_min: 3
   label_rule: "training row needs label available before fold cutoff (data dates, never computed_at)"
@@ -50,10 +50,10 @@ calibration:
   method: linear
   rule: "pool: out-of-sample events dated in the window_months before month m begins, labels available before m began; each at its own year's chosen configuration (what was actually forecast). delta_q is empirical q-quantile of signed errors y - qhat_q on sorted, unfloored predictions (never floored first); add delta_q to unfloored qhat_q, sort, then floor at 0. Under min_events: unscored (calibration_burn_in)"
 distribution_tails:
-  min_donors: 50
+  min_donors: 30
   floor: 0.5
   interpolation: "inverse CDF linear between knots, per arm from its own predictions"
-  rule: "tail pool fixed at start of each month (calibration pool's events rule). Above 0.9: d = (y - q90) / max(q90 - q50, floor) over donors with y > q90; Q(u) = q90 + s_hi * quantile(d, (u - 0.9)/0.1). Below 0.1: d = (y - q10) / max(q50 - q10, floor) over donors with y < q10; Q(u) = max(0, q10 + s_lo * quantile(d, u/0.1)). Event's own s_hi = max(q90 - q50, floor), s_lo = max(q50 - q10, floor). numpy linear; a jump at the knots is allowed. Under min_donors in a tail: whole event unscored for that arm (tail_pool_thin)"
+  rule: "tail pool fixed at start of each month (calibration pool's events rule). Above 0.9: d = (y - q90) / max(q90 - q50, floor) over donors with y > q90; Q(u) = q90 + s_hi * quantile(d, (u - 0.9)/0.1). Below 0.1: d = (y - q10) / max(q50 - q10, floor) over donors with y < q10; Q(u) = max(0, q10 + s_lo * quantile(d, u/0.1)). Event's own s_hi = max(q90 - q50, floor), s_lo = max(q50 - q10, floor). numpy linear; a jump at the knots is allowed. Under min_donors in a tail: tail_pool_thin removes the event from that arm's CRPS ONLY; it keeps its quantiles and stays scored on every other metric and rule, level-width history included (user, 2026-11-26); the report counts CRPS exclusions per arm and year"
   floor_report: "0.5 floor is a user decision (2026-11-26: keep 0.5 floor and report): report MUST print, per arm and year, the share of events where the 0.5 floor binds, for the event width and for the donor normalisation; for arm S also the scale-floor share (arms.S)"
 zero_median:
   threshold: 1.0e-09
@@ -72,12 +72,12 @@ stage_a:
     s1: "Spearman bootstrap: in a used cell of n events with rank residuals rW, re, each event gets n * rW * re / sqrt(sum(rW^2) * sum(re^2)), 0 in a zero-W cell (L alike); size_pnl_contrast ticker bootstrap on these and on the W minus L per-event difference; ranks and residuals fixed across resamples; seed a parameter, default 188"
     s2: "tercile difference within each cell (top minus bottom tercile mean e), weighted by cell event count; zero-residual cell counts 0; ordered by residual, ties by event id, np.array_split; pooled-event tercile table report only"
     s3: "level-width burn-in removes an event only from conditional tests (W, L, B0 comparison); it stays in accuracy and coverage"
-    s4: "min_scored_share per period and arm; denominator all admitted events in the period; numerator admitted events scored by both arm and B0; below: not_testable (scored_share_below_floor); always reported"
+    s4: "min_scored_share per period and arm; denominator all admitted events in the period; numerator admitted events scored by both arm and B0; below: not_testable (scored_share_below_floor); always reported. An admitted in-period event with no qualified label counts in the denominator and is never paired or scored (user, 2026-11-26, option B; no admitted_label_missing refusal); the report counts these per year"
     s5: "a period with no paired event or no usable cell, or a bootstrap with under two groups: arm not_testable; a missing quarter does not count towards a quarter requirement, which stays of 10"
     s6: "cell where e varies but its residual is all zero: skipped for both W and L, own count"
     s7: "L edges: numpy linear quantiles with duplicates removed; a value on an edge goes to the lower bin, earlier and current alike; if ties leave the event's bin with no earlier y: no L (level_width_empty_bin), treated as s3"
     s8: "CRPS uses the distribution_tails rule for every arm; the metric integrates each event's piecewise-linear (u, x) quantile function exactly"
-    s9: "crossing rate: share of events where any neighbouring pair of raw quantiles is strictly out of order"
+    s9: "crossing rate: share of events where any neighbouring pair of raw quantiles is strictly out of order. For Q too, raw means the unsorted fit outputs (user, 2026-11-26)"
   population: "events where judged arm and B0 both have output; drops counted by reason and year; B1-B3 on common subsets"
   periods: ["2023H2", "2024", "2025"]
   quarters: 10
@@ -101,14 +101,14 @@ stage_a:
     - "conditional_sharpness: in each period W's partial Spearman positive and exceeds L's, and W's wide-minus-narrow tercile difference in mean e positive and exceeds L's; pooled over periods, ticker intervals for W's Spearman and W minus L both lie above 0"
     - "calibration_guard: for each band, |coverage - nominal| no worse than B0's in at least 5 of 10 quarters"
   bootstrap: {resamples: 10000, interval_percentile: 90, seed: "fixed"}
-  flags: "pooled pinball loss to B1, B2 or B3 is flagged in headline, not gated"
-  verdict: "Stage A passes if Q or Q_raw passes. Each passing arm enters Stage B with own verdict. Two eligible arms give two tries, uncorrected. Otherwise Stage B not run."
+  flags: "pooled pinball loss to B1, B2 or B3 is flagged in headline, not gated. Each baseline has its own common subset (events scored by the arm, B0 and that baseline), so one baseline's gaps never shrink another's (issue 3042 item 1, owner default, user 2026-11-26)"
+  verdict: "Stage A passes if Q or Q_raw passes. Which arms enter Stage B is open (stage_b.open_decisions.stage_b_arms); each that enters carries its own verdict. Two eligible arms give two tries, uncorrected. Otherwise Stage B not run. With no passing arm, Stage A is not_passed (not_testable stays for a Q_raw fit failure), each arm labelled and reasons listed (issue 3042 item 4, owner default, user 2026-11-26). The Stage A report does not store stage_b_arms."
   selection_period_disclosure: "report states: grid for year Y uses earlier years; B3 identity, feature set, grid values used 2023-2024; Stage A gate uses 2023H2-2025. No feature set, grid value, configuration or baseline identity was selected by scoring 2025 (baselines here are B0-B3; Stage B's control arm E was recommended after its 2025 results were seen). 2025 is not a clean test or holdout: the Stage A gate reads it (Stage B scores it after a pass that read 2025 outcomes), and 2025 results shaped the design, EXP-188's and EXP-189's among them (D15 as revised by the user, 2026-11-26). Only the forward period after data end is independent."
 
 failure_semantics:
-  R1: "panel, folds, dictionary, M0 or M3 series do not bind: refuse EXPERIMENT_IDENTITY_CONFLICT; nothing rebuilt or imputed. A merely absent M3 year is B3 not_testable."
-  fit_failed: "fold's arm is fit_failed, no retry. One failed fit (any level or configuration) fails the whole year. The Q walk runs years in order and stops at the first fit_failed year: later years are neither selected nor fitted, so no grid selection reads a failed year; none is skipped or substituted. Stage A is then not_testable, even for a year before the judged periods. Receipts are published whole or not at all; a rerun replays published ones, fit_failed included. Calibration failure affects Q only. The stop and not_testable rule is a user decision (2026-11-26)."
-  abstention: "burn-in (except level-width, see level_width), thin tail pool, non-finite output: unscored (an abstention, not 'no'), counted; leaves paired population"
+  R1: "panel, folds, dictionary, M0 or M3 series do not bind: refuse EXPERIMENT_IDENTITY_CONFLICT; nothing rebuilt or imputed. A merely absent M3 year is B3 not_testable. No Y0: refuse, reason y0_none (walk_forward.y0_rule)."
+  fit_failed: "fold's arm is fit_failed, no retry. One failed fit (any level or configuration) fails the whole year. The Q walk runs years in order and stops at the first fit_failed year: later years are neither selected nor fitted, so no grid selection reads a failed year; none is skipped or substituted. The walk's source is Q_raw (Q derives from it), so a Q_raw fit failure makes the whole of Stage A not_testable, even for a year before the judged periods. Only a ValueError from fitting is fit_failed; a memory-limit refusal is not: it refuses RESOURCE_LIMIT_EXCEEDED and publishes no receipt for that year. Receipts are published whole or not at all; a rerun replays published ones, fit_failed included. Calibration failure affects Q only. The stop and not_testable rule is a user decision (2026-11-26)."
+  abstention: "burn-in (except level-width, see level_width), non-finite output: unscored (an abstention, not 'no'), counted; leaves paired population. A thin tail pool is not an abstention: CRPS only (distribution_tails)."
   baseline_abstention: "B1 pool_too_small; B2 under 500 donors or invalid own implied_move: that baseline is unscored for the event, counted; its common-subset tables drop it. B2 donor with null, zero, negative or non-finite implied_move: dropped from the pool and counted"
   level_width: "burn-in or empty bin: no L, counted; only conditional tests"
   R2: "quarter or year chunks. Memory limit (user decision, 2026-11-26; peak not yet measured): one heavy process on a 13 GiB box; the real-data entry point (not yet built, #3047) must wrap the whole run in experiments.memory_guard.rss_watchdog(8 * 2**30): the run's own VmRSS, sampled every 50 ms, above 8 GiB raises MemoryError, refused RESOURCE_LIMIT_EXCEEDED; no partial report, complete fit receipts stay. bounded_run --heavy --max-rss-gb 9 is the untyped backstop above it. No wall-clock limit; receipt byte caps are separate."
@@ -116,10 +116,122 @@ failure_semantics:
   R5: "arm ids hash source, level set and configuration"
   R6: "causality: fits, selection, calibration, tail, level-width and baseline pools use data available before fold or month; month's predictions written before its labels are read"
 
-real_data_order: "SB0, then PLANNED row, then 50-ticker smoke (a real-data fit), then full run. Before the row (user decision, 2026-11-26): sealed-record binding, panel and chain counts, Y0 report and training-id parity (with the label reads they need) are allowed; no model fit on real data and no computing of any arm's or baseline's score against realised moves (showing v14's stored metrics is allowed)"
+code_alignment: "pending. The user rules of 2026-11-26 (30-donor CRPS-only tails; unlabelled in-period events in the denominator with no refusal; the Y0 rule with y0_none; per-baseline headline flags) are the contract, but merged code does not yet implement them: calibration still uses 50 donors and unscores the whole event, the driver still raises admitted_label_missing, and Y0 and the flags are not built. Wherever this spec states those rules it states required behaviour. SB0 part 2 must not set stage_b.status settled, and no PLANNED row is registered, until merged code implements them. Until then the guard refuses stage_b_pending, so no registered run can happen"
+real_data_order: "SB0 (both parts), then PLANNED row, then 50-ticker smoke (a real-data fit), then full run (user decision, 2026-11-26: registration stays before the smoke). Before the row (user decision, 2026-11-26): sealed-record binding, panel and chain counts, Y0 report and training-id parity (with the label reads they need) are allowed; no model fit on real data and no computing of any arm's or baseline's score against realised moves (showing v14's stored metrics is allowed). Those label reads stay under the no-holdout rule: shared admission first, admitted event keys only. They use event id, ticker and label_end, and for usable-label counts whether a qualified abs_move exists; no move value is printed, aggregated or compared with a forecast."
 
 stage_b:
-  status: pending_part_2
-  decisions_recorded_in: "design section 10 (D1, D11-D15, N1-N4, F, EQ)"
+  status: pending_decisions  # the guard accepts only 'settled', so registration is refused
+  open_decisions:  # SB0 part 2 records all three and sets status settled
+    tau_window_aggregation: "open: how the 2025 tau objective combines the 2023H2 and 2024 selection periods, since each account period starts fresh (issue 2941)"
+    buildability_fallback: "open: whether arms E and EQ have any retry beyond choosing among feasible widths (issue 2941; user hold of 2026-11-25: wait for the EXP-189 fair-value result)"
+    stage_b_arms: "open: whether both Q and Q_raw enter Stage B whenever Stage A passes (design sections 5, 6.1 and D7) or only each passing arm (the earlier stage_a.verdict wording, and the merged stage_a_verdict) (issue 3042 item 5)"
+  rules_from: "design section 6; decisions in section 10 (D1, D11-D15, N1-N4, F, EQ)"
+  runs_if: "only after a bound Stage A pass receipt. Sources s are Q (calibrated) and Q_raw (uncalibrated), each with its own tails; an arm suffixed _s uses only s. Which of the two run: open_decisions.stage_b_arms; each that runs is labelled with its own Stage A verdict; EQ runs only for a source that itself passed"
+  machinery: "EXP-188 production-exact rules as a library (its design section 18: strikes through price_structure, no zero-floor drop, entry and exit sessions, spread and market-cap terms, per-arm trailing cutoffs, exit rungs). No size_pnl_* or size_width_* change. Draw key event_id, shared by all arms"
+  fill_model:
+    id: "F"
+    role: "primary for selection and scoring"
+    design: "guides/fair_value_fill_design.md"
+    fvf_id: "735f3e6cb2fa65c303599152cfa6fead2d7950e9bcb367117d50ed25faffc0b7"
+    carry_dividend_mode: "f7_orats_borrow_discrete_dividend"
+    rate_rules: {rate_out_of_range: "missing", rate_empty_row: "rate_unknown"}
+    vol_scale: 1.0
+    rate_scale: 0.01
+    reingest:
+      path: "data/experiment/orats_smoothed_vol_v4"
+      tool_version: "4"
+      manifest_sha256: "17ecc75e84d2e261900eccc3ad79a1cbd065af2d58eabdfebfd49dd75001f75d"
+      manifest_units: {iRate5wk: "percent", iRateLt: "percent", borrow30: "percent", borrow2yr: "percent", divAmt: "dollars_per_share", annIdiv: "dollars_per_share", annActDiv: "dollars_per_share", divDate: "date", assetType: "code"}
+    quote_snapshot: "the snapshot the sealed inputs pin; no substitute"
+    receipt_bindings: ["fill_model_id", "fvf_id", "reingest_manifest_sha256", "every_table_file_sha256", "quote_snapshot_id", "units", "rate_out_of_range", "rate_empty_row", "carry_dividend_mode"]
+    selection: "debit_F is the entry cost in exp_pnl_sim, in E's and EQ's k choice, in lots and in accounts; debit_F and proceeds_F give every deciding P&L and the selection-model target. The simulated exit inside exp_pnl_sim is unchanged (European, zero rate, no concession)"
+    reported_never_deciding: ["mid", "harsh", "unknown0", "unknown1", "midfloor"]
+    views: "on the same F-selected taken set: mid is FillModel(0.5), harsh is every leg at alpha 0, entry and exit; the three F sensitivities (F design section 5) per trade and per family account; none decides or breaks a tie"
+  guard: "after geometry resolves, a leg not ok or an F guard failure is a counted non-trade for that arm (f_ plus status or guard reason): no score, outside cutoff history, P&L 0; the event stays in the paired population. F's same-skip rule means: statuses and guard depend only on resolved legs and entry-date inputs, so every arm, control, view and sensitivity resolving the same legs of an event gets the same result; arms with other legs may differ. A passing guard has debit_mid and debit_fair above MIN_MEANINGFUL_COST (1e-6) and debit_F at least debit_fair, so a nonpositive debit_F is an f_not_a_debit non-trade and never a selection-model training row"
+  exit: "an unpriceable exit leg or exit rung 3 marks the structure at its worst-case payoff (EXP-188 design section 6), labelled exit_unquoted_worst_case; F's exit_fair_mid applies; negative proceeds_F is kept and flagged, not floored; a held trade never leaves"
+  universe:
+    candidate: "(event, structure); an event for the straddle"
+    centre_peaked: ["CND-PS", "BFLY-P", "BFLY-P5", "RAMP7", "CTR5"]
+    twin: ["TWIN-P", "TWIN-P5"]
+    short_vol_terms: "market cap at least 10e9 and mean relative spread at most 0.25 on stored quotes"
+    straddle: "STR-THRU long legs, EXP-188 Amendment 5 universe: market cap at least 1e9, BAD_QUOTE refused at mid cost, no spread term. No call-side short leg"
+  take_rule: "unless an arm says otherwise: score (exp_pnl_sim on debit_F; N1, N2 predicted return; ST, ST0 P) at or above trailing_cutoff (6 months strictly before the month, top 20 percent, at least 100 scores) over that arm's own earlier universe scores, per structure"
+  rows: "determined: a decision or a counted non-trade (width declined, ladder_too_coarse, F status or guard, outside universe, take rule not met). A needed missing fact (forecast, quantiles, pool, cutoff history, market cap, spread, implied move for ST and ST0, or at geometry resolution an absent strike or unusable entry quote) makes the row undetermined, never no. Each candidate has one paired population, the rows determined by it and all its controls; its account and theirs walk only those rows; drops counted by arm, reason and year; determined share reported, not gated"
+  arms:  # width is production's (forecast_params(name, M0) at the pinned commit) unless stated
+    P0: "control, production: exp_pnl_sim with M0 and the native full-history ResidualPool (as B0)"
+    E: "second control: EXP-189 arm E as pinned in exp189 (per event and structure, the feasible grid k maximising exp_pnl_sim, M0 and its pool), scored under F"
+    W: "candidate W_s: width forecast_params(name, Q_s(tau)); entry simulation M0 and P0's pool on the new geometry"
+    LW: "control for W_s: width forecast_params(name, kappa * M0); as W_s. kappa: median Q_s(tau)/M0 over the prior 12 months, strictly earlier events with M0 > 0, at least 100"
+    D: "candidate D_s: exp_pnl_sim with QuantilePool_s"
+    WD: "candidate WD_s: width as W_s, QuantilePool_s"
+    LWD: "control for WD_s: width as LW_s, QuantilePool_s"
+    TF: "candidate TF_s (twin filter): takes when P0 takes it and R = (q75 - q25)/q50 from s is at or below the median of R over the 6 months strictly before the month, at least 100 values, one R per universe event. Printed, not tested: determined P0-taken rows with R above the median; event id, R, median and P0's decision are stored as raw rows"
+    EQ: "candidate EQ_s: arm E's grid and rules, k chosen by exp_pnl_sim with QuantilePool_s over the event's own seven calibrated quantiles and tails (Q_raw: uncalibrated); the wrapped pool, E's, supplies only move ranks and crush errors"
+    N1: "candidate N1_s: selection model with quantile features"
+    N2: "control for N1_s: the same model without quantile features, on exactly N1_s's rows"
+    ST: "candidate ST_s: straddle, take on P = Pr(abs move > implied_move) from s"
+    ST0: "control for ST_s: the same rule from B0"
+  quantile_pool: "exposes draw and before. draw calls the wrapped pool's draw (same M0 forecast, count, random stream), ranks each drawn err_move u = (rank + 0.5)/n among the draws (ties in draw order; empty passes through) and returns Qinv_event(u) - forecast; err_crush unchanged. D, WD, LWD wrap P0's pool; EQ wraps E's. pnl_sim.expected_pnl unmodified; the fast path matches it within 1e-9 or the run aborts"
+  exp189:
+    pinned_commit: "4b14a5ed436c133a9a1dcf7bb5ca0246fee95db2"
+    design: "guides/size_width_tuning_design.md with Amendment 1"
+    amendments: ["A1"]
+    spec_hash: "44776b05f9a4fd7fb5232a1791ff6e3a9b173d099d86960213a2ba57de7da668"
+    modules: "experiments/size_width_*.py at pinned_commit"
+    k_grid: [0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0]
+    arm_e: "E and EQ keep that version's grid, ties (nearest 1, then smaller), feasibility and no-feasible-k rule (design 3.1, 8, A1.4; F statuses and guard are feasibility conditions), own-score trailing selection, funding and account rules. Any further fallback: open_decisions.buildability_fallback"
+  tau:
+    set: ["p10", "p25", "p40", "p50", "p60", "p75"]
+    unit: "one per family (centre_peaked, twin) and source; LW, WD and LWD reuse W's choice"
+    objective: "W_s family account return at F over the selection window, using only trades that also exit before the scored year; all six compared on rows determined at every tau"
+    windows: {"2023H2": "no earlier window: p50 for both families, labelled tau_default", "2024": "best on 2023H2", "2025": "best on 2023H2-2024; aggregation: open_decisions.tau_window_aggregation"}
+    ties: "nearest p50, then smaller"
+    eligibility: "at least 100 taken trades in the window; none eligible: p50"
+    history: "each tau is a complete arm whose cutoff history is its own scores over every earlier month, whatever tau the walk-forward used then; the walk-forward arm takes each period's decisions from that period's tau"
+    report: "every tau printed for every year (W, LW, WD, LWD; both sources and families): returns, trades, declines, chosen tau"
+  trade_everything: "before any selection fit, price entry and exit under F (mid and harsh beside it) for every universe candidate at production widths whatever any gate says, from Y0; every other geometry (W and LW at each tau, E, EQ) and every straddle alike. Report per geometry and year: candidates, non-trades by reason, mean return per trade at F, mid, harsh, and flat-dollar P&L (CAPITAL_PER_TRADE whole lots at debit_F). Exits sit in a separate table whose reader releases a row only if its exit date is before the fold's or period's cutoff"
+  selection_models:
+    unit: "one HGB per family (centre_peaked, twin) per source, structures pooled with a categorical structure id"
+    target: "(proceeds_F - debit_F)/debit_F, conservative exits included, unclipped; non-trades are not training rows"
+    features_both: ["structure id", "M0 forecast", "implied_move", "M0 / implied_move", "debit_F / spot", "nearest and farthest breakeven distance: distance from spot, as a share of spot, of expiry prices where the resolved structure's payoff equals debit_F (none: NaN)"]
+    features_n1_only: ["the seven quantiles of s", "each over implied_move", "(q75 - q25)/q50", "(q90 - q10)/q50"]
+    missing: "a missing implied_move or breakeven, or a zero denominator (zero_median included), leaves only that feature NaN"
+    out_of_sample: "an event in year Y takes the Y fold's walk-forward quantiles, never in-sample; a row without s output is in neither model"
+    windows: "one fit per year on all rows from Y0 whose exit date is before 1 January of that year (expanding), 2023 through 2025; 2023 predictions give 2023H2 its cutoff history"
+    configuration: {loss: "squared_error", max_leaf_nodes: 7, min_samples_leaf: 300, learning_rate: 0.03, l2_regularization: 10.0, max_iter: 300, early_stopping: false, random_state: 0, tuning: "none"}
+    burn_in: "under 1000 training rows for a family: that year undetermined (selection_burn_in)"
+    rule: "take when predicted return is in the top 20 percent of the model's own trailing predictions (take_rule window, per structure) and universe terms hold; a window may mix two annual fits"
+    reported: "N1 minus N2 per family and year"
+  straddle_probability: "P is one minus the largest u whose inverse CDF (design section 4 knots and tails) is at or below implied_move (none: 1). ST0 uses B0's distribution built as for CRPS (settlement 8) from B0's earlier predictions. implied_move is the panel's, percent points; missing or non-positive is undetermined. G_PROD, where its EXP-188 artifacts bind, is re-scored under F for 2025, labelled not production-faithful; else not_available"
+  outputs: "by arm, structure, family and year: candidates, determined share, trades, declines by reason, mean P&L per candidate and per trade at F, mid, harsh, F sensitivities, breakeven alpha, accounts. Reported, not gated: quarter and ticker bootstraps (size_pnl_contrast, 10000 resamples, 90 percent, seed 188) of each candidate minus each control in per-candidate return; F diagnostics; tau table; N1 minus N2; EQ minus E on events both determine; straddle (ST, ST0, by year: frequency of y > implied_move by fifth of P, Brier of P beside the earlier base rate, mean F return of taken, untaken, all). F entry-date coverage prints before any outcome is read"
+  accounts:
+    policy: {start_equity: 200000, cap: 0.66, target_share: 0.25, expensive_first: true}
+    secured: "every short put at strike x 100; a straddle at its debit x 100"
+    code: "EXP-134 margin.simulate unchanged, with this policy passed explicitly as in experiments/size_pnl_account.py (module defaults unused). Its behaviour governs: equity is cash plus open positions at cost; headroom is cap x equity minus secured; contracts are the floor of min(max(target_share x headroom / secured per contract, 1), headroom / secured per contract); under 1 the trade is unfunded, no substitute; the cap limits secured cash only; same entry date: largest secured per contract first; positions exiting on or before an entry date close first"
+    costs: "deciding account: entry debit_F, exit proceeds_F. Required of the Stage B caller (SB9a, not built): mid and harsh walk the same taken set, each passing its own entry cost and exit value; the existing simulate_account mid mark swaps only exit values, so it does not do this"
+    sets: "each structure; centre_peaked five; twin pair; all seven (reported); straddle. Verdicts use the family account (centre_peaked, twin, straddle)"
+    periods: "2023H2, 2024, 2025, each a fresh account"
+  breakeven_alpha: "reprice the arm's F-selected taken set at alphas [0, 0.25, 0.5, 0.75, 1], entry and exit, engine.evaluate.breakeven_alpha_from_sweep. Needs at least two finite points; a None result reads 0.0 if every finite point is positive, 1.0 if every one is negative; fewer than two finite points or any other None is uncomputable (not_testable). A non-positive repriced debit leaves that alpha's mean, counted. It tests fill robustness, not F return"
+  success:
+    judged: {W: ["centre_peaked", "twin"], D: ["centre_peaked", "twin"], WD: ["centre_peaked", "twin"], N1: ["centre_peaked", "twin"], EQ: ["centre_peaked", "twin"], TF: ["twin"], ST: ["straddle"]}
+    never_candidates: ["LW", "LWD", "N2", "ST0", "P0", "E"]
+    controls: {W: ["P0", "E", "LW"], D: ["P0", "E"], EQ: ["P0", "E"], TF: ["P0", "E"], WD: ["P0", "E", "LWD"], N1: ["P0", "E", "N2"], ST: ["ST0"]}
+    pass_iff_all:
+      - "family account return at F strictly above every listed control's in each of 2023H2, 2024 and 2025"
+      - "2025 breakeven alpha at most P0's + 0.05 and at most E's + 0.05 (straddle: at most ST0's + 0.05)"
+      - "short vol only, stand-alone structure accounts at F in 2025 against P0's: at most 1 of the five centre_peaked accounts loses and neither twin account loses; loses means total return strictly below P0's for that structure (equal is not a loss)"
+    undetermined: "no trades in a period fails; an uncomputable comparison is not_testable. Results against P0 alone are printed"
+    multiplicity: "per source 12 verdicts, 24 for both (fewer if one gets no EQ), uncorrected and strongly correlated; the report lists all together. A pass is a proposal; any board change is a separate user decision with the DYN-SV chooser review"
+    selection_period_disclosure: "report states: tau as in tau.windows; N1 and N2 fit on earlier exits with a fixed configuration; cutoffs, kappa and TF's median trail causally; E and EQ choose k without realised outcomes. 2024 is not clean (features, grid and tau used earlier results). No feature set, grid value, configuration, baseline identity, tau or selection-model setting was selected by scoring 2025 (control E was recommended after its 2025 results were seen); only causal trailing statistics read earlier 2025 data. 2025 is not a clean test or holdout: the Stage A gate reads it and 2025 results shaped the design. Only the forward period is independent"
+  failure_semantics:
+    R1: "no bound Stage A pass receipt: stage_a_not_passed; changed spec: spec_hash_mismatch; no PLANNED row: planned_row_missing. Panel, folds, M0, quantile receipts, snapshot, F tables or the pinned EXP-189 version do not bind, and F's own R1 refusals: EXPERIMENT_IDENTITY_CONFLICT with details.reason; no partial report, nothing rebuilt or imputed"
+    R1_rows: "quantile burn-in, thin pool or cutoff history, missing fact: undetermined, counted, never no. An event whose tail pool is thin has no full distribution: rows of arms that read it (D, WD, LWD, EQ, ST for that source, ST0 for B0) are undetermined, counted; quantile-only arms keep it. Thin kappa or TF history, zero_median in TF's R, selection_burn_in: that arm's row undetermined, counted"
+    entry_exit: "entry failure (width declined, ladder too coarse, F status or guard, no feasible k): non-trade at P&L 0, counted, event stays. Exit unusable after entry is never a non-trade (exit rule above)"
+    fit_failed: "a failed selection fit: that year, family and source, N1 and N2 fit_failed, no retry, verdict not_testable; other arms run"
+    optional: "G_PROD artifacts absent: not_available; no verdict depends on it"
+    R2: "one heavy job, bounded_run, quarter chunks; each quote row priced once per chunk; over the failure_semantics.R2 memory limit above: RESOURCE_LIMIT_EXCEEDED, no partial report"
+    R3_R4: "fixed seeds and orders, results independent of which arm asked first; trade_all, selection, tau and decision receipts atomic, immutable, bound to inputs and fvf_id; replay is read-only; a changed input refuses"
+    R5: "arm ids hash arm, source, family, configuration, spec and fvf_id"
+    R6: "data dates only; fits and tau read exits dated before their cutoff; a month's decisions are written before its labels or exits are scored; trailing statistics use strictly earlier months"
 
 amendments: []
