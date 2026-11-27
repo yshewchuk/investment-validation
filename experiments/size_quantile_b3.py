@@ -19,8 +19,6 @@ INNER_YEARS = (2023, 2024)
 OUTER_YEAR = 2025
 _MALFORMED = (KeyError, TypeError, AttributeError, ValueError)
 _EXTRA = ("bucket", "fallback", "n_rows", "reason")
-B3_KEYS = {"plan_id", "series_hash", "series", "years", "binding", "rule", "b3_candidate_id", "m3_candidate_id"}
-B3_RULES = ("v14_mae_winner", "lowest_inner_mae_hmosxlp")
 
 
 def _refuse(reason, message):
@@ -30,30 +28,6 @@ def _refuse(reason, message):
 def series_digest(series):
     """Content hash of a B3 series: its (id, repr(float(value))) pairs sorted by id."""
     return content_hash(sorted([str(i), repr(float(v))] for i, v in series.items()))
-
-
-def _bound_holds(bound, plan_id, admitted_ids):
-    if not (isinstance(bound, dict) and B3_KEYS <= set(bound)):
-        return False
-    series, years = bound["series"], bound["years"]
-    if bound["plan_id"] != plan_id or not isinstance(bound["binding"], str) or not bound["binding"].strip():
-        return False
-    if bound["rule"] not in B3_RULES or not isinstance(years, dict) or set(years) != {"2023", "2024", "2025"}:
-        return False
-    if not isinstance(series, pd.Series) or series.index.has_duplicates:
-        return False
-    if not all(i in admitted_ids for i in series.index):
-        return False
-    try:
-        return series_digest(series) == bound["series_hash"]
-    except (TypeError, ValueError):
-        return False
-
-
-def check_bound(bound, plan_id, admitted_ids):
-    """Refuse unless the B3 input is bound to plan_id, its series is admitted and it matches its recorded hash."""
-    if not _bound_holds(bound, plan_id, admitted_ids):
-        raise _refuse("b3_input_unbound", "the B3 input is not bound to this plan and its admitted series")
 
 
 def _inner(plan, read, cids, kind, year, admit):
@@ -107,7 +81,7 @@ def _bind(plan, read, binding, admit):
     rows = [[year, status, entry["binding"] if status == "bound" else None] for year, status, entry in results]
     digest = content_hash({"plan_id": plan["plan_id"], "b3_candidate_id": cid, "years": rows})
     decision("quantile B3", f"id={cid} years={years} rows={len(series)}")
-    return {"plan_id": plan["plan_id"], "b3_candidate_id": cid, "years": years, "series": series, "binding": digest,
+    return {"b3_candidate_id": cid, "years": years, "series": series, "binding": digest,
             "series_hash": series_digest(series)}
 
 

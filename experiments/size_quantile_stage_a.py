@@ -21,8 +21,9 @@ from experiments.size_pnl_prereg import _read_bounded
 from experiments.size_pnl_readers import read_labels, read_production
 from experiments.size_quantile_arm_s import fit_arm_s
 from experiments.size_quantile_arm_verdict import judge_arm, stage_a_verdict
-from experiments.size_quantile_b3 import b3_quantiles, check_bound
+from experiments.size_quantile_b3 import b3_quantiles, bind_series
 from experiments.size_quantile_baselines import band_quantiles, implied_quantiles, pool_quantiles
+from experiments.size_quantile_binding import bind_b3
 from experiments.size_quantile_calibration import (MIN_TAIL, PERIOD, QCOLS, calibrate, predictions_from_receipts,
                                                   score_crps)
 from experiments.size_quantile_prereg import SPEC_PATH, load_spec, require_preregistration
@@ -125,8 +126,9 @@ def _publish(out_dir, body, name=REPORT, reason="stage_a_report_changed"):
         os.unlink(tmp)
     return json.loads(data)
 
-def run_stage_a(sealed, years, admitted, fetch, out_dir, *, production_hash, table_hash, b3, spec_path=SPEC_PATH,
-                ledger_path=None, run_log_path=None, experiments_dir=None, run_inputs_hash=None, bound_spec_hash=None):
+def run_stage_a(sealed, years, admitted, fetch, out_dir, *, production_hash, table_hash, b3_read, b3_admit,
+                spec_path=SPEC_PATH, ledger_path=None, run_log_path=None, experiments_dir=None, run_inputs_hash=None,
+                bound_spec_hash=None, bound_b3_binding=None):
     """Run Stage A and publish its report; returns the parsed document (schema in the module docstring)."""
     try:
         with stage("quantile stage A"):
@@ -142,7 +144,11 @@ def run_stage_a(sealed, years, admitted, fetch, out_dir, *, production_hash, tab
                     and {"2023", "2024", "2025"} <= set(years) and years[-1] == "2025"):
                 raise fail("INVALID_EXPERIMENT_SPEC", "years invalid", details={"reason": "stage_a_years_invalid"})
             production = read_production(fetch, admitted, expected_hash=production_hash, table_hash=table_hash)
-            check_bound(b3, sealed["plan"]["plan_id"], set(admitted["events"]["event_id"]))
+            binding = bind_b3(sealed["plan"], b3_read("selection"))
+            b3 = {**bind_series(sealed["plan"], b3_read, binding, b3_admit), "rule": binding["rule"],
+                  "m3_candidate_id": binding["m3_candidate_id"]}
+            if bound_b3_binding not in (None, b3["binding"]):
+                raise _refuse("stage_a_b3_changed", "the B3 binding differs from the one bound in run_inputs")
             implied, implied_hash = implied_table(sealed)
             walk = fit_walk_forward(sealed, spec, years, Path(out_dir) / "fits")
             scoring = all(receipt["status"] == "ok" for receipt in walk.values())

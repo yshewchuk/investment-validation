@@ -22,7 +22,7 @@ from tests.v2.research import test_size_quantile_stage_a as base
 
 B3_PLAN = {"rule": "v14_mae_winner", "m3_candidate_id": "M3", "b3_candidate_id": "B3", "kind": "candidate",
            "plan_id": "P"}
-B3_SERIES = {"b3_candidate_id": "B3", "years": base.B3_YEARS, "binding": base.B3_BINDING, "plan_id": "P1",
+B3_SERIES = {"b3_candidate_id": "B3", "years": base.B3_YEARS, "binding": base.B3_BINDING,
              "series_hash": content_hash([]),
              "series": pd.Series([], dtype=float, index=pd.Index([], name="event_id"))}
 
@@ -63,7 +63,8 @@ def _inputs(world, out, calls=None, avail=None):
     return {"sealed": world["sealed"], "admitted": world["admitted"],
             "fetch": base._fake_fetch(world, out, [] if calls is None else calls, avail=avail),
             "production": {"binding": base.PRODUCTION_BINDING, "table_hash": base.TABLE_HASH},
-            "table_hash": base.TABLE_HASH, "b3": base._b3(world)}
+            "table_hash": base.TABLE_HASH, "b3": base._b3(world), "b3_read": base.B3_READ,
+            "b3_admit": base.B3_ADMIT}
 
 
 def _env(monkeypatch, world, out, *, y0=None, regress=None, calls=None, avail=None):
@@ -116,9 +117,31 @@ def test_real_load_inputs_runs_in_spec_order(monkeypatch):
     out = run_mod.load_inputs(CFG, _Conn(), object())
     assert calls == ORDER_B3
     assert reads == []  # loading reads no table rows itself here, so no label is read
-    assert set(out) == {"sealed", "admitted", "fetch", "production", "table_hash", "b3"}
+    assert set(out) == {"sealed", "admitted", "fetch", "production", "table_hash", "b3", "b3_read", "b3_admit"}
     assert out["b3"]["binding"] == base.B3_BINDING and out["b3"]["years"] == base.B3_YEARS
     assert out["b3"]["rule"] == "v14_mae_winner" and out["b3"]["m3_candidate_id"] == "M3"
+
+
+def test_load_inputs_binds_b3_from_the_plan_and_the_selection_record(monkeypatch):
+    _patch_load(monkeypatch, [])
+    seen = {}
+
+    def bind_b3(plan, selection):
+        seen["bind_b3"] = (plan, selection)
+        return B3_PLAN
+
+    def bind_series(plan, read, binding, admit):
+        seen["bind_series"] = (plan, read, binding, admit)
+        return B3_SERIES
+    monkeypatch.setattr(run_mod, "bind_b3", bind_b3)
+    monkeypatch.setattr(run_mod, "bind_series", bind_series)
+    out = run_mod.load_inputs(CFG, _Conn(), object())
+    plan, selection = seen["bind_b3"]
+    assert plan is out["sealed"]["plan"] and selection == "SELECTION"
+    bound_plan, read, binding, admit = seen["bind_series"]
+    assert bound_plan is out["sealed"]["plan"] and read is out["b3_read"] and binding is B3_PLAN
+    assert admit is out["b3_admit"] and admit == "PADMIT"
+    assert read("selection") == "SELECTION"
 
 
 @pytest.mark.parametrize("boom", ["bind_b3", "bind_series"])

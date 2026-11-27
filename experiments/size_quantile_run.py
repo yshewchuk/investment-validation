@@ -59,7 +59,7 @@ def load_inputs(cfg, conn, store):
     b3 = {**bind_series(sealed["plan"], read, binding, admit), "rule": binding["rule"],
           "m3_candidate_id": binding["m3_candidate_id"]}
     return {"sealed": sealed, "admitted": admitted, "fetch": fetch, "production": production,
-            "table_hash": tables.table_hash, "b3": b3}
+            "table_hash": tables.table_hash, "b3": b3, "b3_read": read, "b3_admit": admit}
 
 
 def smoke_subset(sealed, count):
@@ -100,8 +100,10 @@ def _run(sources_config, out_dir, tickers, **paths):
         record = _publish(out_dir, body, "run_inputs.json", "run_inputs_changed")
         if tickers is None:
             doc = run_stage_a(sealed, years, inputs["admitted"], inputs["fetch"], out_dir,
-                              production_hash=cfg["production_hash"], table_hash=inputs["table_hash"], b3=inputs["b3"],
-                              run_inputs_hash=record["content_hash"], bound_spec_hash=guard["spec_hash"], **paths)
+                              production_hash=cfg["production_hash"], table_hash=inputs["table_hash"],
+                              b3_read=inputs["b3_read"], b3_admit=inputs["b3_admit"],
+                              bound_b3_binding=inputs["b3"]["binding"], run_inputs_hash=record["content_hash"],
+                              bound_spec_hash=guard["spec_hash"], **paths)
             return {"mode": "full", "status": doc["status"], "reasons": doc["reasons"],
                     "content_hash": doc["content_hash"], "report": str(out_dir / "stage_a_report.json")}
         started = time.monotonic()

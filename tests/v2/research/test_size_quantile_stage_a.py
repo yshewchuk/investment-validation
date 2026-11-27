@@ -104,6 +104,13 @@ B3_BINDING = "sha256:" + "c" * 64
 B3_YEARS = {"2023": "bound", "2024": "bound", "2025": "bound"}
 
 
+def _b3_read(_slot):
+    return "SELECTION"
+
+
+B3_READ, B3_ADMIT = _b3_read, object()  # dummy binder inputs: the binders are faked in every test
+
+
 def _digest(series):
     """The B3 series hash, written in the test: sorted [id, repr(float(value))] pairs under content_hash."""
     return content_hash(sorted([i, repr(float(v))] for i, v in series.items()))
@@ -117,26 +124,7 @@ def _b3(world, years=None):
     series = pd.Series([e["mu"] + 0.1 * float(rng.normal()) for e in kept], dtype=float,
                        index=pd.Index([e["id"] for e in kept], name="event_id"))
     return {"b3_candidate_id": "B3", "years": years, "series": series, "rule": "v14_mae_winner",
-            "m3_candidate_id": "M3", "binding": B3_BINDING, "plan_id": world["sealed"]["plan"]["plan_id"],
-            "series_hash": _digest(series)}
-
-
-def _unbound_b3(world, case):
-    """A B3 input with one defect; every case must refuse as b3_input_unbound before any label read or fit."""
-    good = _b3(world)
-    series = good["series"]
-    changed = series.copy()
-    changed.iloc[0] += 1.0
-    extra = pd.concat([series, pd.Series([1.0], index=pd.Index(["zz-not-admitted"], name="event_id"))])
-    cases = {"missing_hash": {k: v for k, v in good.items() if k != "series_hash"},
-             "wrong_plan": {**good, "plan_id": "P2"},
-             "changed_value": {**good, "series": changed},
-             "not_admitted": {**good, "series": extra, "series_hash": _digest(extra)},
-             "year_missing": {**good, "years": {"2023": "bound", "2025": "bound"}},
-             "unknown_rule": {**good, "rule": "other_rule"},
-             "blank_binding": {**good, "binding": "  "},
-             "series_as_dict": {**good, "series": series.to_dict()}}
-    return cases[case]
+            "m3_candidate_id": "M3", "binding": B3_BINDING, "series_hash": _digest(series)}
 
 
 def _fake_fit(boom=False):
@@ -150,9 +138,28 @@ def _fake_fit(boom=False):
     return regress
 
 
+def _patch_b3(monkeypatch, b3, calls=None):
+    """Fake both binders: bind_b3 names b3's rule and M3, and bind_series returns b3 as the bound series. When calls is
+    given, each binder's arguments are appended to it, and bind_b3 also records the binding it returned."""
+    binding = {"rule": b3["rule"], "m3_candidate_id": b3["m3_candidate_id"],
+               "b3_candidate_id": b3["b3_candidate_id"]}
+
+    def fake_bind_b3(plan, selection):
+        if calls is not None:
+            calls.append(("bind_b3", plan, selection, binding))
+        return binding
+
+    def fake_bind_series(plan, read, bound, admit):
+        if calls is not None:
+            calls.append(("bind_series", plan, read, bound, admit))
+        return b3
+    monkeypatch.setattr(stage_a, "bind_b3", fake_bind_b3)
+    monkeypatch.setattr(stage_a, "bind_series", fake_bind_series)
+
+
 def _install(monkeypatch, world, *, omit=(), regress=None, read=None, s_regress=None):
-    """Fake the label reader (dropping `omit` on the evaluation read only) and the fit regressions of the walk and
-    of arm S (`s_regress` for arm S only)."""
+    """Fake the label reader (dropping `omit` on the evaluation read only), the fit regressions of the walk and of
+    arm S (`s_regress` for arm S only), and both B3 binders (returning _b3(world))."""
     def fake_read(sealed, event_ids, labels_before):
         drop = set(omit) if labels_before == "2026-02-01" else set()
         # As the real reader: a label counts only if it is available (event date + 1 day) before labels_before.
@@ -164,6 +171,7 @@ def _install(monkeypatch, world, *, omit=(), regress=None, read=None, s_regress=
     monkeypatch.setattr(arm_s, "training_labels", read or fake_read)
     monkeypatch.setattr(fits, "fit_regression_predictions", regress or _fake_fit())
     monkeypatch.setattr(arm_s, "fit_regression_predictions", s_regress or _fake_fit())
+    _patch_b3(monkeypatch, _b3(world))
 
 
 def _spy(monkeypatch, world):
@@ -231,13 +239,17 @@ def _label_fetches(calls):
 
 
 def _run(world, out, guard, *, calls=None, years=YEARS, production_hash=TABLE_HASH, table_hash=TABLE_HASH,
-         b3=None, **store):
-    """Stage A on the fake shared store (calls records every fetch); b3 defaults to _b3."""
+         b3=None, monkeypatch=None, bound_b3_binding=None, **store):
+    """Stage A on the fake shared store (calls records every fetch). b3, when given, replaces the faked binders' B3
+    (needs monkeypatch); bound_b3_binding is the binding run_inputs bound, if any."""
+    if b3 is not None:
+        _patch_b3(monkeypatch, b3)
     fetch = _fake_fetch(world, out, [] if calls is None else calls, **store)
-    return stage_a.run_stage_a(world["sealed"], years, world["admitted"], fetch, out, production_hash=production_hash,
-                               table_hash=table_hash, b3=_b3(world) if b3 is None else b3, spec_path=guard["spec_path"],
-                               ledger_path=guard["ledger_path"], run_log_path=guard["run_log_path"],
-                               experiments_dir=guard["experiments_dir"])
+    return stage_a.run_stage_a(world["sealed"], years, world["admitted"], fetch, out,
+                               production_hash=production_hash, table_hash=table_hash, b3_read=B3_READ,
+                               b3_admit=B3_ADMIT, spec_path=guard["spec_path"], ledger_path=guard["ledger_path"],
+                               run_log_path=guard["run_log_path"], experiments_dir=guard["experiments_dir"],
+                               bound_b3_binding=bound_b3_binding)
 
 
 def _refusal(exc):
@@ -457,17 +469,43 @@ def test_unrequested_production_key_refuses_as_holdout_access_denied(monkeypatch
     assert reads == [] and not _label_fetches(fetched) and not out.exists()
 
 
-B3_CASES = ["missing_hash", "wrong_plan", "changed_value", "not_admitted", "year_missing", "unknown_rule",
-            "blank_binding", "series_as_dict"]
+def test_the_binders_receive_the_sealed_plan_the_reader_the_binding_and_the_admit(monkeypatch, tmp_path):
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    _install(monkeypatch, world)
+    calls = []
+    _patch_b3(monkeypatch, _b3(world), calls)
+    _run(world, out, guard)
+    assert [call[0] for call in calls] == ["bind_b3", "bind_series"]
+    _, plan, selection, binding = calls[0]
+    assert plan is world["sealed"]["plan"] and selection == B3_READ("selection") == "SELECTION"
+    _, bound_plan, read, bound, admit = calls[1]
+    assert bound_plan is world["sealed"]["plan"]
+    assert read is B3_READ and admit is B3_ADMIT
+    assert bound is binding
 
 
-@pytest.mark.parametrize("case", B3_CASES)
-def test_an_unbound_b3_input_refuses_before_any_label_read_or_fit(monkeypatch, tmp_path, case):
+@pytest.mark.parametrize("which", ["bind_b3", "bind_series"])
+def test_a_binder_refusal_propagates_with_no_label_read_fit_or_report(monkeypatch, tmp_path, which):
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    reads, fetched = _spy(monkeypatch, world), []
+    error = fail("EXPERIMENT_IDENTITY_CONFLICT", f"{which} refused", details={"reason": f"{which}_refused"})
+
+    def refuse(*_args):
+        raise error
+    monkeypatch.setattr(stage_a, which, refuse)
+    with pytest.raises(OpsError) as exc:
+        _run(world, out, guard, calls=fetched)
+    assert exc.value is error
+    assert reads == [] and not _label_fetches(fetched) and not out.exists()
+    assert not (out / REPORT).exists()
+
+
+def test_a_bound_b3_binding_other_than_the_bound_one_refuses_before_any_fit(monkeypatch, tmp_path):
     world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
     reads, fetched = _spy(monkeypatch, world), []
     with pytest.raises(OpsError) as exc:
-        _run(world, out, guard, calls=fetched, b3=_unbound_b3(world, case))
-    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "b3_input_unbound")
+        _run(world, out, guard, calls=fetched, bound_b3_binding="sha256:" + "d" * 64)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "stage_a_b3_changed")
     assert reads == [] and not _label_fetches(fetched) and not out.exists()
 
 
@@ -1075,7 +1113,8 @@ def test_unbound_implied_move_refuses_before_any_walk_fit(monkeypatch, tmp_path)
 def test_unbound_b3_year_is_not_testable_and_the_report_still_publishes(monkeypatch, tmp_path):
     world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
     _install(monkeypatch, world)
-    doc = _run(world, out, guard, b3=_b3(world, years={"2023": "bound", "2024": "missing", "2025": "bound"}))
+    doc = _run(world, out, guard, monkeypatch=monkeypatch,
+               b3=_b3(world, years={"2023": "bound", "2024": "missing", "2025": "bound"}))
     assert json.loads((out / REPORT).read_text(encoding="utf-8")) == doc
     table = doc["reported"]["B3"]
     assert table["status"] == "not_testable"
@@ -1094,7 +1133,7 @@ def test_b3_with_every_year_unbound_and_an_empty_series_still_publishes(monkeypa
     empty = pd.Series([], dtype=float, index=pd.Index([], name="event_id"))
     b3 = {**_b3(world), "years": {"2023": "missing", "2024": "missing", "2025": "missing"}, "series": empty,
           "series_hash": content_hash([])}
-    doc = _run(world, out, guard, b3=b3)
+    doc = _run(world, out, guard, b3=b3, monkeypatch=monkeypatch)
     assert json.loads((out / REPORT).read_text(encoding="utf-8")) == doc
     assert doc["reported"]["B3"]["status"] == "not_testable"
     pooled = next(t for t in doc["reported"]["B3"]["tables"] if t["slice"] == "pooled")
@@ -1147,7 +1186,7 @@ def test_q_table_m3_column_is_the_b3_series_under_the_v14_rule(full_run):
 def test_lowest_inner_rule_leaves_the_q_m3_column_empty(monkeypatch, tmp_path):
     world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
     _install(monkeypatch, world)
-    doc = _run(world, out, guard, b3={**_b3(world), "rule": "lowest_inner_mae_hmosxlp"})
+    doc = _run(world, out, guard, b3={**_b3(world), "rule": "lowest_inner_mae_hmosxlp"}, monkeypatch=monkeypatch)
     row = next(t for t in doc["arms"]["Q"]["tables"] if t["slice"] == "pooled")
     assert row["n_m3"] == 0 and row["mae_m3"] is None
 

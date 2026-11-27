@@ -248,10 +248,9 @@ def test_nonfinite_prediction_propagates_bind_conflict_unchanged():
     _refusal(exc, "nonfinite_prediction")
 
 
-def test_bind_series_carries_the_plan_id_and_the_hash_of_its_series():
+def test_bind_series_carries_the_hash_of_its_series():
     plan = _plan()
     out = _run(plan, _store(plan))
-    assert out["plan_id"] == "p1"
     assert out["series_hash"] == content_hash(sorted([i, repr(float(v))] for i, v in out["series"].items()))
 
 
