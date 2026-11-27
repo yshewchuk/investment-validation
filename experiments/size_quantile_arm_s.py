@@ -1,4 +1,4 @@
-"""EXP-190 Q3c, arm S (reported only, cannot pass). No production caller (Q6 driver is first); a caller fitting real
+"""EXP-190 Q3c, arm S (reported only, cannot pass). Caller: size_quantile_stage_a; a caller fitting real
 data must first pass `size_quantile_prereg.require_preregistration`. Rules: user decisions of 2026-11-26 on issue #2879
 (separate design PR); the 0.5 floor is provisional. Monthly outputs are returned, not persisted."""
 from pathlib import Path

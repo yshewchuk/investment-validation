@@ -1,6 +1,6 @@
 """EXP-190 Q3b: calibration and tails for Q and Q_raw (design sections 4, 5, 7), and CRPS for Q, Q_raw and B0 (Q6b).
 Pure over caller-loaded frames of admitted events: no file I/O. `month_tables` is the one tail rule: calibrate uses it
-for Q and Q_raw, score_crps for B0. A thin tail (under MIN_TAIL donors) drops only the CRPS. The Q6 report must print
+for Q and Q_raw, score_crps for every other frame (B0, and S, B1-B3, also scored). A thin tail drops only CRPS. Print
 `floor_report`; the 0.5 floor is provisional."""
 from collections import Counter
 from datetime import date
@@ -170,6 +170,8 @@ def score_crps(frames, events, calibrated):
     calibrate's pools (`calibrated`); any other frame builds its own pools from its quantiles with month_tables."""
     pools, out, exclusions, floors = dict(calibrated), {}, [], []
     for name, frame in frames.items():
+        if not set(QCOLS + ["reason"]) <= set(frame.columns):
+            raise ValueError(f"{name} frame needs the seven QCOLS and reason")
         dates, y, label_end, _ = _inputs(frame, events)
         months, q = dates.to_period("M").to_timestamp(), frame[QCOLS].to_numpy(float)
         if name not in ARMS:

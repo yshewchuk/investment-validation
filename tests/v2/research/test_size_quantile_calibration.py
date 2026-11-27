@@ -568,18 +568,58 @@ def _set(events, id_, column, value):
     return events
 
 
+DATE_MSG = "event_date must be set; y must be finite or NaN and non-negative"
+LABEL_MSG = "a finite y needs a label_end that is an ISO date"
+INDEX_MSG = "predictions and events must have unique indexes"
+
+
 @pytest.mark.parametrize("name", ["Q", "B0"])
-@pytest.mark.parametrize("mutate", [
-    lambda e: _set(e, "t1", "y", -1.0),                  # negative y
-    lambda e: _set(e, "t1", "y", np.inf),                # +inf y
-    lambda e: pd.concat([e, e.loc[["t1"]]]),             # duplicate events index
-    lambda e: _set(e, "t1", "event_date", None),         # null event_date
-    lambda e: _set(e, "t1", "label_end", None),          # finite y, null label_end
-    lambda e: _set(e, "t1", "label_end", "not-a-date"),  # finite y, non-ISO label_end
-    lambda e: _set(e, "t3", "label_end", None),          # t3 (Dec 2025): no later month reads its label
-    lambda e: _set(e, "t3", "label_end", "2025-13-10"),  # same row, non-ISO label_end
+@pytest.mark.parametrize("mutate, message", [
+    (lambda e: _set(e, "t1", "y", -1.0), DATE_MSG),                  # negative y
+    (lambda e: _set(e, "t1", "y", np.inf), DATE_MSG),                # +inf y
+    (lambda e: pd.concat([e, e.loc[["t1"]]]), INDEX_MSG),            # duplicate events index
+    (lambda e: _set(e, "t1", "event_date", None), DATE_MSG),         # null event_date
+    (lambda e: _set(e, "t1", "label_end", None), LABEL_MSG),         # finite y, null label_end
+    (lambda e: _set(e, "t1", "label_end", "not-a-date"), LABEL_MSG),  # finite y, non-ISO label_end
+    (lambda e: _set(e, "t3", "label_end", None), LABEL_MSG),         # t3 is finite too: refused, not skipped
+    (lambda e: _set(e, "t3", "label_end", "2025-13-10"), LABEL_MSG),  # same row, non-ISO label_end
 ])
-def test_score_crps_refuses_what_calibrate_refuses(name, mutate):
+def test_score_crps_refuses_what_calibrate_refuses(name, mutate, message):
     events, frame = _crps_frames()
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=message):
         calib.score_crps({name: frame}, mutate(events), {})
+
+
+@pytest.mark.parametrize("drop", [["q40"], ["reason"]])
+def test_score_crps_frame_missing_a_column_raises_value_error(drop):
+    events, frame = _crps_frames()
+    with pytest.raises(ValueError, match="needs the seven QCOLS and reason"):
+        calib.score_crps({"B1": frame.drop(columns=drop)}, events, {})
+
+
+def test_thin_tail_month_keeps_its_quantile_values_and_gets_no_crps():
+    rows = _chain_rows(29, 50)
+    preds, events = _frames(rows)
+    arms, pools, _ = calib.calibrate(preds, events)
+    _, qb, yb = _pick(rows, "b")
+    _, qs, ys = _pick(rows, "s")
+    t_ids, qt, _ = _pick(rows, "t")
+    expected = _oracle_q(qt, np.vstack([qb, qs]), np.concatenate([yb, ys]))
+    np.testing.assert_allclose(arms["Q"].loc[t_ids, calib.QCOLS].to_numpy(), expected, rtol=0, atol=1e-9)
+    assert arms["Q"].loc[t_ids, "reason"].isna().all()
+    assert ("Q", T_MONTH) not in pools  # thin: the quantiles are kept, only the pool is absent
+    out, _, _ = calib.score_crps({"Q": arms["Q"]}, events, pools)
+    assert out["Q"].loc[t_ids, "crps"].isna().all()
+
+
+def test_b0_floor_row_counts_bound_events_by_hand():
+    events, frame = _crps_frames()
+    frame = frame.copy()
+    frame.loc["t1", calib.QCOLS] = [6.0, 6.5, 7.0, 7.0, 7.0, 7.1, 7.25]  # q90 - q50 = 0.25: the upper floor binds
+    _, _, floors = calib.score_crps({"B0": frame}, events, {})
+    rows = {r["year"]: r for r in floors}
+    # 2023: 60 donors, t1 and t4 (t4 has finite quantiles but no label, and the floor row counts quantiles only).
+    assert rows[2023]["events"] == 62
+    assert (rows[2023]["event_hi_bound"], rows[2023]["event_lo_bound"]) == (1, 0)
+    assert rows[2023]["event_hi_share"] == pytest.approx(1 / 62)
+    assert (rows[2024]["events"], rows[2024]["event_hi_bound"]) == (1, 0)

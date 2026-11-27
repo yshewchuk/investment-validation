@@ -5,6 +5,7 @@ import hashlib
 import inspect
 import json
 import time
+from datetime import date, timedelta
 from types import SimpleNamespace
 
 import pandas as pd
@@ -14,9 +15,15 @@ import yaml
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import OpsError, fail
 from experiments import lib
+from experiments import size_pnl_inputs
 from experiments import size_pnl_tables
 from experiments import size_quantile_run as run_mod
 from tests.v2.research import test_size_quantile_stage_a as base
+
+B3_PLAN = {"rule": "v14_mae_winner", "m3_candidate_id": "M3", "b3_candidate_id": "B3", "kind": "candidate",
+           "plan_id": "P"}
+B3_SERIES = {"b3_candidate_id": "B3", "years": base.B3_YEARS, "binding": base.B3_BINDING,
+             "series": pd.Series([], dtype=float, index=pd.Index([], name="event_id"))}
 
 CFG = {"catalog": "c.db", "store_root": "store", "spec": "spec.json", "plan_ref": "ref.json", "snapshot_id": "SNAP",
        "crush_snapshot_id": "CRUSH", "production_hash": base.TABLE_HASH}
@@ -55,7 +62,7 @@ def _inputs(world, out, calls=None, avail=None):
     return {"sealed": world["sealed"], "admitted": world["admitted"],
             "fetch": base._fake_fetch(world, out, [] if calls is None else calls, avail=avail),
             "production": {"binding": base.PRODUCTION_BINDING, "table_hash": base.TABLE_HASH},
-            "table_hash": base.TABLE_HASH}
+            "table_hash": base.TABLE_HASH, "b3": base._b3(world)}
 
 
 def _env(monkeypatch, world, out, *, y0=None, regress=None, calls=None, avail=None):
@@ -86,12 +93,16 @@ def _patch_load(monkeypatch, calls, *, boom=None, error=None, snapshot_id="SNAP"
              (run_mod, "from_document", None, "REF"), (run_mod, "load_sealed_panel", "sealed", sealed),
              (run_mod.sources, "_bound_snapshot", "bound", None), (run_mod.sources, "_snapshot", "snapshot", "CRUSH"),
              (run_mod, "admit_events", "admit", "ADMIT"), (size_pnl_tables, "tables", "tables", table),
-             (run_mod, "read_production", "production", {"binding": "PB", "table_hash": base.TABLE_HASH})]
+             (run_mod, "read_production", "production", {"binding": "PB", "table_hash": base.TABLE_HASH}),
+             (run_mod, "read_record", "read_record", "SELECTION"), (run_mod, "bind_b3", "bind_b3", B3_PLAN),
+             (size_pnl_inputs, "population_admit", "population_admit", "PADMIT"),
+             (run_mod, "bind_series", "bind_series", B3_SERIES)]
     for module, attr, name, value in steps:
         monkeypatch.setattr(module, attr, _recorder(calls, name, value, boom, error))
 
 
 ORDER = ["sealed", "bound", "snapshot", "admit", "tables", "production"]
+ORDER_B3 = ORDER + ["read_record", "bind_b3", "population_admit", "bind_series"]
 
 
 def test_real_load_inputs_runs_in_spec_order(monkeypatch):
@@ -102,10 +113,30 @@ def test_real_load_inputs_runs_in_spec_order(monkeypatch):
         return pd.DataFrame()
     _patch_load(monkeypatch, calls, fetch=fetch)
     out = run_mod.load_inputs(CFG, _Conn(), object())
-    assert calls == ORDER
+    assert calls == ORDER_B3
     assert reads == []  # loading reads no table rows itself here, so no label is read
-    assert set(out) == {"sealed", "admitted", "fetch", "production", "table_hash"}
-    assert "b3" not in out
+    assert set(out) == {"sealed", "admitted", "fetch", "production", "table_hash", "b3"}
+    assert out["b3"]["binding"] == base.B3_BINDING and out["b3"]["years"] == base.B3_YEARS
+    assert out["b3"]["rule"] == "v14_mae_winner" and out["b3"]["m3_candidate_id"] == "M3"
+
+
+@pytest.mark.parametrize("boom", ["bind_b3", "bind_series"])
+def test_a_b3_refusal_propagates_before_any_fit_and_publishes_nothing(monkeypatch, tmp_path, boom):
+    guard, out = base._guard(tmp_path), tmp_path / "out"
+    error = fail("EXPERIMENT_IDENTITY_CONFLICT", f"{boom} refused", details={"reason": boom})
+    calls = []
+    _patch_load(monkeypatch, calls, boom=boom, error=error)
+    monkeypatch.setattr(run_mod.sources, "_config", lambda _path: CFG)
+    monkeypatch.setattr(run_mod.sources, "_open", lambda _cfg: (_Conn(), object()))
+
+    def no_fit(*_args, **_kwargs):
+        raise AssertionError("no fit may run")
+    monkeypatch.setattr(run_mod, "fit_walk_forward", no_fit)
+    monkeypatch.setattr(run_mod, "run_stage_a", no_fit)
+    with pytest.raises(OpsError) as exc:
+        run_mod.run("cfg.json", out, **_paths(guard))
+    assert exc.value is error
+    assert calls[-1] == boom and not out.exists()
 
 
 @pytest.mark.parametrize("boom, reached", [
@@ -170,10 +201,11 @@ def test_full_run_writes_run_inputs_before_the_first_fit(monkeypatch, tmp_path):
     assert seen == {"run_inputs_exists": True}
     assert result == {"mode": "full", "status": report["status"], "reasons": report["reasons"],
                       "content_hash": report["content_hash"], "report": str(out / base.REPORT)}
-    assert run_inputs["schema_version"] == "size_quantile_run_inputs.v1" and run_inputs["mode"] == "full"
+    assert run_inputs["schema_version"] == "size_quantile_run_inputs.v2" and run_inputs["mode"] == "full"
     assert run_inputs["years"] == ALL_YEARS and run_inputs["smoke_tickers"] is None
     assert run_inputs["y0"] == YEAR_Y0
-    assert "b3" not in run_inputs and "b0_labels_hash" not in run_inputs
+    assert run_inputs["b3_binding"] == base.B3_BINDING and "b0_labels_hash" not in run_inputs
+    assert report["inputs"]["b3"]["binding"] == base.B3_BINDING
     assert run_inputs["content_hash"] == content_hash({k: v for k, v in run_inputs.items() if k != "content_hash"})
     assert report["inputs"]["run_inputs_hash"] == run_inputs["content_hash"]
     assert run_inputs["spec_hash"] == lib.spec_hash(yaml.safe_load(guard["spec_path"].read_text(encoding="utf-8")))
@@ -183,7 +215,8 @@ def test_full_run_writes_run_inputs_before_the_first_fit(monkeypatch, tmp_path):
     assert run_inputs["sealed_binding"] == base.BINDING
     assert "y0_check" in report["not_included"]
     labels = world["labels"]
-    b0 = content_hash(sorted([e, float(labels.at[e, "abs_move"]), float(labels.at[e, "crush_pct_iv30"])]
+    b0 = content_hash(sorted([e, float(labels.at[e, "abs_move"]), float(labels.at[e, "crush_pct_iv30"]),
+                              (date.fromisoformat(world["dates"][e]) + timedelta(days=1)).isoformat()]
                              for e in labels.index))
     assert report["inputs"]["b0_labels_hash"] == b0
     label_calls = base._label_fetches(calls)

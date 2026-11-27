@@ -1,7 +1,7 @@
 """EXP-190 Q4b: baseline B3 (design guides/size_quantile_move_design.md sections 5 and 7).
 
 B3 is B0's construction on the sealed lead-1 predictions of the model bind_b3 chose. A year without a bound
-prediction is not_testable, not a refusal. Pure over caller-injected read and admit. No production caller yet.
+prediction is not_testable, not a refusal. Pure over caller-injected read and admit. Caller: size_quantile_run.
 """
 import numpy as np
 import pandas as pd
