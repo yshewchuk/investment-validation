@@ -1,7 +1,7 @@
-"""EXP-190 Q6b: Stage A driver; no CLI, loader or caller. Arms Q and Q_raw are judged against B0, with CRPS for Q, Q_raw
+"""EXP-190 Q6b Stage A driver (caller size_quantile_run checks Y0). Q and Q_raw are judged against B0, with CRPS: Q, Q_raw
 and B0, and Q4 option B (an in-period event with no label stays in the denominator, unpaired). Not included: S, B1, B2,
 B3, headline loss flags, y0 check, B0 conditional value, unconditional width terciles. Years unchecked vs Y0 (#2947).
-out_dir/fits, out_dir/stage_a_report.json; size_quantile_stage_a.v2: inputs, status, reasons, arm_verdicts, fit_status,
+out_dir/fits, out_dir/stage_a_report.json; size_quantile_stage_a.v3: inputs, status, reasons, arm_verdicts, fit_status,
 selection_period_disclosure, not_included, floor_report, arms, crps_exclusions, unlabelled_in_period, content_hash."""
 import json
 import os
@@ -25,7 +25,7 @@ from experiments.size_quantile_prereg import SPEC_PATH, load_spec, require_prere
 from experiments.size_quantile_sources import training_labels
 from experiments.size_quantile_walk import fit_walk_forward
 
-SCHEMA, REPORT, MAX_REPORT_BYTES = "size_quantile_stage_a.v2", "stage_a_report.json", 512 << 20
+SCHEMA, REPORT, MAX_REPORT_BYTES = "size_quantile_stage_a.v3", "stage_a_report.json", 512 << 20
 NOT_INCLUDED = ["y0_check", "S", "B1", "B2", "B3", "headline_loss_flags", "b0_conditional_value",
                 "unconditional_width_terciles"]
 FIT_FAILED = {"status": "not_testable", "reasons": ["Q:fit_failed", "Q_raw:fit_failed"],
@@ -37,6 +37,9 @@ def _refuse(reason, message):
 def _plain(value):
     return json.loads(json.dumps(value, default=lambda item: item.to_dict("records") if isinstance(item, pd.DataFrame)
                                  else item.tolist()), parse_constant=lambda _: None)
+
+def hash_labels(labels):
+    return content_hash(sorted(_plain(labels[["abs_move", "crush_pct_iv30"]].reset_index().values.tolist())))
 
 def _score(sealed, walk, production, fetch, admitted):
     """Step 5, after an all-ok walk: admitted labels, calibration, CRPS and the verdicts. Returns (verdict, arms, floor
@@ -62,8 +65,7 @@ def _score(sealed, walk, production, fetch, admitted):
     arms, pools, floors = calibrate(predictions, events)
     with stage("stage A CRPS and verdicts"):
         labels = read_labels(fetch, admitted)  # after the walk: predictions are written before outcomes are read
-        b0_hash = content_hash(sorted(_plain(labels[["abs_move", "crush_pct_iv30"]].reset_index()
-                                             .values.tolist())))
+        b0_hash = hash_labels(labels)
         raw = pd.concat([pd.DataFrame(np.asarray(r["raw"]["{}x{}".format(*r["configuration"])], float),
                                       index=r["event_ids"], columns=QCOLS) for r in walk.values()])
         frames = {"Q": arms["Q"], "Q_raw": arms["Q_raw"], "B0": pool_quantiles(production["frame"], labels, events)}
@@ -81,7 +83,7 @@ def _score(sealed, walk, production, fetch, admitted):
     return (verdict, results, [*floors.to_dict("records"), *extra], exclusions, labels_hash, b0_hash, unlabelled,
             per_year)
 
-def _publish(out_dir, body):
+def _publish(out_dir, body, name=REPORT, reason="stage_a_report_changed"):
     """Atomic and immutable (os.link never overwrites): identical existing bytes are a replay; returns the document."""
     data = json.dumps({**(plain := _plain(body)), "content_hash": content_hash(plain)}, sort_keys=True,
                       allow_nan=False).encode()
@@ -93,23 +95,23 @@ def _publish(out_dir, body):
             handle.flush()
             os.fsync(handle.fileno())
         try:
-            os.link(tmp, out_dir / REPORT)
+            os.link(tmp, out_dir / name)
         except FileExistsError:
             try:
-                if _read_bounded(out_dir / REPORT, MAX_REPORT_BYTES).encode("utf-8") != data:
+                if _read_bounded(out_dir / name, MAX_REPORT_BYTES).encode("utf-8") != data:
                     raise ValueError("report bytes differ")
             except (OSError, ValueError):
-                raise _refuse("stage_a_report_changed", f"{REPORT} exists and does not match this run") from None
-            decision("quantile stage A", f"replay: {REPORT} holds identical bytes; file untouched")
+                raise _refuse(reason, f"{name} exists and does not match this run") from None
+            decision("quantile stage A", f"replay: {name} holds identical bytes; file untouched")
         else:
             fsync_directory(out_dir)
-            decision("quantile stage A", f"publish: wrote {REPORT} ({len(data)} bytes)")
+            decision("quantile stage A", f"publish: wrote {name} ({len(data)} bytes)")
     finally:
         os.unlink(tmp)
     return json.loads(data)
 
 def run_stage_a(sealed, years, admitted, fetch, out_dir, *, production_hash, table_hash, spec_path=SPEC_PATH,
-                ledger_path=None, run_log_path=None, experiments_dir=None):
+                ledger_path=None, run_log_path=None, experiments_dir=None, run_inputs_hash=None):
     """Run Stage A and publish its report; returns the parsed document (schema in the module docstring)."""
     try:
         with stage("quantile stage A"):
@@ -140,13 +142,13 @@ def run_stage_a(sealed, years, admitted, fetch, out_dir, *, production_hash, tab
                       "evaluation_labels_hash": labels_hash, "unlabelled_outside_periods": unlabelled,
                       "evaluation_labels_before": sealed["evaluation_labels_before"],
                       "fit_receipt_hashes": {year: r["content_hash"] for year, r in walk.items()},
-                      "bootstrap": {"resamples": RESAMPLES, "seed": SEED}}
+                      "bootstrap": {"resamples": RESAMPLES, "seed": SEED}, "run_inputs_hash": run_inputs_hash}
             # stage_b_arms is deliberately not stored: which arms enter Stage B is an open decision (issue #3042).
             body = {"schema_version": SCHEMA, "inputs": inputs, "status": verdict["status"],
                     "reasons": verdict["reasons"], "arm_verdicts": verdict["arms"],
                     "fit_status": {year: r["status"] for year, r in walk.items()},
                     "selection_period_disclosure": spec["stage_a"]["selection_period_disclosure"],
-                    "not_included": NOT_INCLUDED, "floor_report": floors,
+                    "not_included": NOT_INCLUDED[run_inputs_hash is not None:], "floor_report": floors,
                     "arms": {arm: {**{k: v for k, v in res.items() if k != "paired_ids"}, "conditional": {
                         **res["conditional"], "rows": res["conditional"]["rows"].rename_axis("event_id").reset_index()}}
                         for arm, res in results.items()},
