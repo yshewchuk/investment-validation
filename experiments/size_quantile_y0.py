@@ -1,8 +1,7 @@
-"""EXP-190 Q2c: the Y0 report (design sections 4 and 7). No caller yet; Q6c's real-data entry point is the first and
-must call this before any fit. Writes nothing: Q6c owns storing the returned dict, which has keys y0, sealed_binding,
-chain_share_min, training_years_min and years (rows of year, events, no_window, with_chains, chain_share, fold,
-training_years, passes). Bad inputs or malformed events refuse first; no Y0 refuses `y0_none` after the year lines
-print to stderr; MemoryError becomes RESOURCE_LIMIT_EXCEEDED; a refusal returns no partial report."""
+"""EXP-190 Q2c Y0 report (design 4, 7). No caller yet; Q6c's real-data entry point calls it before any fit. Writes
+nothing; Q6c stores it (keys y0, sealed_binding, chain_share_min, training_years_min, years: rows of year, events,
+no_window, with_chains, chain_share, fold, training_years, passes). Bad inputs or malformed events refuse first; no
+Y0 refuses `y0_none` after stderr year lines; MemoryError: RESOURCE_LIMIT_EXCEEDED; refusals give no partial report."""
 import numbers
 from collections import defaultdict
 from itertools import takewhile
@@ -10,6 +9,7 @@ from itertools import takewhile
 import pandas as pd
 
 from engine.v2.contracts.data import KeyPredicate
+from engine.v2.data import objects
 from engine.v2.data.errors import DataError
 from engine.v2.ops.errors import fail
 from engine.v2.research._pricing import AMC, BMO, trading_calendar_from_snapshot
@@ -35,6 +35,7 @@ def _thresholds(spec, max_object_bytes):
 
 
 def capped_chain_keys(repository, snapshot, keys, *, max_object_bytes):
+    objects.validate_max_object_bytes(max_object_bytes)
     wanted = {(str(t), pd.Timestamp(d).normalize()) for t, d in keys}
     obs = tuple(sorted({d.strftime("%Y-%m-%d") for _, d in wanted}))
     filters = (KeyPredicate(column="ticker", operator="in", values=tuple(sorted({t for t, _ in wanted}))),
@@ -114,8 +115,7 @@ def _report(sealed, share_min, floor, max_object_bytes, calendar, chain_keys, la
             if exc.code != "POPULATION_COLLAPSED":
                 raise
             pairs = []
-        # One call at the max cutoff is exact per fold: qualification is monotone in the cutoff, so each fold
-        # compares availability to its own cutoff here.
+        # Exact: qualification is monotone, so one max-cutoff call serves each fold's cutoff comparison.
         for y, f in ok.items():
             before = f["training_labels_before"]
             qualified = {i for i, avail in pairs if avail < before}

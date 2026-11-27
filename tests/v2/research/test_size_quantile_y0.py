@@ -313,6 +313,13 @@ def test_bad_byte_cap_refuses_before_any_calendar_chain_or_label_access(cap):
     assert rec.calendar_calls == [] and rec.chain_calls == [] and rec.label_calls == []
 
 
+@pytest.mark.parametrize("cap", BAD_CAPS)
+def test_capped_chain_keys_refuses_a_bad_cap_before_any_repository_access(cap):
+    with pytest.raises(DataError) as exc:
+        capped_chain_keys(object(), "snap", [("TEST", pd.Timestamp("2024-06-15"))], max_object_bytes=cap)
+    assert exc.value.code == "QUERY_NOT_BOUNDED"
+
+
 def test_capped_chain_keys_returns_exact_present_pairs_and_propagates_the_cap_refusal(tmp_path):
     entries = [
         ("TEST", "2024-06-15", 10), ("TEST", "2024-06-15", 11),  # wanted pair, two rows: deduplicated
@@ -327,7 +334,8 @@ def test_capped_chain_keys_returns_exact_present_pairs_and_propagates_the_cap_re
     try:
         found = capped_chain_keys(repository, snap, wanted, max_object_bytes=1 << 30)
         assert found == {("TEST", pd.Timestamp("2024-06-15")), ("ZEBRA", pd.Timestamp("2024-09-01"))}
-        with pytest.raises(DataError):
+        with pytest.raises(DataError) as exc:
             capped_chain_keys(repository, snap, wanted, max_object_bytes=1)
+        assert exc.value.code == "RESULT_LIMIT_EXCEEDED"
     finally:
         conn.close()
