@@ -70,11 +70,14 @@ def exit_of(legs, variant=PRIMARY):
 def refusal(fn, *args):
     with pytest.raises(FairValueRefusal) as exc:
         fn(*args)
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     return exc.value.details
 
 
 def load_reason(document, pin=PIN, variant=PRIMARY):
-    return refusal(fva.load_constants, document, pin, variant)["reason"]
+    details = refusal(fva.load_constants, document, pin, variant)
+    assert set(details) == {"reason"}
+    return details["reason"]
 
 
 # --- 1. load_constants --------------------------------------------------------------------------------------------------
@@ -307,6 +310,31 @@ def test_midfloor_equals_base_and_other_columns_match_f_6h():
     pd.testing.assert_frame_equal(out[same], base[same])
 
 
+def test_second_coefficient_set_drives_fills_and_exit_fallback():
+    # A second made-up set, so hard-coded coefficients in the module would fail here.
+    d2 = doc(C_BASE=0.10, C_SPREAD=0.80, C_THIN_SIZE=0.05, C_THIN_OI=0.07)
+    pin2 = d2["constants_id"]
+    out = fva.leg_fills(pd.DataFrame([row(100, "C", 0.9, 1.1, spot=101.0, asz=5, oi=50)]), no_vols(), d2, pin2, PRIMARY).iloc[0]
+    # mid 1, half .1, s .2, spread term .4: c_buy = .10 + .80 * .4 + .05 (thin ask size) + .07 (thin OI) = .54; buy 1 + .054
+    # c_sell = .10 + .32 + .07 (thin OI only; bid size 50 is liquid) = .49; sell 1 - .049
+    assert out.c_buy == near(0.54) and out.fill_buy == near(1.054)
+    assert out.c_sell == near(0.49) and out.fill_sell == near(0.951)
+    # Same quote with rate unknown: the exit fallback takes the sell fill at the same c_sell .49.
+    legs = fva.leg_fills(pd.DataFrame([row(100, "C", 0.9, 1.1, spot=101.0, expiry=EXP, rate=NAN, asz=5, oi=50)]),
+                         no_vols(), d2, pin2, PRIMARY).assign(side=["buy"], qty=[1.0])
+    ex = fva.structure_exit(legs, d2, pin2, PRIMARY)
+    assert ex.outcome == "ok" and ex.exit_fair_mid is True
+    assert ex.proceeds_F == near(0.951)  # 1 - .49 * .1
+
+
+def test_apply_logs_one_stderr_line_and_nothing_to_stdout(capsys):
+    apply(row(100, "C", 0.9, 1.1, spot=101.0))
+    captured = capsys.readouterr()
+    lines = [line for line in captured.err.splitlines() if line.startswith("[fv_apply]")]
+    assert lines == [f"[fv_apply] constants_id={PIN} variant=primary rows=1"]
+    assert "[fv_apply]" not in captured.out
+
+
 # --- 7. structure_entry -------------------------------------------------------------------------------------------------
 
 def test_entry_enters_single_buy_leg():
@@ -375,6 +403,32 @@ def test_non_ok_leg_is_undetermined():
     assert res.outcome == "undetermined" and res.skip_reason is None and res.debit_F is None and res.debit_mid is None
 
 
+def test_entry_sensitivities_and_flags_with_unknown_ask_size():
+    legs = legs_of(row(100, "C", 0.9, 1.1, spot=101.0, asz=NAN, bsz=NAN), sides=["buy"], qtys=[1.0])
+    res = fva.structure_entry(legs)
+    # unknown ask size is thin 0.5: c_buy = .46 + .20 * .5 = .56; buy 1 + .056 = 1.056
+    assert res.debit_F == near(1.056)
+    # unknown0 (c .46) gives 1.046; unknown1 (c .66) gives 1.066; midfloor keeps 1.056 (above mid)
+    assert res.sensitivity_debits["unknown0"] == near(1.046)
+    assert res.sensitivity_debits["unknown1"] == near(1.066)
+    assert res.sensitivity_debits["midfloor"] == near(1.056)
+    assert len(res.leg_flags) == 1
+    flag = res.leg_flags[0]
+    assert flag["thin_size"] == near(0.5) and flag["unknown_size"] is True and flag["unknown_oi"] is False
+
+
+def test_exit_sensitivities_and_flags_with_unknown_bid_size():
+    ex = exit_of(legs_of(row(100, "C", 0.9, 1.1, spot=101.0, asz=NAN, bsz=NAN), sides=["buy"], qtys=[1.0]))
+    # unknown bid size is thin 0.5: sell c = .46 + .20 * .5 = .56; proceeds 1 - .056 = .944
+    # unknown0 (c .46) gives .954; unknown1 (c .66) gives .934; midfloor keeps .944 (below mid)
+    assert ex.outcome == "ok" and ex.proceeds_F == near(0.944)
+    assert ex.sensitivity_proceeds["unknown0"] == near(0.954)
+    assert ex.sensitivity_proceeds["unknown1"] == near(0.934)
+    assert ex.sensitivity_proceeds["midfloor"] == near(0.944)
+    flag = ex.leg_flags[0]
+    assert flag["thin_size"] == near(0.5) and flag["unknown_size"] is True and flag["exit_fair_mid"] is False
+
+
 # --- 8. structure_exit --------------------------------------------------------------------------------------------------
 
 def test_long_leg_proceeds_are_the_sell_fill():
@@ -433,6 +487,14 @@ def test_rate_unknown_leg_under_spread050_uses_half():
     assert ex.proceeds_F == near(0.95)  # 1 - .5 * .1
 
 
+def test_no_fair_value_exit_falls_back_to_mid():
+    legs = legs_of(row(100, "C", 0.9, 1.1, spot=NAN), sides=["buy"], qtys=[1.0])
+    ex = exit_of(legs)
+    # no fair value: V = mid 1; the stored fills are NaN and ignored; sell at 1 - .46 * .1 = .954
+    assert ex.outcome == "ok" and ex.exit_fair_mid is True and ex.proceeds_F == near(0.954)
+    assert ex.leg_flags[0]["exit_fair_mid"] is True
+
+
 # --- 9. binding refusals -------------------------------------------------------------------------------------------------
 
 def test_dropped_binding_column_is_unbound():
@@ -451,18 +513,18 @@ def test_null_binding_row_is_unbound():
 def test_wrong_id_in_one_row_is_a_mismatch():
     legs = legs_of(row(100, "C", 0.9, 1.1, spot=101.0), row(100, "P", 0.9, 1.1, spot=99.0), sides=["buy", "sell"], qtys=[1.0, 1.0])
     legs.loc[1, "constants_id"] = "0" * 64
-    assert refusal(exit_of, legs)["reason"] == "legs_constants_mismatch"
+    assert refusal(exit_of, legs) == {"reason": "legs_constants_mismatch"}
 
 
 def test_spread050_priced_then_exited_with_primary_is_a_mismatch():
     legs = legs_of(row(100, "C", 0.9, 1.1, spot=101.0), sides=["buy"], qtys=[1.0], variant="spread050")
-    assert refusal(exit_of, legs)["reason"] == "legs_constants_mismatch"
+    assert refusal(exit_of, legs) == {"reason": "legs_constants_mismatch"}
 
 
 def test_mixed_variants_across_rows_is_a_mismatch():
     legs = pd.concat([legs_of(row(100, "C", 0.9, 1.1, spot=101.0), sides=["buy"], qtys=[1.0]),
                       legs_of(row(100, "P", 0.9, 1.1, spot=99.0), sides=["sell"], qtys=[1.0], variant="spread050")], ignore_index=True)
-    assert refusal(exit_of, legs)["reason"] == "legs_constants_mismatch"
+    assert refusal(exit_of, legs) == {"reason": "legs_constants_mismatch"}
 
 
 def test_unpriceable_unbound_leg_still_refuses():
