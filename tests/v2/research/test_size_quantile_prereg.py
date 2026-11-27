@@ -397,6 +397,17 @@ def test_real_spec_records_the_2026_11_26_decisions():
     assert "its own common subset" in spec["stage_a"]["flags"]
 
 
+def test_real_spec_chain_share_min_is_the_user_lowered_0_45_with_disclosure():
+    walk_forward = load_spec()[0]["walk_forward"]
+    assert walk_forward["chain_share_min"] == 0.45
+    assert walk_forward["chain_share_min_disclosure"] == (
+        "chain_share_min lowered from 0.50 (a judgement value set before coverage was counted) to 0.45 by the user "
+        "on 2026-11-27, before registration, after the Y0 coverage count (2023 at 47.7%). No outcome or score was "
+        "read. The gap is a capture-scope limit: ORATS holds 47 of 50 sampled missing chains, and a chain backfill "
+        "is planned separately."
+    )
+
+
 def test_real_spec_records_the_2026_11_27_decisions():
     spec = load_spec()[0]
     stage_a = spec["stage_a"]

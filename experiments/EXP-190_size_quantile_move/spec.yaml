@@ -28,7 +28,8 @@ walk_forward:
   range: "Y0 through 2025"
   y0_rule: "earliest year where every year Y0..2025 has at least chain_share_min admitted panel events with stored entry and exit option chains, and at least training_years_min earlier calendar years of training rows. A year counts only with at least one label training_labels qualifies (usable labels, after v14's label-end cutoff and embargo; user, 2026-11-26); these label reads are allowed before registration. A year whose annual_folds raises POPULATION_COLLAPSED fails the test and does not refuse the report. No year qualifies: refuse, reason y0_none, no fits, no report"
   y0_late: "user, 2026-11-27: Y0 after 2023 keeps the full run's refusal stage_a_years_invalid (after run_inputs.json, before any fit): no fits, report or verdict; the smoke path does not make this check. The supervisor runs the Y0 report before the PLANNED row (experiments.size_quantile_y0.y0_report, a library call with no command line); if Y0 is after 2023, stop and return to the user, no registration; the guard does not enforce this stop, it is a supervisor step only"
-  chain_share_min: 0.5
+  chain_share_min: 0.45
+  chain_share_min_disclosure: "chain_share_min lowered from 0.50 (a judgement value set before coverage was counted) to 0.45 by the user on 2026-11-27, before registration, after the Y0 coverage count (2023 at 47.7%). No outcome or score was read. The gap is a capture-scope limit: ORATS holds 47 of 50 sampled missing chains, and a chain backfill is planned separately."
   training_years_min: 3
   label_rule: "training row needs label available before fold cutoff (data dates, never computed_at)"
   check: "Q2 prints per-year counts and Y0 before any fit; refuses unless rule reproduces sealed 2023-2025 training ids"
