@@ -248,6 +248,13 @@ def test_nonfinite_prediction_propagates_bind_conflict_unchanged():
     _refusal(exc, "nonfinite_prediction")
 
 
+def test_bind_series_carries_the_plan_id_and_the_hash_of_its_series():
+    plan = _plan()
+    out = _run(plan, _store(plan))
+    assert out["plan_id"] == "p1"
+    assert out["series_hash"] == content_hash(sorted([i, repr(float(v))] for i, v in out["series"].items()))
+
+
 # b3_quantiles: B0's construction over donors whose pred_move is the bound M3 series.
 DONOR_IDS = [f"d{i:03d}" for i in range(600)]
 OLD_IDS = [f"o{i:03d}" for i in range(300)]

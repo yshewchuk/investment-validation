@@ -24,8 +24,10 @@ def implied_table(sealed):
                                                              for r in rows):
         raise refuse("implied_move is not bound to every row as None or a real number")
     ids = [r["event_id"] for r in rows]
-    if len(set(ids)) != len(ids): raise refuse("an event id repeats")
+    if len(set(ids)) != len(ids):
+        raise refuse("an event id repeats")
     values = [np.nan if r["implied_move"] is None else float(r["implied_move"]) for r in rows]
+    values = [v if np.isfinite(v) else np.nan for v in values]  # None, nan, +inf and -inf all become NaN, once
     dates = {e["event_id"]: e["event_date"] for e in sealed["context"]["target_events"]}
     frame = pd.DataFrame({"event_date": [dates[i] for i in ids], "implied_move": values}, ids).rename_axis("event_id")
     consumed = [[i, dates[i], v if np.isfinite(v) else None] for i, v in zip(ids, values)]

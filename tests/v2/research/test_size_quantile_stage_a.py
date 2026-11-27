@@ -104,6 +104,11 @@ B3_BINDING = "sha256:" + "c" * 64
 B3_YEARS = {"2023": "bound", "2024": "bound", "2025": "bound"}
 
 
+def _digest(series):
+    """The B3 series hash, written in the test: sorted [id, repr(float(value))] pairs under content_hash."""
+    return content_hash(sorted([i, repr(float(v))] for i, v in series.items()))
+
+
 def _b3(world, years=None):
     """A B3 binding: mu plus small noise for the events of each bound year (a year without a series is not bound)."""
     years = B3_YEARS if years is None else years
@@ -112,7 +117,26 @@ def _b3(world, years=None):
     series = pd.Series([e["mu"] + 0.1 * float(rng.normal()) for e in kept], dtype=float,
                        index=pd.Index([e["id"] for e in kept], name="event_id"))
     return {"b3_candidate_id": "B3", "years": years, "series": series, "rule": "v14_mae_winner",
-            "m3_candidate_id": "M3", "binding": B3_BINDING}
+            "m3_candidate_id": "M3", "binding": B3_BINDING, "plan_id": world["sealed"]["plan"]["plan_id"],
+            "series_hash": _digest(series)}
+
+
+def _unbound_b3(world, case):
+    """A B3 input with one defect; every case must refuse as b3_input_unbound before any label read or fit."""
+    good = _b3(world)
+    series = good["series"]
+    changed = series.copy()
+    changed.iloc[0] += 1.0
+    extra = pd.concat([series, pd.Series([1.0], index=pd.Index(["zz-not-admitted"], name="event_id"))])
+    cases = {"missing_hash": {k: v for k, v in good.items() if k != "series_hash"},
+             "wrong_plan": {**good, "plan_id": "P2"},
+             "changed_value": {**good, "series": changed},
+             "not_admitted": {**good, "series": extra, "series_hash": _digest(extra)},
+             "year_missing": {**good, "years": {"2023": "bound", "2025": "bound"}},
+             "unknown_rule": {**good, "rule": "other_rule"},
+             "blank_binding": {**good, "binding": "  "},
+             "series_as_dict": {**good, "series": series.to_dict()}}
+    return cases[case]
 
 
 def _fake_fit(boom=False):
@@ -430,6 +454,20 @@ def test_unrequested_production_key_refuses_as_holdout_access_denied(monkeypatch
     with pytest.raises(OpsError) as exc:
         _run(world, out, guard, calls=fetched, extra="not-admitted-event")
     assert _refusal(exc) == ("HOLDOUT_ACCESS_DENIED", "unrequested_key_returned")
+    assert reads == [] and not _label_fetches(fetched) and not out.exists()
+
+
+B3_CASES = ["missing_hash", "wrong_plan", "changed_value", "not_admitted", "year_missing", "unknown_rule",
+            "blank_binding", "series_as_dict"]
+
+
+@pytest.mark.parametrize("case", B3_CASES)
+def test_an_unbound_b3_input_refuses_before_any_label_read_or_fit(monkeypatch, tmp_path, case):
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    reads, fetched = _spy(monkeypatch, world), []
+    with pytest.raises(OpsError) as exc:
+        _run(world, out, guard, calls=fetched, b3=_unbound_b3(world, case))
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "b3_input_unbound")
     assert reads == [] and not _label_fetches(fetched) and not out.exists()
 
 
@@ -944,7 +982,8 @@ def test_inputs_record_the_arm_s_receipts_the_implied_table_and_the_b3_binding(f
     implied = [[e, world["dates"][e], world["implied"][e]] for e in sorted(world["implied"])]
     assert doc["inputs"]["b2_implied_hash"] == content_hash(implied)
     assert doc["inputs"]["b3"] == {"binding": B3_BINDING, "b3_candidate_id": "B3", "m3_candidate_id": "M3",
-                                   "rule": "v14_mae_winner", "years": B3_YEARS}
+                                   "rule": "v14_mae_winner", "years": B3_YEARS,
+                                   "series_hash": _digest(_b3(world)["series"])}
 
 
 def test_b0_labels_hash_covers_the_available_date(monkeypatch, tmp_path, full_run):
@@ -1053,7 +1092,8 @@ def test_b3_with_every_year_unbound_and_an_empty_series_still_publishes(monkeypa
     world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
     _install(monkeypatch, world)
     empty = pd.Series([], dtype=float, index=pd.Index([], name="event_id"))
-    b3 = {**_b3(world), "years": {"2023": "missing", "2024": "missing", "2025": "missing"}, "series": empty}
+    b3 = {**_b3(world), "years": {"2023": "missing", "2024": "missing", "2025": "missing"}, "series": empty,
+          "series_hash": content_hash([])}
     doc = _run(world, out, guard, b3=b3)
     assert json.loads((out / REPORT).read_text(encoding="utf-8")) == doc
     assert doc["reported"]["B3"]["status"] == "not_testable"

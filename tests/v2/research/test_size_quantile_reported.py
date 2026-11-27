@@ -38,6 +38,15 @@ def test_implied_table_values_dates_and_the_hash_of_the_consumed_values():
     assert rep.implied_table(moved)[1] != digest
 
 
+def test_infinite_implied_moves_are_nan_in_the_frame_and_none_in_the_digest():
+    rows = [{"event_id": "a", "implied_move": math.inf}, {"event_id": "b", "implied_move": -math.inf},
+            {"event_id": "c", "implied_move": 1.5}]
+    frame, digest = rep.implied_table(_sealed(rows))
+    assert np.isnan(frame.loc["a", "implied_move"]) and np.isnan(frame.loc["b", "implied_move"])
+    assert frame.loc["c", "implied_move"] == 1.5
+    assert digest == content_hash([["a", DATES["a"], None], ["b", DATES["b"], None], ["c", DATES["c"], 1.5]])
+
+
 @pytest.mark.parametrize("rows, columns", [
     ([{"event_id": "a", "implied_move": 1.0}], ("f_mu",)),                     # not bound in the model
     ([{"event_id": "a", "f_mu": 1.0}], ("f_mu", "implied_move")),              # a row lacks the key

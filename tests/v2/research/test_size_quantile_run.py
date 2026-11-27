@@ -22,7 +22,8 @@ from tests.v2.research import test_size_quantile_stage_a as base
 
 B3_PLAN = {"rule": "v14_mae_winner", "m3_candidate_id": "M3", "b3_candidate_id": "B3", "kind": "candidate",
            "plan_id": "P"}
-B3_SERIES = {"b3_candidate_id": "B3", "years": base.B3_YEARS, "binding": base.B3_BINDING,
+B3_SERIES = {"b3_candidate_id": "B3", "years": base.B3_YEARS, "binding": base.B3_BINDING, "plan_id": "P1",
+             "series_hash": content_hash([]),
              "series": pd.Series([], dtype=float, index=pd.Index([], name="event_id"))}
 
 CFG = {"catalog": "c.db", "store_root": "store", "spec": "spec.json", "plan_ref": "ref.json", "snapshot_id": "SNAP",

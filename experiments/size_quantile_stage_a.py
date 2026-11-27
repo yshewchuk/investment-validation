@@ -21,7 +21,7 @@ from experiments.size_pnl_prereg import _read_bounded
 from experiments.size_pnl_readers import read_labels, read_production
 from experiments.size_quantile_arm_s import fit_arm_s
 from experiments.size_quantile_arm_verdict import judge_arm, stage_a_verdict
-from experiments.size_quantile_b3 import b3_quantiles
+from experiments.size_quantile_b3 import b3_quantiles, check_bound
 from experiments.size_quantile_baselines import band_quantiles, implied_quantiles, pool_quantiles
 from experiments.size_quantile_calibration import (MIN_TAIL, PERIOD, QCOLS, calibrate, predictions_from_receipts,
                                                   score_crps)
@@ -142,6 +142,7 @@ def run_stage_a(sealed, years, admitted, fetch, out_dir, *, production_hash, tab
                     and {"2023", "2024", "2025"} <= set(years) and years[-1] == "2025"):
                 raise fail("INVALID_EXPERIMENT_SPEC", "years invalid", details={"reason": "stage_a_years_invalid"})
             production = read_production(fetch, admitted, expected_hash=production_hash, table_hash=table_hash)
+            check_bound(b3, sealed["plan"]["plan_id"], set(admitted["events"]["event_id"]))
             implied, implied_hash = implied_table(sealed)
             walk = fit_walk_forward(sealed, spec, years, Path(out_dir) / "fits")
             scoring = all(receipt["status"] == "ok" for receipt in walk.values())
@@ -162,7 +163,8 @@ def run_stage_a(sealed, years, admitted, fetch, out_dir, *, production_hash, tab
                       "arm_s_receipt_hashes": {year: o["receipt"]["content_hash"] for year, o in s_results.items()},
                       "b2_implied_hash": implied_hash, "bootstrap": {"resamples": RESAMPLES, "seed": SEED},
                       "run_inputs_hash": run_inputs_hash,
-                      "b3": {k: b3[k] for k in ("binding", "b3_candidate_id", "m3_candidate_id", "rule", "years")}}
+                      "b3": {k: b3[k] for k in ("binding", "b3_candidate_id", "m3_candidate_id", "rule", "years",
+                                                "series_hash")}}
             # stage_b_arms is deliberately not stored: which arms enter Stage B is an open decision (issue #3042).
             body = {"schema_version": SCHEMA, "inputs": inputs, "status": verdict["status"],
                     "reasons": verdict["reasons"], "arm_verdicts": verdict["arms"],
