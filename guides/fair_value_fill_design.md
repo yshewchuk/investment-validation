@@ -132,13 +132,13 @@ F is used in **selection and scoring alike**:
 
 **Amended 2026-11-27** ([#3095](https://github.com/yshewchuk/investment-validation/issues/3095)). Model A, price space, the B1 window and a new constants id for new constants (B2) are the **user's decisions of 2026-11-27**. Judgement calls name their owner; unlabelled grid and minimum rules carry over from the earlier text (mine). The fills file is private: never commit it, fitted constants or fill-level values beyond the aggregates below.
 
-**Not built.** The follow-up is **F6c: model A fit plus leg fills** ([#3104](https://github.com/yshewchuk/investment-validation/issues/3104), reworked). The merged F6a and F6b code is still the earlier fit, anchored on fair value with a one-tick floor, both now superseded: its constants and constants id are not model A's. The `fair_value_fit` and `fair_value_solve` rows of [`experiments/README.md`](../experiments/README.md) are the contract of that built code.
+**Not built.** The rest of this document, including everything that rests on `V`, describes F as built. The follow-up is **F6c: model A fit plus leg fills** ([#3104](https://github.com/yshewchuk/investment-validation/issues/3104), reworked). The merged F6a and F6b code is still the earlier fit, anchored on fair value with a one-tick floor, both now superseded: its constants and constants id are not model A's. The `fair_value_fit` and `fair_value_solve` rows of [`experiments/README.md`](../experiments/README.md) are the contract of that built code.
 
 **Model A, mid-anchored.** `c = min(1, base + spread*min(s/0.50, 1) + thin_size_w*thin_size + thin_oi_w*thin_oi)`, with section 5's `s` and thin flags. On the effective quote a **buy fills at `mid + c*half_spread`** and a **sell at `mid - c*half_spread`**. The fill has **no fair value `V`, no one-tick floor and no tick rule**.
 
 **Guard (supervisor's judgement).** `fill_over_fair` becomes `fill_over_mid`, the same 25% rule against the mid debit: `debit_F - debit_mid > 0.25 * debit_mid`.
 
-**Why (user's near-close fills).** Fair value priced from the prior day's `smvVol` sits at the quote edge on 45% of fills. Every fair-value form fit worse than the mid anchor: mean absolute error 0.96-1.01 half-spreads against 0.90. The mid anchor's average bias is about 0; current F averages 0.13 too harsh. The spread weight fits to 0, but only 17 fills have a spread above 20%, hence the variant below.
+**Why (user's near-close fills; aggregates from the supervisor's private run, 2026-11-27).** Fair value priced from the prior day's `smvVol` sits at the quote edge on 45% of fills. Every fair-value form fit worse than the mid anchor: mean absolute error 0.96-1.01 half-spreads against 0.90. The mid anchor's average bias is about 0; current F averages 0.13 too harsh. The spread weight fits to 0, but only 17 fills have a spread above 20%, hence the variant below.
 
 **Fills used (B1 window).** Each fill is matched to a quote snapshot, and only fills within 60 minutes of it enter (two-sided, 60 included: supervisor's judgement), so the snapshot's quote can be later than the fill. A fill outside the window, with an unusable quote or with an effective half-spread of at most 1e-9, which leaves `x` undefined, is excluded and counted (that threshold: F6a owner's judgement).
 
@@ -152,13 +152,7 @@ F is used in **selection and scoring alike**:
 
 **Constants id and variant.** Model A's constants get a **new constants id** (B2). The one named variant is **`spread050`** (spread = 0.50), a user-requested wide-leg sensitivity: it changes only the spread weight and leaves the primary id unchanged. A consumer needs a new spec hash and PLANNED row before a new run, pre-registers `spread050`, states the fills' date range and any overlap with its evaluation periods, and never re-scores an old run with constants chosen by that result.
 
-**Failure semantics for F6c**, as in the built fit: whole-file refusals come before any output; per-fill exclusions are counted; the constants and receipt files are published by one directory rename, the receipt written last (no `fsync`, so power loss is not covered); the receipt binds the bytes parsed and written and the source hashes; no randomness or clock enters a value; progress goes to stderr.
-
-**Open for F6c, not settled here:**
-
-- which of the built input columns and refusals remain, and whether `rate_unknown` and `no_fair_value` still exclude a fill;
-- what changes in the parts of sections 4-8 that use `V`: the guard's other conditions, leg statuses, the exit fallback, the mid-floored sensitivity and the diagnostics;
-- whether F's source files change, giving a new `fvf_id`. If not, R5's binding alone would not identify model A.
+**F6c's slices, failure semantics and open questions** are in section 12.
 
 ## 10. Failure semantics (R1-R6)
 
@@ -197,8 +191,33 @@ Estimates: non-test code lines / test lines / doc words, excluding the re-ingest
 | F3 | Fit set, smile, source choice, leg table values | ~120 / ~150 / 40 | F2 |
 | F4 | Concession, repaired and unknown rules, sensitivities, structure entry, guard, exit | ~150 / ~180 / 50 | F3 |
 | F5 | `fvf_id`, receipts, diagnostics (with status and source coverage), chunked smoke | ~130 / ~130 / 60 | F1, F4, F7 |
-| F6 | Calibration from real fills; only if supplied | ~110 / ~120 / 40 | F4, F7 |
+| F6 | Calibration from real fills; only if supplied. Built as F6a and F6b, whose anchor and floor section 9 supersedes | ~110 / ~120 / 40 | F4, F7 |
 | F7 | Carry and dividend amendment: a carry and dividend pricer in a new module (F2's unchanged), binding the new columns and units, section 4's fallbacks and flags in the leg values | ~150 / ~180 / 60 | F1, F3 |
+| F6c-1 | **Model A fit** ([#3104](https://github.com/yshewchuk/investment-validation/issues/3104), reworked): the built CLI end to end, fills CSV to the two files | ~100 / ~160 / 150 | this amendment, Q1 |
+| F6c-2 | **Model A leg fills** (#3104): entry, `fill_over_mid` guard, exit | ~140 / ~180 / 120 | F6c-1, Q2-Q4 |
+
+### F6c: model A fit plus leg fills
+
+Two PRs. Sizes are the amendment owner's estimates (added lines and words). The slices run in order, since F6c-2 consumes F6c-1's constants. Both log progress to stderr, use no randomness or clock in values (R3), and test against hand-computed values. A refusal is `EXPERIMENT_IDENTITY_CONFLICT` with a `details.reason`, except a size cap (`RESOURCE_LIMIT_EXCEEDED`). Where a rule below depends on an open question, the answer completes it.
+
+| Rule | F6c-1 | F6c-2 |
+| --- | --- | --- |
+| R1 inputs, in order | existing output directory, size cap, unreadable file, missing column, empty file, invalid value, then any `V`-input check Q1 keeps; all before output | constants document (`constants_invalid`), then id (`constants_id_mismatch`), then variant (`variant_unknown`), all before pricing; then input columns and legs (`column_missing`, `leg_invalid`) |
+| R1 per row | counted, first match: `outside_window`, `unpriceable`, any exclusion Q1 keeps, `zero_half_spread` | `unpriceable`; other statuses follow Q2 |
+| R2 resources | the built 16 MiB cap | section 10's chunking and limits; no new store |
+| R4 outputs | both files by one directory rename, receipt last, no partial output; an existing output directory refuses; no `fsync` | pure functions that store nothing; no partial result on a refusal |
+| R5 identity | receipt binds the parsed fills bytes, the written constants bytes, the new constants id and the source hashes | the caller pins the constants id and variant (`spread050` or none); `fvf_id` follows Q3 |
+| R6 causality | the snapshot quote may follow the fill by up to 60 minutes (B1); any `vol_date` or `rates_date` Q1 keeps is strictly before the order date | entry values never read exit-date rows |
+| Stored artifacts | `constants.json` (section 9's four constants, F's unchanged ones, the id, `spread050`) and `fit_receipt.json` (those bindings, window, counts, used date range, per-group loss, tie counts, residual statistics) | none |
+
+**Open questions, none settled here; each slice's are settled before it starts.**
+
+| Question | Options and trade-offs |
+| --- | --- |
+| Q1 (F6c-1): do the `V` input columns, `not_causal`, `vol_unit`, `rate_unknown` and `no_fair_value` remain? | (a) Drop them: more fills used and a smaller reader; the used fills differ from the built fit's. (b) Keep them: the same fills as the built fit, but fills are lost for data model A does not use |
+| Q2 (F6c-2): what happens to leg statuses, the `debit_fair` test in `not_a_debit`, `exit_fair_mid`, the mid-floored sensitivity and the `V` diagnostics? | (a) Take `V` out of the fill path: fewer `undetermined` structures; `V` diagnostics are lost and the population differs from F's. (b) Keep `V` for statuses and diagnostics: a population comparable with F runs, but trades are lost for unused inputs. Under either, mid-floored equals the base fill and could be dropped |
+| Q3 (F6c-2): do F's source files change? | (a) Yes: the new `fvf_id` identifies model A; a run bound to the old id needs the old checkout. (b) New module outside `fvf_id`: built F keeps its id, but R5 must also pin the new module and constants id |
+| Q4 (F6c-2): can entry and exit mix variants or constants? | (a) The leg table carries id and variant and exit refuses a mismatch: safer, more columns. (b) The caller's responsibility: smaller, but mixing is silent |
 
 ## 13. Amendment 1 (2026-11-25, before any F1 code)
 
