@@ -157,6 +157,11 @@ def _patch_b3(monkeypatch, b3, calls=None):
     monkeypatch.setattr(stage_a, "bind_series", fake_bind_series)
 
 
+def _next_day(world, event_id):
+    """The event's label availability as the readers return it: event date + 1 day, ISO text."""
+    return (date.fromisoformat(world["dates"][event_id]) + timedelta(days=1)).isoformat()
+
+
 def _install(monkeypatch, world, *, omit=(), regress=None, read=None, s_regress=None):
     """Fake the label reader (dropping `omit` on the evaluation read only), the fit regressions of the walk and of
     arm S (`s_regress` for arm S only), and both B3 binders (returning _b3(world))."""
@@ -165,7 +170,8 @@ def _install(monkeypatch, world, *, omit=(), regress=None, read=None, s_regress=
         # As the real reader: a label counts only if it is available (event date + 1 day) before labels_before.
         kept = [e for e in event_ids if e not in drop
                 and (date.fromisoformat(world["dates"][e]) + timedelta(days=1)).isoformat() < labels_before]
-        return pd.DataFrame({"event_id": kept, "absolute_move_pct": [world["y"][e] for e in kept]})
+        return pd.DataFrame({"event_id": kept, "absolute_move_pct": [world["y"][e] for e in kept],
+                             "target_available_on": [_next_day(world, e) for e in kept]})
     monkeypatch.setattr(walk, "training_labels", read or fake_read)
     monkeypatch.setattr(stage_a, "training_labels", read or fake_read)
     monkeypatch.setattr(arm_s, "training_labels", read or fake_read)
@@ -211,10 +217,11 @@ def _guard(case, *, settled=True, min_donors=30):
             "experiments_dir": case / "exps"}
 
 
-def _fake_fetch(world, out, calls, *, frame=None, avail=None, extra=None):
+def _fake_fetch(world, out, calls, *, frame=None, avail=None, extra=None, nan_crush=frozenset()):
     """The shared store as fetch(columns, ids), with literal column names and event_id plus the requested columns.
     Each call is recorded with whether every fit_<year>.json exists yet. frame replaces the production forecasts,
-    avail overrides label availability by id, extra adds one unrequested row to the answer."""
+    avail overrides label availability by id, extra adds one unrequested row to the answer, nan_crush lists the ids
+    whose crush_pct_iv30 is NaN (read_labels drops those labels)."""
     def fetch(columns, ids):
         calls.append({"columns": tuple(columns), "ids": list(ids),
                       "fits": all((out / "fits" / f"fit_{year}.json").exists() for year in YEARS)})
@@ -223,8 +230,9 @@ def _fake_fetch(world, out, calls, *, frame=None, avail=None, extra=None):
             got = {"pred_abs_move": src.loc[ids, "pred_move"].to_numpy(float),
                    "pred_iv_crush_30": src.loc[ids, "pred_crush"].to_numpy(float), "horizon_sessions": [1] * len(ids)}
         else:
+            crush = [np.nan if e in nan_crush else float(world["labels"].at[e, "crush_pct_iv30"]) for e in ids]
             got = {"abs_move": world["labels"].loc[ids, "abs_move"].to_numpy(float),
-                   "crush_pct_iv30": world["labels"].loc[ids, "crush_pct_iv30"].to_numpy(float),
+                   "crush_pct_iv30": np.array(crush, dtype=float),
                    "available_as_of_date": [(avail or {}).get(e) or (date.fromisoformat(world["dates"][e])
                                                                      + timedelta(days=1)).isoformat() for e in ids]}
         answer = pd.DataFrame({"event_id": ids, **{column: got[column] for column in columns}})
@@ -627,7 +635,7 @@ def test_fit_failure_publishes_a_not_testable_report(monkeypatch, tmp_path):
     assert doc["inputs"]["b0_labels_hash"] is None and not _label_fetches(fetched)
     assert doc["arms"] == {} and doc["fit_status"] == {"2022": "fit_failed"} and doc["floor_report"] == []
     assert doc["unlabelled_in_period"] == {} and doc["crps_exclusions"] == []
-    assert doc["inputs"]["evaluation_labels_hash"] is None
+    assert doc["inputs"]["evaluation_labels_hash"] is None and doc["inputs"]["b1b2_labels_hash"] is None
     assert doc["reported"] == {} and doc["arm_s"] == {} and doc["headline_flags"] == [] and doc["crps_rows"] == []
     assert doc["inputs"]["arm_s_receipt_hashes"] == {} and isinstance(doc["inputs"]["b2_implied_hash"], str)
     assert doc["inputs"]["b3"]["rule"] == "v14_mae_winner"
@@ -1038,6 +1046,29 @@ def test_b0_labels_hash_covers_the_available_date(monkeypatch, tmp_path, full_ru
     assert doc["inputs"]["b0_labels_hash"] != full_run["doc"]["inputs"]["b0_labels_hash"]
 
 
+def test_b1_and_b2_do_not_depend_on_crush_or_its_availability(monkeypatch, tmp_path, full_run):
+    """B1 and B2 donors carry only the move label. Crush is missing for all of 2021 (read_labels drops those rows) and
+    delayed for 2020 H2; B1 and B2 pooled n and mean pinball stay those of the full run. B0 may change, so it is not
+    compared."""
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    _install(monkeypatch, world)
+    no_crush = {e["id"] for e in world["events"] if e["date"].startswith("2021")}
+    late = {e["id"]: (date.fromisoformat(e["date"]) + timedelta(days=5)).isoformat() for e in world["events"]
+            if "2020-07-01" <= e["date"] <= "2020-12-31"}
+    doc = _run(world, out, guard, nan_crush=no_crush, avail=late)
+    for name in ("B1", "B2"):
+        want = next(t for t in full_run["doc"]["reported"][name]["tables"] if t["slice"] == "pooled")
+        got = next(t for t in doc["reported"][name]["tables"] if t["slice"] == "pooled")
+        assert want["n"] > 0 and got["n"] == want["n"], name
+        assert got["mean_pinball"] == pytest.approx(want["mean_pinball"], rel=1e-12), name
+
+
+def test_b1b2_labels_hash_binds_every_sealed_event_move_and_availability(full_run):
+    world, doc = full_run["world"], full_run["doc"]
+    want = content_hash(sorted([e["id"], world["y"][e["id"]], _next_day(world, e["id"])] for e in world["events"]))
+    assert doc["inputs"]["b1b2_labels_hash"] == want
+
+
 def test_every_arm_s_fit_failing_still_publishes_with_s_not_testable(monkeypatch, tmp_path, full_run):
     world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
     _install(monkeypatch, world, s_regress=_fake_fit(boom=True))
@@ -1057,7 +1088,8 @@ def test_arm_s_fits_before_any_evaluation_label_read_or_b0_label_fetch(monkeypat
     def logged_read(sealed, event_ids, labels_before):
         if labels_before == "2026-02-01":
             order.append("evaluation_labels")
-        return pd.DataFrame({"event_id": list(event_ids), "absolute_move_pct": [world["y"][e] for e in event_ids]})
+        return pd.DataFrame({"event_id": list(event_ids), "absolute_move_pct": [world["y"][e] for e in event_ids],
+                             "target_available_on": [_next_day(world, e) for e in event_ids]})
     _install(monkeypatch, world, read=logged_read)
     real = stage_a.fit_arm_s
 

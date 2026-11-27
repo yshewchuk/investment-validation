@@ -36,7 +36,7 @@ NOT_INCLUDED = ["y0_check", "b0_conditional_value", "unconditional_width_tercile
 FIT_FAILED = {"status": "not_testable", "reasons": ["Q:fit_failed", "Q_raw:fit_failed"],
               "arms": {"Q": "not_testable", "Q_raw": "not_testable"}}
 NOT_SCORED = dict(verdict=FIT_FAILED, results={}, floors=[], exclusions=[], labels_hash=None, b0_hash=None,
-                  unlabelled=None, per_year={}, reported={}, arm_s={}, headline_flags=[], crps_rows=[])
+                  b1b2_hash=None, unlabelled=None, per_year={}, reported={}, arm_s={}, headline_flags=[], crps_rows=[])
 
 def _refuse(reason, message):
     return fail("EXPERIMENT_IDENTITY_CONFLICT", f"{reason}: {message}", details={"reason": reason})
@@ -54,9 +54,16 @@ def _score(sealed, walk, production, fetch, admitted, s_results, implied, b3):
                  if PERIOD[0] <= pd.Timestamp(targets.at[e["event_id"], "event_date"]) <= PERIOD[1]]
     ids = sorted(set(predictions.index) | set(in_period))
     with stage("stage A inputs"):
-        frame = training_labels(sealed, ids, sealed["evaluation_labels_before"])
+        moves = training_labels(sealed, [e["event_id"] for e in sealed["events"]], sealed["evaluation_labels_before"])
+        frame = moves[moves["event_id"].astype(str).isin(ids)]
         y = pd.Series(frame["absolute_move_pct"].to_numpy(float), index=frame["event_id"].astype(str))
         labels_hash = content_hash(sorted(_plain(frame[["event_id", "absolute_move_pct"]].values.tolist())))
+        # B1/B2 donors need only the move label and its availability, so they never read crush (read_labels).
+        donors = moves.rename(columns={"absolute_move_pct": "abs_move"})
+        donors = donors.set_index(donors["event_id"].astype(str))
+        b1b2_hash = content_hash(sorted(_plain([[str(e), float(a), str(t)] for e, a, t in
+                                                zip(moves["event_id"], moves["absolute_move_pct"],
+                                                    moves["target_available_on"])])))
     in_set = set(in_period)  # Q4 option B: an in-period event with no label stays in the denominator, never paired
     unlabelled = [e for e in ids if e not in in_set and not np.isfinite(y.get(e, np.nan))]  # outside the periods
     per_year = {yr: sum(pd.Timestamp(targets.at[e, "event_date"]).year == int(yr) for e in in_period
@@ -75,10 +82,9 @@ def _score(sealed, walk, production, fetch, admitted, s_results, implied, b3):
         raw = pd.concat([pd.DataFrame(np.asarray(r["raw"]["{}x{}".format(*r["configuration"])], float),
                                       index=r["event_ids"], columns=QCOLS) for r in walk.values()])
         s_frame, s_raw, years = s_frames(s_results)
-        renamed = labels.rename(columns={"available": "target_available_on"})
         frames = {"Q": arms["Q"], "Q_raw": arms["Q_raw"], "B0": pool_quantiles(production["frame"], labels, events),
-                  "S": s_frame, "B1": band_quantiles(production["frame"], renamed, events),
-                  "B2": implied_quantiles(implied, renamed, events),
+                  "S": s_frame, "B1": band_quantiles(production["frame"], donors, events),
+                  "B2": implied_quantiles(implied, donors, events),
                   "B3": b3_quantiles(production["frame"], labels, events, b3)}
         scored, exclusions, extra = score_crps(frames, events, pools)
         results = {}
@@ -96,7 +102,8 @@ def _score(sealed, walk, production, fetch, admitted, s_results, implied, b3):
         crps = pd.DataFrame({name: scored[name]["crps"] for name in frames}).reindex(in_period)
         crps_rows = [{"event_id": e, **row} for e, row in crps.to_dict("index").items()]
     return {"verdict": verdict, "results": results, "floors": [*floors.to_dict("records"), *extra],
-            "exclusions": exclusions, "labels_hash": labels_hash, "b0_hash": b0_hash, "unlabelled": unlabelled,
+            "exclusions": exclusions, "labels_hash": labels_hash, "b0_hash": b0_hash, "b1b2_hash": b1b2_hash,
+            "unlabelled": unlabelled,
             "per_year": per_year, "reported": reported, "arm_s": years, "headline_flags": flags, "crps_rows": crps_rows}
 
 def _publish(out_dir, body, name=REPORT, reason="stage_a_report_changed"):
@@ -163,6 +170,7 @@ def run_stage_a(sealed, years, admitted, fetch, out_dir, *, production_hash, tab
                       "preregistered_at": guard["preregistered_at"], "years": list(years),
                       "sklearn_version": sklearn.__version__, "production_binding": production["binding"],
                       "production_table_hash": production["table_hash"], "b0_labels_hash": out["b0_hash"],
+                      "b1b2_labels_hash": out["b1b2_hash"],
                       "evaluation_labels_hash": out["labels_hash"], "unlabelled_outside_periods": out["unlabelled"],
                       "evaluation_labels_before": sealed["evaluation_labels_before"],
                       "fit_receipt_hashes": {year: r["content_hash"] for year, r in walk.items()},
