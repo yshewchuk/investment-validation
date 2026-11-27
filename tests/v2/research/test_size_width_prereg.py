@@ -261,10 +261,15 @@ def test_amended_spec_needs_the_original_row_and_a_new_one_last(tmp_path):
 
 
 def test_model_a_constants_file_is_the_pinned_one_and_loads_for_both_variants():
-    raw = MODEL_A_CONSTANTS.read_bytes()
+    raw = fvi._read_capped(MODEL_A_CONSTANTS, 1 << 16, MODEL_A_CONSTANTS.name)
     assert hashlib.sha256(raw).hexdigest() == "494b21325983821ec1f018e2d04630109284532b7b9d617a5a2e803c9dd4d95a"
     _, amendment = _real_amendment_2()
-    assert amendment["fill_model_pending"]["constants_sha256"] == "494b21325983821ec1f018e2d04630109284532b7b9d617a5a2e803c9dd4d95a"
+    fill_pending = amendment["fill_model_pending"]
+    assert fill_pending["constants_sha256"] == "494b21325983821ec1f018e2d04630109284532b7b9d617a5a2e803c9dd4d95a"
+    assert fill_pending["constants_file"] == "experiments/EXP-189_short_vol_width_tuning/model_a_constants.json"
+    assert fill_pending["constants_id"] == "22e1bc6823ee05ffd3b08130c39f9b48a9c22364e0e256d7482bb4ecb19d67fb"
+    assert fill_pending["primary_variant"] == "primary"
+    assert fill_pending["sensitivity_variant"] == "spread050"
     document = json.loads(raw)
     constants_id = "22e1bc6823ee05ffd3b08130c39f9b48a9c22364e0e256d7482bb4ecb19d67fb"
 
@@ -285,6 +290,23 @@ def test_amendment_2_fill_dates_say_the_fit_postdates_every_test_period():
     _, amendment = _real_amendment_2()
     assert amendment["fill_dates"] == (
         "The fills used to fit model A all postdate every EXP-189 test period (2023H2, 2024, 2025): no overlap.")
+
+
+def test_amendment_2_fit_disclosure_matches_the_supervisors_summary():
+    _, amendment = _real_amendment_2()
+    d = amendment["fit_disclosure"]
+    assert d["input_sha256"] == "e06646be7fe09eb164e947dea0b64d05f59234bc62931d55c0e337a26a0f4fb0"
+    assert d["base_fvf_id"] == "735f3e6cb2fa65c303599152cfa6fead2d7950e9bcb367117d50ed25faffc0b7"
+    assert d["window_minutes"] == 60
+    assert d["counts"] == {
+        "rows": 413, "used": 180, "unflagged": 146, "oi_only": 19, "size_only": 8, "both": 7, "unknown": 0,
+        "outside_window": 228, "unpriceable": 0, "rate_unknown": 2, "no_fair_value": 3, "zero_half_spread": 0,
+        "borrow_cells_out_of_range": 0, "rate_cells_out_of_range": 0}
+    assert d["fit"] == {
+        "unflagged": {"n": 146, "fitted": True, "loss": 0.896096258132475},
+        "oi_only": {"n": 19, "fitted": False, "loss": 0.7181021846860469},
+        "size_only": {"n": 8, "fitted": False, "loss": 1.2533928571428548}}
+    assert d["unflagged_mean_abs_error"] == {"model_a": 0.896096258132475, "current_F": 0.9811597883271139}
 
 
 # --------------------------------------------------------------------------

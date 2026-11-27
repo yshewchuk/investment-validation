@@ -113,7 +113,7 @@ amendments:
     # placeholder that no code reads. Until it is replaced by the code's name, this hash selects nothing new.
     fill_model_pending:
       id: "A"
-      model: "mid-anchored: c = min(1, C_BASE + C_SPREAD*min(s/SPREAD_SCALE, 1) + C_THIN_SIZE*thin_size + C_THIN_OI*thin_oi); on the effective quote a buy fills at mid + c*half_spread and a sell at mid - c*half_spread; no fair value, minimum concession or tick rule"
+      model: "mid-anchored: c = min(1, C_BASE + C_SPREAD*min(s/SPREAD_SCALE, 1) + C_THIN_SIZE*thin_size + C_THIN_OI*thin_oi), where s is the quote's relative spread and thin_size and thin_oi are F's thin-liquidity terms (guides/fair_value_fill_design.md, section 5; unknown liquidity takes UNKNOWN_THIN); on the effective quote a buy fills at mid + c*half_spread and a sell at mid - c*half_spread; no fair value, minimum concession or tick rule"
       code: "experiments/fair_value_apply.py (load_constants, leg_fills, structure_entry, structure_exit)"
       constants_file: "experiments/EXP-189_short_vol_width_tuning/model_a_constants.json"
       constants_sha256: "494b21325983821ec1f018e2d04630109284532b7b9d617a5a2e803c9dd4d95a"
@@ -121,10 +121,10 @@ amendments:
       primary_variant: "primary"
       sensitivity_variant: "spread050"
       f_inputs: "Model A reuses Amendment 1's F leg table and pins: fvf_id 735f3e6cb2fa65c303599152cfa6fead2d7950e9bcb367117d50ed25faffc0b7 (unchanged), the same re-ingest manifest and table hashes, quote snapshot, chain reader, units, rate rules and carry/dividend mode. Leg statuses are F's, so rate_unknown and no_fair_value still apply although a model A fill uses no fair value."
-      entry_exit_binding: "Option B of issue 3104: the entry and exit leg tables each carry constants_id and variant; both must equal the run's pinned values."
+      entry_exit_binding: "Option B of issue 3104: the entry and exit leg tables each carry constants_id and variant; both must equal the run's pinned values. The merged structure_exit checks this; the merged structure_entry reads no pin, so the code slice that binds model A (S1) must check the entry table."
       entry_guard:
         reasons_in_order: ["f_unpriceable", "f_rate_unknown", "f_no_fair_value", "f_not_a_debit", "f_fill_over_mid", "f_spread_over_debit"]
-        note: "f_fill_over_mid (model A debit minus the mid debit above 0.25 of the mid debit) is model A's reason; f_fill_over_fair stays F's, and F is unchanged. f_not_a_debit still tests the mid and fair-value debits."
+        note: "f_fill_over_mid (model A debit minus the mid debit above 0.25 of the mid debit) is model A's reason, added by slice S1 around the merged fill_over_mid outcome; f_fill_over_fair stays F's, and F is unchanged. f_not_a_debit still tests the mid and fair-value debits."
       exit: "Amendment 1's exit rules with model A fills; a fallback leg takes the model A fill at its effective mid and keeps exit_fair_mid."
       reported_never_deciding: ["mid", "harsh", "unknown0", "unknown1", "midfloor (equals the base under model A, since c is never negative)"]
     fit_disclosure:
@@ -173,6 +173,41 @@ amendments:
       R5_identity: "A constants_id or variant that differs from the run's pinned values refuses. A model A run never prices on F or current marks as primary."
       R6_causality: "Amendment 1's entry and exit date rules are unchanged; the constants are fixed before the run. See causality_limit."
       progress: "Stage, load and pricing progress goes to stderr as under Amendment 1."
+    split_list:
+      note: "Follow-up code slices, in the supervisor's split of 2026-11-27 (code first and primary end to end; spread050 and report work as later slices if they do not fit; this spec slice in parallel). Sizes are the spec owner's estimates: added production lines / test lines / doc words. Every slice is under the CodeRabbit waiver (at most 149 production lines)."
+      slices:
+        - id: "S1"
+          scope: "Walking skeleton through the real driver for the primary run: select model A from this entry, load the pinned constants, price entry and exit, bind receipts; one end-to-end test."
+          files: "run.py and size_width_{driver,f_select,f_quotes,f_fills,f_counts}, plus a model A adapter"
+          estimate: "~140 / ~200 / ~150"
+          after: "none; started on the supervisor's approval"
+          failure_semantics: "R1: failure_semantics.R1_inputs, constants checked before any quote is read. R2: no partial out-dir results or report after a late failure. R3: no randomness added. R4, R5, R6: as in failure_semantics; progress to stderr."
+          artifacts: "inputs and stage receipts (existing schema plus receipts.binds; field names open, Q1); raw exit rows, which must be stored before any full run (schema open, Q3)"
+        - id: "S2"
+          scope: "Widens the same path to the spread050 full run through the run option. Dropped if it fits in S1."
+          files: "run.py and size_width_f_select"
+          estimate: "~40 / ~80 / ~60"
+          after: "S1"
+          failure_semantics: "S1's R1-R6; an unknown variant refuses variant_unknown before any quote is read; one run never reuses another variant's receipts."
+          artifacts: "the spread050 run's receipts and report (S1's schemas, variant recorded)"
+        - id: "S3"
+          scope: "Report end of the path: the Amendment 2 label, any exit statistic computed from the raw rows, and the comparison."
+          files: "size_width_report, size_width_f_views and the size_width_f_report modules"
+          estimate: "~100 / ~150 / ~80"
+          after: "S1"
+          failure_semantics: "R1: inputs not bound to this registration and fill model refuse before anything is written. R2: no partial report. R3: deterministic. R4, R5: reads only bound receipts. R6: reads no sources. A statistic that is not defined never blocks the report."
+          artifacts: "REPORT.md and proposed_rule.json (Amendment 1's schemas, new label); the short comparison (schema open, Q4)"
+      open_questions:
+        S1:
+          Q1_names: "Selection key, receipt field names and the files the source hash covers. Option a: a second fill_model carrier with every Amendment 1 field (one selection path; the fields are repeated). Option b: a new key that refers to Amendment 1's fields (no repetition; a second lookup path in code)."
+          Q2_constants_hash: "A constants file whose hash differs from constants_sha256. Option a: refuse before pricing (also catches a reformatted file, which load_constants' content check accepts; one more refusal reason). Option b: record the loaded hash only (less code; replay catches a change between stages but not a first-run difference from this pin)."
+          Q3_exit_rows: "Raw exit rows. Option a: carry them in the existing F raw report-input tables (no new artifact; tied to F's schema). Option b: a new table (own schema; more code)."
+        S2:
+          Q1b_run_option: "The run option name and the receipt field recording it. A naming choice with no effect on results."
+        S3:
+          Q4_comparison: "The short comparison. Option a: written by hand in Markdown beside the two reports (no code; not machine-checked). Option b: generated from both runs' report outputs (checked; more code and a reader of two out-dirs)."
+          Q5_label: "The report label string. A naming choice with no effect on results."
+      settle_before: "Each open question is settled before its slice starts, or by S1 where S1 has started, and is then written into this entry before registration."
     open_issues:
       - "Issue 3091 (the replay donor pool ignores label availability, so exp_pnl_sim and the trailing cutoff may use slightly late donors) is NOT addressed by this amendment and stays open."
     registration:
