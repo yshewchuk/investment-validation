@@ -48,8 +48,9 @@ def _spec(**calibration):
 
 
 def _outer_folds():
-    return [{"outer": {"year": y, "training_candidate_event_ids": ids}}
-            for y, ids in (("2023", T23), ("2024", T24), ("2025", T25))]
+    return [{"outer": {"year": "2025", "training_candidate_event_ids": T25},
+             "inner": [{"year": "2023", "training_candidate_event_ids": T23},
+                       {"year": "2024", "training_candidate_event_ids": T24}]}]
 
 
 def _candidates():

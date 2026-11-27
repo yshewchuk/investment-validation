@@ -100,9 +100,10 @@ def _sealed(rows=ROWS, admitted=None):
         "fold_events": [{"event_id": r[0], "ticker": r[1], "event_date": r[2],
                          "forecasts": [{"source_session_ceiling": r[2]}]} for r in rows],
         "evaluation_labels_before": "2030-01-01",
-        "plan": {"folds": [{"outer": {"year": y, "training_candidate_event_ids": [
-                                r[0] for r in rows if r[2] < f"{y}-01-01"]}}
-                           for y in ("2023", "2024", "2025")]},
+        "plan": {"folds": [{"outer": {"year": "2025", "training_candidate_event_ids": [
+                                r[0] for r in rows if r[2] < "2025-01-01"]},
+                            "inner": [{"year": y, "training_candidate_event_ids": [
+                                r[0] for r in rows if r[2] < f"{y}-01-01"]} for y in ("2023", "2024")]}]},
     }
 
 
@@ -285,10 +286,11 @@ def test_malformed_sealed_event_refuses(break_event):
 
 def test_parity_mismatch_propagates_unchanged():
     sealed = _sealed()
-    sealed["plan"]["folds"][1]["outer"]["training_candidate_event_ids"].pop()
+    sealed["plan"]["folds"][0]["inner"][1]["training_candidate_event_ids"].pop()
     with pytest.raises(OpsError) as exc:
         _run(Recorder(), sealed=sealed)
     assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "fold_parity_mismatch")
+    assert exc.value.problem.message == "fold_parity_mismatch: the 2024 training list differs from the sealed plan"
 
 
 def test_memory_error_becomes_resource_limit():
