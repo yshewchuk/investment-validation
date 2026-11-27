@@ -600,7 +600,8 @@ def test_b0_rows_match_an_independent_design_rule_oracle(full_run):
 
 def test_arms_schema_and_not_included_list(full_run):
     doc = full_run["doc"]
-    assert doc["schema_version"] == "size_quantile_stage_a.v2"
+    assert doc["schema_version"] == "size_quantile_stage_a.v3"
+    assert doc["inputs"]["run_inputs_hash"] is None  # library call: no entry point, so the y0 check stays listed
     assert set(doc["arms"]) == {"Q", "Q_raw"} and set(doc["arm_verdicts"]) == {"Q", "Q_raw"}
     assert doc["not_included"] == ["y0_check", "S", "B1", "B2", "B3", "headline_loss_flags", "b0_conditional_value",
                                    "unconditional_width_terciles"]
