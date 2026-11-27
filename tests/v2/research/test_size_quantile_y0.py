@@ -296,20 +296,25 @@ def test_events_after_2025_are_ignored():
     assert all(k[1].year <= 2025 for call in rec.chain_calls for k in call)
 
 
+class _IntSub(int):
+    pass
+
+
 BAD_CAPS = [
     pytest.param(None, id="none"),
     pytest.param(0, id="zero"),
     pytest.param(True, id="bool"),
     pytest.param(1.5, id="float"),
+    pytest.param(_IntSub(5), id="int_subclass"),
 ]
 
 
 @pytest.mark.parametrize("cap", BAD_CAPS)
 def test_bad_byte_cap_refuses_before_any_calendar_chain_or_label_access(cap):
     rec = Recorder()
-    with pytest.raises(OpsError) as exc:
+    with pytest.raises(DataError) as exc:
         _run(rec, max_object_bytes=cap)
-    assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "y0_inputs_invalid")
+    assert exc.value.code == "QUERY_NOT_BOUNDED"
     assert rec.calendar_calls == [] and rec.chain_calls == [] and rec.label_calls == []
 
 

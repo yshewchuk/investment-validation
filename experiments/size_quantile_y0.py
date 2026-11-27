@@ -23,14 +23,13 @@ from experiments.size_quantile_sources import _MALFORMED, _refuse, training_labe
 LAST_YEAR = 2025
 
 
-def _thresholds(spec, max_object_bytes):
+def _thresholds(spec):
     wf = spec.get("walk_forward") if isinstance(spec, dict) else None
     share, floor = (wf.get("chain_share_min"), wf.get("training_years_min")) if isinstance(wf, dict) else (None, None)
-    cap_ok = isinstance(max_object_bytes, int) and not isinstance(max_object_bytes, bool) and max_object_bytes > 0
-    if not (cap_ok and isinstance(share, numbers.Real) and not isinstance(share, bool) and 0 < share <= 1
+    if not (isinstance(share, numbers.Real) and not isinstance(share, bool) and 0 < share <= 1
             and isinstance(floor, int) and not isinstance(floor, bool) and floor >= 1):
-        raise fail("INVALID_EXPERIMENT_SPEC", "walk_forward needs chain_share_min in (0, 1], training_years_min >= 1, "
-                   "max_object_bytes >= 1", details={"reason": "y0_inputs_invalid"})
+        raise fail("INVALID_EXPERIMENT_SPEC", "walk_forward needs chain_share_min in (0, 1], training_years_min >= 1",
+                   details={"reason": "y0_inputs_invalid"})
     return share, floor
 
 
@@ -142,7 +141,8 @@ def _report(sealed, share_min, floor, max_object_bytes, calendar, chain_keys, la
 def y0_report(sealed, spec, *, max_object_bytes=MAX_OBJECT_BYTES, calendar=trading_calendar_from_snapshot,
               chain_keys=capped_chain_keys, labels=training_labels):
     with stage("quantile y0"):
-        share_min, floor = _thresholds(spec, max_object_bytes)
+        share_min, floor = _thresholds(spec)
+        objects.validate_max_object_bytes(max_object_bytes)
         try:
             return _report(sealed, share_min, floor, max_object_bytes, calendar, chain_keys, labels)
         except MemoryError:
