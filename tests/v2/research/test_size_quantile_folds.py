@@ -140,43 +140,48 @@ def test_admission_removes_the_event_but_it_still_counts_for_the_cutoff():
     assert out["2025"]["evaluation_event_ids"] == ["e25a", "e25b", "e25c"]
 
 
+YEAR_MESSAGE = "fold_parity_mismatch: the sealed fold years are not 2023, 2024, 2025, each once"
 YEAR_BREAKS = [
-    pytest.param({"plan": [{"outer": _fold("2025", T25), "inner": [_fold("2023", T23)]}]}, id="sealed_year_missing"),
+    pytest.param({"plan": [{"outer": _fold("2025", T25), "inner": [_fold("2023", T23)]}]}, YEAR_MESSAGE,
+                 id="sealed_year_missing"),
     pytest.param({"plan": [{"outer": _fold("2025", T25), "inner": [_fold("2023", T23), _fold("2024", T24),
-                                                                  _fold("2024", T24)]}]}, id="repeated_year"),
+                                                                  _fold("2024", T24)]}]}, YEAR_MESSAGE,
+                 id="repeated_year"),
     pytest.param({"plan": [{"outer": _fold("2025", T25), "inner": [_fold("2023", T23), _fold("2024", T24),
-                                                                  _fold("2022", T23)]}]}, id="extra_year"),
+                                                                  _fold("2022", T23)]}]}, YEAR_MESSAGE,
+                 id="extra_year"),
     pytest.param({"plan": [{"outer": _fold("2023", T23), "inner": [_fold("2023", T23)]},
                            {"outer": _fold("2024", T24), "inner": [_fold("2023", T23)]},
                            {"outer": _fold("2025", T25), "inner": [_fold("2023", T23), _fold("2024", T24)]}]},
-                 id="three_outers_with_inners"),
+                 YEAR_MESSAGE, id="three_outers_with_inners"),
+    pytest.param({"plan": [{"outer": _fold("2024", T24), "inner": [
+        _fold("2022", ["e20a", "e20b", "e21a", "e21b"]), _fold("2023", T23)]}]}, YEAR_MESSAGE,
+                 id="three_wrong_years"),
 ]
 PARITY_BREAKS = [
-    pytest.param({"plan": _plan(t24=[i for i in T24 if i != "e22b"])}, id="missing_id"),
-    pytest.param({"plan": _plan(t25=T25 + ["e25a"])}, id="extra_id"),
+    pytest.param({"plan": _plan(t24=[i for i in T24 if i != "e22b"])},
+                 "fold_parity_mismatch: the 2024 training list differs from the sealed plan", id="missing_id"),
+    pytest.param({"plan": _plan(t25=T25 + ["e25a"])},
+                 "fold_parity_mismatch: the 2025 training list differs from the sealed plan", id="extra_id"),
     pytest.param({"plan": _plan(t24=["e20a", "e20b", "e21b", "e21a", "e22a", "e22b", "e23a", "e23b", "e23c"])},
-                 id="reordered"),
-    pytest.param({"rows": [r for r in ROWS if r["event_date"][:4] != "2025"]}, id="sealed_year_without_events"),
+                 "fold_parity_mismatch: the 2024 training list differs from the sealed plan", id="reordered"),
+    pytest.param({"plan": _plan(t23=[i for i in T23 if i != "e22b"])},
+                 "fold_parity_mismatch: the 2023 training list differs from the sealed plan",
+                 id="missing_id_first_inner"),
+    pytest.param({"rows": [r for r in ROWS if r["event_date"][:4] != "2025"]},
+                 "fold_parity_mismatch: the 2025 fold cannot be rebuilt from the sealed events",
+                 id="sealed_year_without_events"),
     *YEAR_BREAKS,
 ]
 
 
-@pytest.mark.parametrize("change", PARITY_BREAKS)
-def test_parity_refusals(change):
+@pytest.mark.parametrize("change, message", PARITY_BREAKS)
+def test_parity_refusals(change, message):
     with pytest.raises(OpsError) as exc:
         annual_folds(_sealed(**change), ["2024"])
     assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "fold_parity_mismatch")
-    message = exc.value.problem.message
-    assert message.startswith("fold_parity_mismatch: ")
-    assert not any(event_id in message for event_id in ALL_IDS)
-
-
-@pytest.mark.parametrize("change", YEAR_BREAKS)
-def test_year_set_refusals_name_the_sealed_fold_years(change):
-    with pytest.raises(OpsError) as exc:
-        annual_folds(_sealed(**change), ["2024"])
-    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "fold_parity_mismatch")
-    assert "sealed fold years" in exc.value.problem.message
+    assert exc.value.problem.message == message
+    assert not any(event_id in exc.value.problem.message for event_id in ALL_IDS)
 
 
 def test_inner_folds_listed_in_reverse_year_order_still_pass():
@@ -194,6 +199,8 @@ def test_malformed_group_refuses_sealed_malformed(plan):
     with pytest.raises(OpsError) as exc:
         annual_folds(_sealed(plan=plan), ["2024"])
     assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "sealed_malformed")
+    assert exc.value.problem.message.startswith("sealed_malformed: ")
+    assert "KeyError" in exc.value.problem.message
 
 
 def test_parity_refuses_even_when_only_an_earlier_year_is_requested():

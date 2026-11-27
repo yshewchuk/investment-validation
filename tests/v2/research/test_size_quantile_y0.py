@@ -290,6 +290,7 @@ def test_parity_mismatch_propagates_unchanged():
     with pytest.raises(OpsError) as exc:
         _run(Recorder(), sealed=sealed)
     assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "fold_parity_mismatch")
+    assert exc.value.problem.message == "fold_parity_mismatch: the 2024 training list differs from the sealed plan"
 
 
 def test_memory_error_becomes_resource_limit():
