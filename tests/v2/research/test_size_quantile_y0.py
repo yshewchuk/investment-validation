@@ -1,7 +1,10 @@
 """EXP-190 Q2c Y0 report: synthetic fixtures only (no store, no data/). Expected values are hand-written literals."""
+from types import SimpleNamespace
+
 import pandas as pd
 import pytest
 
+from engine.v2.data import objects
 from engine.v2.data.errors import DataError
 from engine.v2.data.errors import fail as data_fail
 from engine.v2.data.repository import Repository
@@ -141,11 +144,11 @@ def _refusal(exc):
 
 def test_happy_path_returns_the_hand_written_report_and_calls_each_source_once(capsys):
     rec = Recorder()
-    out = _run(rec, max_object_bytes=1234)
+    out = _run(rec, max_object_bytes=1234, chain_max_object_bytes=5678)
     assert out == {"y0": "2021", "sealed_binding": "bind-y0", "chain_share_min": 0.5, "training_years_min": 2,
                    "years": HAPPY}
     assert rec.calendar_calls == [(REPO, "snap", 1234)]
-    assert rec.chain_caps == [1234] * len(MONTHS)
+    assert rec.chain_caps == [5678] * len(MONTHS)
     assert rec.label_calls == [(sorted(r[0] for r in ROWS if _year(r) <= "2024"), "2025-01-01")]
     assert [{(k[1].year, k[1].month) for k in call} for call in rec.chain_calls] == [{m} for m in MONTHS]
     err = capsys.readouterr().err
@@ -317,11 +320,12 @@ BAD_CAPS = [
 ]
 
 
+@pytest.mark.parametrize("keyword", ["max_object_bytes", "chain_max_object_bytes"])
 @pytest.mark.parametrize("cap", BAD_CAPS)
-def test_bad_byte_cap_refuses_before_any_calendar_chain_or_label_access(cap):
+def test_bad_byte_cap_refuses_before_any_calendar_chain_or_label_access(keyword, cap):
     rec = Recorder()
     with pytest.raises(DataError) as exc:
-        _run(rec, max_object_bytes=cap)
+        _run(rec, **{keyword: cap})
     assert exc.value.code == "QUERY_NOT_BOUNDED"
     assert rec.calendar_calls == [] and rec.chain_calls == [] and rec.label_calls == []
 
@@ -384,3 +388,57 @@ def test_label_scans_are_byte_capped_and_the_caller_keeps_the_inner_repository()
     assert inner.calls == [("computed_moves", 1048576), ("earnings_events", 1234), ("computed_moves", 7)]
     assert seen == ["extra"]
     assert sealed["repository"] is inner
+
+
+class _EmptyStore:
+    def read_verified(self, ref):
+        return b""
+
+
+class _SizedChainRecorder(Recorder):
+    """Runs the real object size check on each chain read, with the cap that the report passes it."""
+
+    def __init__(self, byte_size):
+        super().__init__()
+        self.object_store = _EmptyStore()
+        self.chain_ref = SimpleNamespace(object_id="option_chains-2026", content_hash="sha256:" + "0" * 64,
+                                         byte_size=byte_size)
+
+    def chain_keys(self, repository, snapshot, keys, *, max_object_bytes):
+        objects.read_verified_bytes(self.object_store, self.chain_ref, max_bytes=max_object_bytes)
+        return super().chain_keys(repository, snapshot, keys, max_object_bytes=max_object_bytes)
+
+
+@pytest.mark.parametrize("byte_size, admitted", [
+    pytest.param(268435457, True, id="2_pow_28_plus_1"),
+    pytest.param(362807296, True, id="346_mib"),
+    pytest.param(536870912, True, id="2_pow_29"),
+    pytest.param(536870913, False, id="2_pow_29_plus_1"),
+])
+def test_default_chain_cap_admits_the_real_2026_chain_object_and_refuses_past_512_mib(byte_size, admitted):
+    rec = _SizedChainRecorder(byte_size)
+    if admitted:
+        out = _run(rec)
+        assert out["y0"] == "2021"
+    else:
+        with pytest.raises(DataError) as exc:
+            _run(rec)
+        assert exc.value.code == "RESULT_LIMIT_EXCEEDED"
+    assert rec.calendar_calls == [(REPO, "snap", 268435456)]
+
+
+def test_default_caps_keep_the_calendar_and_label_scan_limits():
+    inner, rec = _ScanRepo(), Recorder()
+
+    def labels(sealed, ids, before):
+        repo = sealed["repository"]
+        repo.scan("q", table_name="computed_moves")
+        repo.scan("q", table_name="earnings_events")
+        return rec.labels(sealed, ids, before)
+
+    sealed = _sealed()
+    sealed["repository"] = inner
+    out = y0_report(sealed, SPEC, calendar=rec.calendar, chain_keys=rec.chain_keys, labels=labels)
+    assert out["y0"] == "2021"
+    assert rec.calendar_calls == [(inner, "snap", 268435456)]
+    assert inner.calls == [("computed_moves", 1048576), ("earnings_events", 268435456)]
