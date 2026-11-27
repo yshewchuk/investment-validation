@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 
@@ -10,6 +9,7 @@ from engine.v2.ops.errors import OpsError
 from experiments import fair_value_apply
 from experiments import fair_value_inputs as fvi
 from experiments import lib, size_width_account, size_width_prereg, size_width_sizing
+from experiments import size_width_a_fills, size_width_f_select
 
 REAL_SPEC = size_width_prereg.SPEC_PATH
 MODEL_A_CONSTANTS = REAL_SPEC.parent / "model_a_constants.json"
@@ -258,32 +258,55 @@ def test_amended_spec_needs_the_original_row_and_a_new_one_last(tmp_path):
     assert refusal(lambda: check("wrong_order.csv", [original, new, a1])) == "spec_hash_mismatch"
     receipt = check("registered.csv", [original, a1, new])
     assert receipt["spec_hash"] == digest and receipt["spec_hash_checked"] is True
+    assert receipt["fill_model"]["id"] == "A"
 
 
 def test_model_a_constants_file_is_the_pinned_one_and_loads_for_both_variants():
-    raw = fvi._read_capped(MODEL_A_CONSTANTS, 1 << 16, MODEL_A_CONSTANTS.name)
-    assert hashlib.sha256(raw).hexdigest() == "494b21325983821ec1f018e2d04630109284532b7b9d617a5a2e803c9dd4d95a"
+    assert size_width_a_fills.CONSTANTS_PATH == MODEL_A_CONSTANTS
     _, amendment = _real_amendment_2()
-    fill_pending = amendment["fill_model_pending"]
-    assert fill_pending["constants_sha256"] == "494b21325983821ec1f018e2d04630109284532b7b9d617a5a2e803c9dd4d95a"
-    assert fill_pending["constants_file"] == "experiments/EXP-189_short_vol_width_tuning/model_a_constants.json"
-    assert fill_pending["constants_id"] == "22e1bc6823ee05ffd3b08130c39f9b48a9c22364e0e256d7482bb4ecb19d67fb"
-    assert fill_pending["primary_variant"] == "primary"
-    assert fill_pending["sensitivity_variant"] == "spread050"
-    document = json.loads(raw)
+    fill = amendment["fill_model"]
+    assert fill["constants_sha256"] == "494b21325983821ec1f018e2d04630109284532b7b9d617a5a2e803c9dd4d95a"
+    assert fill["constants_file"] == "experiments/EXP-189_short_vol_width_tuning/model_a_constants.json"
+    assert fill["constants_id"] == "22e1bc6823ee05ffd3b08130c39f9b48a9c22364e0e256d7482bb4ecb19d67fb"
+    assert fill["primary_variant"] == "primary"
+    assert fill["sensitivity_variant"] == "spread050"
     constants_id = "22e1bc6823ee05ffd3b08130c39f9b48a9c22364e0e256d7482bb4ecb19d67fb"
+    expected = {
+        "anchor": "mid",
+        "constants": {"C_BASE": 0.21, "C_SPREAD": 0.0, "C_THIN_OI": 0.1, "C_THIN_SIZE": 0.15,
+                      "GUARD_FILL_FRACTION": 0.25, "SPREAD_SCALE": 0.5, "THIN_OI_BELOW": 100,
+                      "THIN_SIZE_BELOW": 10, "UNKNOWN_THIN": 0.5},
+        "constants_id": constants_id,
+        "sensitivity_variants": {"spread050": {"C_SPREAD": 0.5}},
+    }
 
-    primary = fair_value_apply.load_constants(document, constants_id, "primary")
+    model, extra = size_width_a_fills.load(constants_id, "primary")
+    assert extra["constants_file_sha256"] == "494b21325983821ec1f018e2d04630109284532b7b9d617a5a2e803c9dd4d95a"
+    assert model.document == expected
+    primary = fair_value_apply.load_constants(model.document, constants_id, "primary")
     assert primary["C_BASE"] == 0.21
     assert primary["C_SPREAD"] == 0.0
     assert primary["C_THIN_SIZE"] == 0.15
     assert primary["C_THIN_OI"] == 0.10
 
-    spread050 = fair_value_apply.load_constants(document, constants_id, "spread050")
+    model, extra = size_width_a_fills.load(constants_id, "spread050")
+    assert extra["constants_file_sha256"] == "494b21325983821ec1f018e2d04630109284532b7b9d617a5a2e803c9dd4d95a"
+    assert model.document == expected
+    spread050 = fair_value_apply.load_constants(model.document, constants_id, "spread050")
     assert spread050["C_BASE"] == 0.21
     assert spread050["C_SPREAD"] == 0.5
     assert spread050["C_THIN_SIZE"] == 0.15
     assert spread050["C_THIN_OI"] == 0.10
+
+
+def test_the_real_spec_selects_model_a_with_amendment_1s_f_inputs():
+    spec, a2 = _real_amendment_2()
+    a1 = spec["amendments"][0]["fill_model"]
+    assert size_width_f_select.fill_model(spec) == a2["fill_model"]
+    assert a2["fill_model"]["id"] == "A"
+    for key in ("fvf_id", "carry_dividend_mode", "rate_rules", "vol_scale", "rate_scale", "reingest",
+                "quote_snapshot"):
+        assert a2["fill_model"][key] == a1[key]
 
 
 def test_amendment_2_fill_dates_say_the_fit_postdates_every_test_period():
