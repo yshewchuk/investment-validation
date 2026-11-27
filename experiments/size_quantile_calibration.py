@@ -170,9 +170,7 @@ def score_crps(frames, events, calibrated):
     calibrate's pools (`calibrated`); any other frame builds its own pools from its quantiles with month_tables."""
     pools, out, exclusions, floors = dict(calibrated), {}, [], []
     for name, frame in frames.items():
-        ev = events.loc[frame.index]
-        dates = pd.DatetimeIndex(pd.to_datetime(ev["event_date"]))
-        y, label_end = ev["y"].to_numpy(float), ev["label_end"].to_numpy(object)
+        dates, y, label_end, _ = _inputs(frame, events)
         months, q = dates.to_period("M").to_timestamp(), frame[QCOLS].to_numpy(float)
         if name not in ARMS:
             own, donors, _ = month_tables({name: q}, y, dates, label_end, months)

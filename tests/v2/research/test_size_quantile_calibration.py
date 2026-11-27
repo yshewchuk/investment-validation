@@ -521,16 +521,17 @@ def test_floor_lines_are_logged_one_per_report_row_on_stderr_only(capsys):
 
 # ---------- 9. score_crps: a thin tail drops only the CRPS (Q3), for Q (calibrated pools) and B0 (own pools) ----------
 
-CRPS_Q = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]  # spread 3 on each side, so the 0.5 floor does not bind
+CRPS_Q = [5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]  # spread 3 on each side, so the 0.5 floor does not bind
 
 
 def _crps_frames():
-    """Donors: 30 with y = 10 (above Q90 = 6, so (10 - 6) / 3 = 4/3) and 30 with y = -5 (below Q10 = 0, so
-    (-5 - 0) / 3 = -5/3), all dated Jan 2023. t1 (Jul 2023) is in the 2023-07 pool of 30 + 30 donors. t2 (Jun 2024) and
-    t3 (Dec 2025) have no donor in their 12 months, so they are thin. t4 is in t1's month but has no label."""
-    rows = [(f"d{i:02d}", "2023-01-15", "2023-01-20", 10.0 if i < 30 else -5.0) for i in range(60)]
-    rows += [("t1", "2023-07-05", "2023-07-10", 2.0), ("t2", "2024-06-05", "2024-06-10", 2.0),
-             ("t3", "2025-12-05", "2025-12-10", 2.0), ("t4", "2023-07-06", "2023-07-10", np.nan)]
+    """Donors: 30 with y = 15 (above Q90 = 11, so (15 - 11) / 3 = 4/3) and 30 with y = 0 (below Q10 = 5, so
+    (0 - 5) / 3 = -5/3), all dated Jan 2023. Every y is non-negative. t1 (Jul 2023) is in the 2023-07 pool of 30 + 30
+    donors. t2 (Jun 2024) and t3 (Dec 2025) have no donor in their 12 months, so they are thin. t4 is in t1's month but
+    has no label."""
+    rows = [(f"d{i:02d}", "2023-01-15", "2023-01-20", 15.0 if i < 30 else 0.0) for i in range(60)]
+    rows += [("t1", "2023-07-05", "2023-07-10", 7.0), ("t2", "2024-06-05", "2024-06-10", 7.0),
+             ("t3", "2025-12-05", "2025-12-10", 7.0), ("t4", "2023-07-06", "2023-07-10", np.nan)]
     events = pd.DataFrame({"event_date": [r[1] for r in rows], "label_end": [r[2] for r in rows],
                            "y": [r[3] for r in rows]}, index=[r[0] for r in rows])
     frame = pd.DataFrame([CRPS_Q] * len(rows), index=events.index, columns=calib.QCOLS)
@@ -543,7 +544,7 @@ def test_thin_tails_change_only_the_crps_for_q_and_b0_with_exclusions_per_arm_an
     # Q takes calibrate's pool, given here for 2023-07 only; B0 builds its own pools from the same rule.
     calibrated = {("Q", pd.Timestamp("2023-07-01")): (np.full(30, -5 / 3), np.full(30, 4 / 3))}
     out, exclusions, floors = calib.score_crps({"Q": frame, "B0": frame}, events, calibrated)
-    want = _dense_crps(2.0, CRPS_Q, np.full(30, -5 / 3), np.full(30, 4 / 3))
+    want = _dense_crps(7.0, CRPS_Q, np.full(30, -5 / 3), np.full(30, 4 / 3))
     for name in ("Q", "B0"):
         got = out[name]
         pd.testing.assert_frame_equal(got.drop(columns="crps"), frame)  # quantiles and reasons are untouched
@@ -559,3 +560,26 @@ def test_thin_tails_change_only_the_crps_for_q_and_b0_with_exclusions_per_arm_an
     assert (rows[2023]["donors_hi"], rows[2023]["donors_lo"]) == (30, 30)
     # Thin months with finite rows: 2023-01 (no donor dated in its 12 months), 2024-06 and 2025-12, for both frames.
     assert "[stage A CRPS] arm=B0 scored=63 thin_months=3" in capsys.readouterr().err
+
+
+def _set(events, id_, column, value):
+    events = events.copy()
+    events.at[id_, column] = value
+    return events
+
+
+@pytest.mark.parametrize("name", ["Q", "B0"])
+@pytest.mark.parametrize("mutate", [
+    lambda e: _set(e, "t1", "y", -1.0),                  # negative y
+    lambda e: _set(e, "t1", "y", np.inf),                # +inf y
+    lambda e: pd.concat([e, e.loc[["t1"]]]),             # duplicate events index
+    lambda e: _set(e, "t1", "event_date", None),         # null event_date
+    lambda e: _set(e, "t1", "label_end", None),          # finite y, null label_end
+    lambda e: _set(e, "t1", "label_end", "not-a-date"),  # finite y, non-ISO label_end
+    lambda e: _set(e, "t3", "label_end", None),          # t3 (Dec 2025): no later month reads its label
+    lambda e: _set(e, "t3", "label_end", "2025-13-10"),  # same row, non-ISO label_end
+])
+def test_score_crps_refuses_what_calibrate_refuses(name, mutate):
+    events, frame = _crps_frames()
+    with pytest.raises(ValueError):
+        calib.score_crps({name: frame}, mutate(events), {})
