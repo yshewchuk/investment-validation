@@ -1,0 +1,20 @@
+{
+ "anchor": "mid",
+ "constants": {
+  "C_BASE": 0.21,
+  "C_SPREAD": 0.0,
+  "C_THIN_OI": 0.1,
+  "C_THIN_SIZE": 0.15,
+  "GUARD_FILL_FRACTION": 0.25,
+  "SPREAD_SCALE": 0.5,
+  "THIN_OI_BELOW": 100,
+  "THIN_SIZE_BELOW": 10,
+  "UNKNOWN_THIN": 0.5
+ },
+ "constants_id": "22e1bc6823ee05ffd3b08130c39f9b48a9c22364e0e256d7482bb4ecb19d67fb",
+ "sensitivity_variants": {
+  "spread050": {
+   "C_SPREAD": 0.5
+  }
+ }
+}

@@ -100,4 +100,83 @@ amendments:
           assetType: "code"
       quote_snapshot: "the snapshot the sealed inputs pin (design A1.3): the sources config's snapshot_id; no substitute"
       receipt_bindings: ["fill_model_id", "fvf_id", "reingest_manifest_sha256", "every_table_file_sha256", "quote_snapshot_id", "units", "rate_out_of_range", "rate_empty_row", "carry_dividend_mode"]
+  - id: "A2"
+    title: "Amendment 2 (2026-11-27): mid-anchored fill model A is primary, spread050 is its sensitivity; post-hoc revision by the user. This entry is the amendment's design text."
+    post_hoc: true
+    post_hoc_note: "User-approved on 2026-11-27, written AFTER Amendment 1's results had been seen, and model A was fitted on the user's own fills. Not a pre-registered test; nothing in it is blind. The original fields, the A1 entry, and their PLANNED rows, receipts, reports and ledger rows are not edited or deleted. If recommendations differ between the runs, each is stated."
+    decisions_by:
+      user: "the amendment: model A primary, spread050 sensitivity, verdict read on model A with spread050 beside it, disagreement reported as sensitive to wide-leg cost"
+      supervisor: "2026-11-27, the supervisor's judgement within the user's model-A decision: how spread050 runs and when it is required, the definition of disagreement, the comparison with F, the fill-date disclosure, the guard reason name, the model A source hash, raw exit rows, and the three PLANNED rows"
+    changes: "The fill model only. In the primary run, model A replaces F (Amendment 1) as the selected fill model: wherever Amendment 1 says F, debit_F or proceeds_F decides something, read the model A value. Everything else Amendment 1 had stays."
+    unchanged: ["arms", "k grid", "fake N and seeds", "M0 and the fake's calibration", "windows and periods", "account policy", "objective and selection rules", "tie and edge rules", "min_trades and min_recovered_trades", "success rule, breakeven-alpha margins and the 2-of-7 guard", "tolerance bands, phi and fallback adoption", "T-tests and report tables", "mid and harsh views", "no-ledger smoke", "stage order and run outputs"]
+    # TODO(code slice feat/pna2189): the final key name by which the code selects this binding. The key below is a
+    # placeholder that no code reads. Until it is replaced by the code's name, this hash selects nothing new.
+    fill_model_pending:
+      id: "A"
+      model: "mid-anchored: c = min(1, C_BASE + C_SPREAD*min(s/SPREAD_SCALE, 1) + C_THIN_SIZE*thin_size + C_THIN_OI*thin_oi); on the effective quote a buy fills at mid + c*half_spread and a sell at mid - c*half_spread; no fair value, minimum concession or tick rule"
+      code: "experiments/fair_value_apply.py (load_constants, leg_fills, structure_entry, structure_exit)"
+      constants_file: "experiments/EXP-189_short_vol_width_tuning/model_a_constants.json"
+      constants_sha256: "494b21325983821ec1f018e2d04630109284532b7b9d617a5a2e803c9dd4d95a"
+      constants_id: "22e1bc6823ee05ffd3b08130c39f9b48a9c22364e0e256d7482bb4ecb19d67fb"
+      primary_variant: "primary"
+      sensitivity_variant: "spread050"
+      f_inputs: "Model A reuses Amendment 1's F leg table and pins: fvf_id 735f3e6cb2fa65c303599152cfa6fead2d7950e9bcb367117d50ed25faffc0b7 (unchanged), the same re-ingest manifest and table hashes, quote snapshot, chain reader, units, rate rules and carry/dividend mode. Leg statuses are F's, so rate_unknown and no_fair_value still apply although a model A fill uses no fair value."
+      entry_exit_binding: "Option B of issue 3104: the entry and exit leg tables each carry constants_id and variant; both must equal the run's pinned values."
+      entry_guard:
+        reasons_in_order: ["f_unpriceable", "f_rate_unknown", "f_no_fair_value", "f_not_a_debit", "f_fill_over_mid", "f_spread_over_debit"]
+        note: "f_fill_over_mid (model A debit minus the mid debit above 0.25 of the mid debit) is model A's reason; f_fill_over_fair stays F's, and F is unchanged. f_not_a_debit still tests the mid and fair-value debits."
+      exit: "Amendment 1's exit rules with model A fills; a fallback leg takes the model A fill at its effective mid and keeps exit_fair_mid."
+      reported_never_deciding: ["mid", "harsh", "unknown0", "unknown1", "midfloor (equals the base under model A, since c is never negative)"]
+    fit_disclosure:
+      note: "Fitted on the user's own fills: 146 near-close unflagged fills. Hashes, counts and losses only; no fill-level data is committed. Losses are in-sample, measured on the fills used to fit."
+      input_sha256: "e06646be7fe09eb164e947dea0b64d05f59234bc62931d55c0e337a26a0f4fb0"
+      base_fvf_id: "735f3e6cb2fa65c303599152cfa6fead2d7950e9bcb367117d50ed25faffc0b7"
+      window_minutes: 60
+      counts: {rows: 413, used: 180, unflagged: 146, oi_only: 19, size_only: 8, both: 7, unknown: 0, outside_window: 228, unpriceable: 0, rate_unknown: 2, no_fair_value: 3, zero_half_spread: 0, borrow_cells_out_of_range: 0, rate_cells_out_of_range: 0}
+      fit:
+        unflagged: {n: 146, fitted: true, loss: 0.896096258132475}
+        oi_only: {n: 19, fitted: false, loss: 0.7181021846860469}
+        size_only: {n: 8, fitted: false, loss: 1.2533928571428548}
+      kept_constants: "Both thin penalties keep F's values (0.15 size, 0.10 open interest): too few flagged fills to fit."
+      unflagged_mean_abs_error: {model_a: 0.896096258132475, current_F: 0.9811597883271139}
+      bias: "Model A's mean residual on the unflagged fills is about 0."
+    fill_dates: "The fills used to fit model A all postdate every EXP-189 test period (2023H2, 2024, 2025): no overlap."
+    fill_dates_exception: "The exact date range is withheld as private (the user's account data), a stated exception to section 9 of guides/fair_value_fill_design.md (supervisor's judgement)."
+    causality_limit: "Because those fills postdate every test period, the constants use information that was not available at any decision date in these runs."
+    spread050:
+      how: "A SEPARATE full run of all stages, with its own entry guard, scores, k tuning, fallback and recommendation, in its own fresh out-dir. spread050 replaces only C_SPREAD (0.50) under the same constants_id."
+      # TODO(code slice): the name of the run option that selects the variant, and the receipt field that records it.
+      run_option: "TODO"
+      required_when: "REQUIRED only if the primary (model A) run gives any adoption-relevant pass: any arm passes, or the recommendation changes the board. When required, the amendment's result is not final until it has run."
+      otherwise: "If the primary passes nothing, spread050 is optional and, if not run, is reported as not run. Reason (supervisor's judgement, not a proof): it is strictly costlier on wide legs, so it cannot rescue the primary."
+      verdict: "The verdict is read on model A, with spread050 shown beside it."
+      disagreement: "Any difference in the recommendation or in any arm's pass or fail. Then the result is reported as sensitive to wide-leg cost."
+      outputs: "Two reports, one per run, plus a short comparison of them."
+      # TODO(code slice): the producing slice and schema of the short comparison.
+      comparison_artifact: "TODO"
+    f_comparison: "F is not re-priced by this amendment. Its code, fvf_id and the A1 entry are unchanged, and model A's results are compared with Amendment 1's stored report. The two runs' taken sets can differ, so the comparison is between whole runs, not trade by trade."
+    exit_concession: "Amendment 1's exit-concession diagnostic is measured from F's fair value, which no model A fill uses. No model A statistic is defined: the raw exit rows are stored, any statistic is computed at report time, and it never blocks a run."
+    # TODO(code slice): the artifact name and schema of those raw exit rows.
+    exit_rows_artifact: "TODO"
+    # TODO(code slice): the report label string.
+    label: "TODO"
+    receipts:
+      binds: ["every Amendment 1 receipt binding", "the fill-model id", "constants_id", "the variant", "the constants file hash as loaded", "a hash of the model A source, because neither fvf_id nor constants_id covers the apply code"]
+      # TODO(code slice): the receipt field names, and which source files the model A source hash covers.
+      field_names: "TODO"
+    failure_semantics:
+      # TODO(code slice): whether a constants-file hash that differs from constants_sha256 refuses, its reason name, and its place in the R1 order.
+      R1_inputs: "Amendment 1's input refusals are unchanged. Constants refuse in this order: constants_invalid, constants_id_mismatch, variant_unknown. Exit refuses in this order: those three, F's leg checks, legs_unbound, legs_constants_mismatch. All are EXPERIMENT_IDENTITY_CONFLICT; nothing is imputed."
+      R2_limits: "Amendment 1's bounded run and resource refusals are unchanged. No partial report after any refusal or late failure."
+      R3_determinism: "Model A adds no randomness."
+      R4_receipts: "Receipts bind exactly what was loaded (receipts.binds); a change refuses at replay. Receipts from another fill model or variant are never reused."
+      R5_identity: "A constants_id or variant that differs from the run's pinned values refuses. A model A run never prices on F or current marks as primary."
+      R6_causality: "Amendment 1's entry and exit date rules are unchanged; the constants are fixed before the run. See causality_limit."
+      progress: "Stage, load and pricing progress goes to stderr as under Amendment 1."
+    open_issues:
+      - "Issue 3091 (the replay donor pool ignores label availability, so exp_pnl_sim and the trailing cutoff may use slightly late donors) is NOT addressed by this amendment and stays open."
+    registration:
+      planned_rows: "Three EXP-189 PLANNED rows: the original, Amendment 1 and this one, last. The supervisor appends the third after this entry and the model A code are both on main and no TODO or placeholder remains here. No agent writes experiments/LEDGER.csv."
+      smoke: "Amendment 1's no-ledger smoke (design A1.9 step 3: the same 50-ticker rule, all stages, fresh /tmp out-dir), run under model A before the full run. No smoke result tunes a constant or a rule."
+      full_run: "All stages in a fresh out-dir; no earlier receipt, month file or tuning is reused or deleted."
 label_2025: "2025 NOT blind for widths"

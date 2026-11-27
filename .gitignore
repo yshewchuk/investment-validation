@@ -41,6 +41,8 @@
 !/tools/*.md
 !/tools/opencode_config.json
 !/tools/opencode_review_config.json
+# EXP-189 Amendment 2's pinned model A constants (aggregates only, no fill data). Exact path.
+!/experiments/EXP-189_short_vol_width_tuning/model_a_constants.json
 
 # Per-component architecture docs: `ARCHITECTURE.md` at the repo root, or
 # next to any component's code, at any depth (no leading slash -- git
