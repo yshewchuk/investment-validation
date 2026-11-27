@@ -95,7 +95,9 @@ def _causal_inputs(events, labels):
 def lead1_decision_dates(target_events, event_ids):
     """Each event's lead-1 decision date, as a datetime64 Series in ``event_ids`` order.
 
-    Refuses unless the target has exactly one horizon-1 forecast, its decision_date parses, and that date is
+    The lead-1 decision date is the horizon-1 forecast's source_session_ceiling (the key forecast_cutoff stores;
+    eligibility groups copy it as decision_date).
+    Refuses unless the target has exactly one horizon-1 forecast, its source_session_ceiling parses, and that date is
     strictly before the event date.
     """
     days, eid = [], None
@@ -106,7 +108,7 @@ def lead1_decision_dates(target_events, event_ids):
             lead1 = [f for f in target["forecasts"] if f["horizon_sessions"] == 1]
             if len(lead1) != 1:
                 raise ValueError("not exactly one lead-1 forecast")
-            day = date.fromisoformat(lead1[0]["decision_date"])
+            day = date.fromisoformat(lead1[0]["source_session_ceiling"])
             if not day < date.fromisoformat(target["event_date"]):
                 raise ValueError("decision_date not before event_date")
             days.append(day.isoformat())

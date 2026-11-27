@@ -5,9 +5,11 @@ import pytest
 
 from engine.pnl_sim import MIN_POOL, ResidualPool
 from engine.v2.ops.errors import OpsError
+from engine.v2.research.magnitude_inputs import forecast_cutoff
 from experiments.size_pnl_pool import build_pool
 from experiments.size_quantile_baselines import lead1_decision_dates, pool_quantiles
 from experiments.size_quantile_metrics import Rules
+from tests.v2.research.magnitude_trial_support import calendar_sessions
 
 LEVELS = Rules().levels
 QCOLS = [f"q{round(a * 100)}" for a in LEVELS]
@@ -411,9 +413,14 @@ def test_bucket_edges_come_only_from_eligible_donors():
     np.testing.assert_allclose(row[QCOLS].to_numpy(float), want)
 
 
-@pytest.mark.parametrize("break_it", ["no_decision_column", "null_decision", "decision_on_event_date",
-                                      "no_available_column", "null_available"])
-def test_missing_null_or_non_causal_dates_raise(break_it):
+@pytest.mark.parametrize("break_it, message", [
+    ("no_decision_column", "events must have a decision_date column"),
+    ("null_decision", "events decision_date must not be null or unparseable"),
+    ("decision_on_event_date", "events decision_date must be strictly before event_date"),
+    ("no_available_column", "labels must have an available column"),
+    ("null_available", "labels available must not be null or unparseable"),
+])
+def test_missing_null_or_non_causal_dates_raise(break_it, message):
     dates, pred, abs_move = donors(600)
     table, labels = frames(dates, pred, abs_move)
     events = events_frame(["ev"], [EVENT_DATE], [2.0])
@@ -427,7 +434,7 @@ def test_missing_null_or_non_causal_dates_raise(break_it):
         labels = labels.drop(columns="available")
     else:
         labels["available"] = None
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=message):
         pool_quantiles(table, labels, events)
 
 
@@ -435,25 +442,39 @@ def _target(event_id, event_date, forecasts):
     return {"event_id": event_id, "event_date": event_date, "forecasts": forecasts}
 
 
+def test_lead1_decision_dates_come_from_forecast_cutoff_output():
+    # A weekday calendar with no holidays in the window. AMC 2024-06-12: the session before the event.
+    # BMO 2024-06-14: two sessions before the event (06-13 is one, 06-12 is two).
+    calendar = calendar_sessions()
+    events = [("amc", "2024-06-12", "AMC"), ("bmo", "2024-06-14", "BMO")]
+    targets = [_target(eid, day, [forecast_cutoff(day, session, horizon, calendar) for horizon in (1, 3, 5)])
+               for eid, day, session in events]
+    assert all("decision_date" not in f for target in targets for f in target["forecasts"])
+    out = lead1_decision_dates(targets, pd.Index(["amc", "bmo"]))
+    assert out.tolist() == [pd.Timestamp("2024-06-11"), pd.Timestamp("2024-06-12")]
+
+
 def test_lead1_decision_date_is_the_horizon_one_entry():
-    targets = [_target("a", "2024-06-03", [{"horizon_sessions": 5, "decision_date": "2024-05-24"},
-                                           {"horizon_sessions": 3, "decision_date": "2024-05-29"},
-                                           {"horizon_sessions": 1, "decision_date": "2024-06-02"}])]
+    targets = [_target("a", "2024-06-03", [{"horizon_sessions": 5, "source_session_ceiling": "2024-05-24"},
+                                           {"horizon_sessions": 3, "source_session_ceiling": "2024-05-29"},
+                                           {"horizon_sessions": 1, "source_session_ceiling": "2024-06-02"}])]
     out = lead1_decision_dates(targets, pd.Index(["a"]))
     assert out.index.tolist() == ["a"]
     assert pd.api.types.is_datetime64_dtype(out)
     assert out.iloc[0] == pd.Timestamp("2024-06-02")
 
 
-@pytest.mark.parametrize("case", ["no_lead1", "two_lead1", "missing_id", "bad_text", "not_before_event"])
+@pytest.mark.parametrize("case", ["no_lead1", "two_lead1", "missing_id", "bad_text", "not_before_event",
+                                  "decision_date_only"])
 def test_lead1_decision_date_refusals(case):
-    good = {"horizon_sessions": 1, "decision_date": "2024-06-02"}
+    good = {"horizon_sessions": 1, "source_session_ceiling": "2024-06-02"}
     targets = {
-        "no_lead1": [_target("a", "2024-06-03", [{"horizon_sessions": 3, "decision_date": "2024-05-29"}])],
+        "no_lead1": [_target("a", "2024-06-03", [{"horizon_sessions": 3, "source_session_ceiling": "2024-05-29"}])],
         "two_lead1": [_target("a", "2024-06-03", [good, dict(good)])],
         "missing_id": [_target("b", "2024-06-03", [good])],
-        "bad_text": [_target("a", "2024-06-03", [{"horizon_sessions": 1, "decision_date": "2024-02-30"}])],
-        "not_before_event": [_target("a", "2024-06-03", [{"horizon_sessions": 1, "decision_date": "2024-06-03"}])],
+        "bad_text": [_target("a", "2024-06-03", [{"horizon_sessions": 1, "source_session_ceiling": "2024-02-30"}])],
+        "not_before_event": [_target("a", "2024-06-03", [{"horizon_sessions": 1, "source_session_ceiling": "2024-06-03"}])],
+        "decision_date_only": [_target("a", "2024-06-03", [{"horizon_sessions": 1, "decision_date": "2024-06-02"}])],
     }[case]
     with pytest.raises(OpsError) as exc:
         lead1_decision_dates(targets, pd.Index(["a"]))

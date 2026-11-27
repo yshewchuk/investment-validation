@@ -52,9 +52,10 @@ def _binding(table_hash, frame):
 
 
 def _lead1(event):
-    """The event's lead-1 forecast: its decision date is the day before the event."""
-    decision = (date.fromisoformat(event["date"]) - timedelta(days=1)).isoformat()
-    return {"horizon_sessions": 1, "decision_date": decision, "source_session_ceiling": event["date"]}
+    """The event's lead-1 forecast, with only the keys forecast_cutoff stores: its source session ceiling is the
+    day before the event, which is the lead-1 decision date."""
+    ceiling = (date.fromisoformat(event["date"]) - timedelta(days=1)).isoformat()
+    return {"horizon_sessions": 1, "source_session_ceiling": ceiling}
 
 
 def _world():
@@ -83,7 +84,7 @@ def _world():
                                        "label_end": e["label_end"], "forecasts": [_lead1(e)]} for e in events],
                     "eligibility_plan": {"random_windows": []}},
         "fold_events": [{"event_id": e["id"], "ticker": e["ticker"], "event_date": e["date"],
-                         "forecasts": [_lead1(e)]} for e in events],
+                         "forecasts": [{"source_session_ceiling": e["date"]}]} for e in events],
         "plan": {"plan_id": "P1", "candidates": _candidates(), "folds": folds},
         "rows": [{"event_id": e["id"], "f_mu": e["mu"], "f_s": e["s"], "f_empty": None} for e in events],
     }

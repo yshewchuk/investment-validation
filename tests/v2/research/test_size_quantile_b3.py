@@ -419,5 +419,13 @@ def test_b3_excludes_a_donor_available_after_the_decision_date():
     late = labels.copy()
     late.loc["d500", "available"] = table.loc["d518", "event_date"].strftime("%Y-%m-%d")  # after d518's decision day
     out = b3_quantiles(table, late, _events(table), _bound())
+    base = b3_quantiles(table, labels, _events(table), _bound())
     trimmed = b3_quantiles(table.drop("d500"), labels, _events(table), _bound())
     pd.testing.assert_frame_equal(out.loc[["d518"]], trimmed.loc[["d518"]])
+    # d518 is scored, not an empty row, so the comparison above is not two blanks.
+    assert out.loc["d518", "reason"] is None and out.loc["d518", "n_rows"] > 0
+    assert np.isfinite(out.loc["d518", QCOLS].to_numpy(dtype=float)).all()
+    # Its forecast's bucket holds about 52 of the 517 eligible donors, under MIN_POOL, so the whole pool is drawn:
+    # excluding d500 removes exactly one row.
+    assert out.loc["d518", "fallback"]
+    assert out.loc["d518", "n_rows"] == base.loc["d518", "n_rows"] - 1
