@@ -1,8 +1,9 @@
-"""EXP-190 Q6b Stage A driver (caller size_quantile_run checks Y0). Q and Q_raw are judged against B0, with CRPS: Q, Q_raw
-and B0, and Q4 option B (an in-period event with no label stays in the denominator, unpaired). Not included: S, B1, B2,
-B3, headline loss flags, y0 check, B0 conditional value, unconditional width terciles. Years unchecked vs Y0 (#2947).
-out_dir/fits, out_dir/stage_a_report.json; size_quantile_stage_a.v3: inputs, status, reasons, arm_verdicts, fit_status,
-selection_period_disclosure, not_included, floor_report, arms, crps_exclusions, unlabelled_in_period, content_hash."""
+"""EXP-190 Q6b Stage A driver (caller size_quantile_run checks Y0). Q and Q_raw are judged against B0, with CRPS for
+Q, Q_raw, B0 and the reported S, B1, B2, B3 (size_quantile_reported). Q4 option B: an in-period event with no label
+stays in the denominator, unpaired. Not included: y0 check, B0 conditional value, unconditional width terciles.
+Years unchecked vs Y0 (#2947). out_dir/fits, out_dir/stage_a_report.json; size_quantile_stage_a.v4: inputs, status,
+reasons, arm_verdicts, fit_status, selection_period_disclosure, not_included, floor_report, arms, crps_exclusions,
+unlabelled_in_period, reported, arm_s, headline_flags, crps_rows (in-period CRPS, seven frames), content_hash."""
 import json
 import os
 import tempfile
@@ -18,18 +19,24 @@ from engine.v2.research.progress import decision, stage
 from experiments.size_pnl_contrast import RESAMPLES, SEED
 from experiments.size_pnl_prereg import _read_bounded
 from experiments.size_pnl_readers import read_labels, read_production
+from experiments.size_quantile_arm_s import fit_arm_s
 from experiments.size_quantile_arm_verdict import judge_arm, stage_a_verdict
-from experiments.size_quantile_baselines import lead1_decision_dates, pool_quantiles
-from experiments.size_quantile_calibration import MIN_TAIL, PERIOD, QCOLS, calibrate, predictions_from_receipts, score_crps
+from experiments.size_quantile_b3 import b3_quantiles, bind_series
+from experiments.size_quantile_baselines import band_quantiles, implied_quantiles, lead1_decision_dates, pool_quantiles
+from experiments.size_quantile_binding import bind_b3
+from experiments.size_quantile_calibration import (MIN_TAIL, PERIOD, QCOLS, calibrate, predictions_from_receipts,
+                                                  score_crps)
 from experiments.size_quantile_prereg import SPEC_PATH, load_spec, require_preregistration
+from experiments.size_quantile_reported import headline_flags, implied_table, reported_tables, s_frames
 from experiments.size_quantile_sources import training_labels
 from experiments.size_quantile_walk import fit_walk_forward
 
-SCHEMA, REPORT, MAX_REPORT_BYTES = "size_quantile_stage_a.v3", "stage_a_report.json", 512 << 20
-NOT_INCLUDED = ["y0_check", "S", "B1", "B2", "B3", "headline_loss_flags", "b0_conditional_value",
-                "unconditional_width_terciles"]
+SCHEMA, REPORT, MAX_REPORT_BYTES = "size_quantile_stage_a.v4", "stage_a_report.json", 512 << 20
+NOT_INCLUDED = ["y0_check", "b0_conditional_value", "unconditional_width_terciles"]
 FIT_FAILED = {"status": "not_testable", "reasons": ["Q:fit_failed", "Q_raw:fit_failed"],
               "arms": {"Q": "not_testable", "Q_raw": "not_testable"}}
+NOT_SCORED = dict(verdict=FIT_FAILED, results={}, floors=[], exclusions=[], labels_hash=None, b0_hash=None,
+                  b1b2_hash=None, unlabelled=None, per_year={}, reported={}, arm_s={}, headline_flags=[], crps_rows=[])
 
 def _refuse(reason, message):
     return fail("EXPERIMENT_IDENTITY_CONFLICT", f"{reason}: {message}", details={"reason": reason})
@@ -38,27 +45,37 @@ def _plain(value):
     return json.loads(json.dumps(value, default=lambda item: item.to_dict("records") if isinstance(item, pd.DataFrame)
                                  else item.tolist()), parse_constant=lambda _: None)
 
-def _score(sealed, walk, production, fetch, admitted):
-    """Step 5, after an all-ok walk: admitted labels, calibration, CRPS and the verdicts. Returns (verdict, arms, floor
-    rows, CRPS exclusions, labels hash, B0 hash, unlabelled outside the periods, unlabelled in period per year)."""
+def _score(sealed, walk, production, fetch, admitted, s_results, implied, b3):
+    """Step 5, after an all-ok walk and the arm S fits: admitted labels, calibration, CRPS, the verdicts and the
+    reported tables. Returns a dict of the report's pieces."""
     predictions = predictions_from_receipts(walk)
     targets = pd.DataFrame(sealed["context"]["target_events"]).set_index("event_id")
     in_period = [e["event_id"] for e in sealed["events"]
                  if PERIOD[0] <= pd.Timestamp(targets.at[e["event_id"], "event_date"]) <= PERIOD[1]]
     ids = sorted(set(predictions.index) | set(in_period))
     with stage("stage A inputs"):
-        frame = training_labels(sealed, ids, sealed["evaluation_labels_before"])
+        moves = training_labels(sealed, [e["event_id"] for e in sealed["events"]], sealed["evaluation_labels_before"])
+        frame = moves[moves["event_id"].astype(str).isin(ids)]
         y = pd.Series(frame["absolute_move_pct"].to_numpy(float), index=frame["event_id"].astype(str))
+        available = pd.Series(frame["target_available_on"].to_numpy(object), index=frame["event_id"].astype(str))
         labels_hash = content_hash(sorted(_plain(frame[["event_id", "absolute_move_pct"]].values.tolist())))
+        # B1/B2 donors need only the move label and its availability, so they never read crush (read_labels).
+        donors = moves.rename(columns={"absolute_move_pct": "abs_move"})
+        donors = donors.set_index(donors["event_id"].astype(str))
+        b1b2_hash = content_hash(sorted(_plain([[str(e), float(a), str(t)] for e, a, t in
+                                                zip(moves["event_id"], moves["absolute_move_pct"],
+                                                    moves["target_available_on"])])))
     in_set = set(in_period)  # Q4 option B: an in-period event with no label stays in the denominator, never paired
     unlabelled = [e for e in ids if e not in in_set and not np.isfinite(y.get(e, np.nan))]  # outside the periods
     per_year = {yr: sum(pd.Timestamp(targets.at[e, "event_date"]).year == int(yr) for e in in_period
                         if not np.isfinite(y.get(e, np.nan))) for yr in ("2023", "2024", "2025")}
     decision("quantile stage A", f"labels requested={len(ids)} qualified={len(frame)} in_period={len(in_period)} "
              f"unlabelled={len(unlabelled)} unlabelled_in_period={per_year}")
+    m3 = b3["series"].reindex(ids).to_numpy(float) if b3["rule"] == "v14_mae_winner" else np.nan
     events = targets.loc[ids, ["event_date", "ticker", "label_end"]].assign(y=y.reindex(ids).to_numpy(float),
+        available=available.reindex(ids).to_numpy(object),
         pred_move=production["frame"]["pred_move"].reindex(ids).to_numpy(float), m0=lambda d: d["pred_move"],
-        m3=np.nan)
+        m3=m3, implied_move=implied["implied_move"].reindex(ids).to_numpy(float))
     events["decision_date"] = lead1_decision_dates(sealed["context"]["target_events"], events.index)
     arms, pools, floors = calibrate(predictions, events)
     with stage("stage A CRPS and verdicts"):
@@ -67,7 +84,11 @@ def _score(sealed, walk, production, fetch, admitted):
                                              .values.tolist())))
         raw = pd.concat([pd.DataFrame(np.asarray(r["raw"]["{}x{}".format(*r["configuration"])], float),
                                       index=r["event_ids"], columns=QCOLS) for r in walk.values()])
-        frames = {"Q": arms["Q"], "Q_raw": arms["Q_raw"], "B0": pool_quantiles(production["frame"], labels, events)}
+        s_frame, s_raw, years = s_frames(s_results)
+        frames = {"Q": arms["Q"], "Q_raw": arms["Q_raw"], "B0": pool_quantiles(production["frame"], labels, events),
+                  "S": s_frame, "B1": band_quantiles(production["frame"], donors, events),
+                  "B2": implied_quantiles(implied, donors, events),
+                  "B3": b3_quantiles(production["frame"], labels, events, b3)}
         scored, exclusions, extra = score_crps(frames, events, pools)
         results = {}
         for arm in ("Q", "Q_raw"):
@@ -79,8 +100,14 @@ def _score(sealed, walk, production, fetch, admitted):
                                                         + pd.Timedelta(days=1)).to_numpy()})
             results[arm] = judge_arm(arm, arm_frame, scored["B0"], events, history, raw=raw)
         verdict = stage_a_verdict(results["Q"], results["Q_raw"])
-    return (verdict, results, [*floors.to_dict("records"), *extra], exclusions, labels_hash, b0_hash, unlabelled,
-            per_year)
+        reported = reported_tables(scored, scored["B0"], events, s_raw)
+        flags = headline_flags(results, scored, events)
+        crps = pd.DataFrame({name: scored[name]["crps"] for name in frames}).reindex(in_period)
+        crps_rows = [{"event_id": e, **row} for e, row in crps.to_dict("index").items()]
+    return {"verdict": verdict, "results": results, "floors": [*floors.to_dict("records"), *extra],
+            "exclusions": exclusions, "labels_hash": labels_hash, "b0_hash": b0_hash, "b1b2_hash": b1b2_hash,
+            "unlabelled": unlabelled,
+            "per_year": per_year, "reported": reported, "arm_s": years, "headline_flags": flags, "crps_rows": crps_rows}
 
 def _publish(out_dir, body, name=REPORT, reason="stage_a_report_changed"):
     """Atomic and immutable (os.link never overwrites): identical existing bytes are a replay; returns the document."""
@@ -109,8 +136,9 @@ def _publish(out_dir, body, name=REPORT, reason="stage_a_report_changed"):
         os.unlink(tmp)
     return json.loads(data)
 
-def run_stage_a(sealed, years, admitted, fetch, out_dir, *, production_hash, table_hash, spec_path=SPEC_PATH,
-                ledger_path=None, run_log_path=None, experiments_dir=None, run_inputs_hash=None, bound_spec_hash=None):
+def run_stage_a(sealed, years, admitted, fetch, out_dir, *, production_hash, table_hash, b3_read, b3_admit,
+                spec_path=SPEC_PATH, ledger_path=None, run_log_path=None, experiments_dir=None, run_inputs_hash=None,
+                bound_spec_hash=None, bound_b3_binding=None):
     """Run Stage A and publish its report; returns the parsed document (schema in the module docstring)."""
     try:
         with stage("quantile stage A"):
@@ -126,22 +154,34 @@ def run_stage_a(sealed, years, admitted, fetch, out_dir, *, production_hash, tab
                     and {"2023", "2024", "2025"} <= set(years) and years[-1] == "2025"):
                 raise fail("INVALID_EXPERIMENT_SPEC", "years invalid", details={"reason": "stage_a_years_invalid"})
             production = read_production(fetch, admitted, expected_hash=production_hash, table_hash=table_hash)
+            binding = bind_b3(sealed["plan"], b3_read("selection"))
+            b3 = {**bind_series(sealed["plan"], b3_read, binding, b3_admit), "rule": binding["rule"],
+                  "m3_candidate_id": binding["m3_candidate_id"]}
+            if bound_b3_binding not in (None, b3["binding"]):
+                raise _refuse("stage_a_b3_changed", "the B3 binding differs from the one bound in run_inputs")
+            implied, implied_hash = implied_table(sealed)
             walk = fit_walk_forward(sealed, spec, years, Path(out_dir) / "fits")
             scoring = all(receipt["status"] == "ok" for receipt in walk.values())
             decision("quantile stage A", "branch=scoring" if scoring else "branch=fit_failed: no arm scored")
             if scoring:
-                out = _score(sealed, walk, production, fetch, admitted)
+                s_results = fit_arm_s(sealed, spec, walk, Path(out_dir) / "fits")  # before any outcome read
+                out = _score(sealed, walk, production, fetch, admitted, s_results, implied, b3)
             else:
-                out = (FIT_FAILED, {}, [], [], None, None, None, {})
-            verdict, results, floors, exclusions, labels_hash, b0_hash, unlabelled, per_year = out
+                s_results, out = {}, NOT_SCORED
+            verdict, results, floors, exclusions = out["verdict"], out["results"], out["floors"], out["exclusions"]
             inputs = {"sealed_binding": sealed["binding"], "spec_hash": guard["spec_hash"],
                       "preregistered_at": guard["preregistered_at"], "years": list(years),
                       "sklearn_version": sklearn.__version__, "production_binding": production["binding"],
-                      "production_table_hash": production["table_hash"], "b0_labels_hash": b0_hash,
-                      "evaluation_labels_hash": labels_hash, "unlabelled_outside_periods": unlabelled,
+                      "production_table_hash": production["table_hash"], "b0_labels_hash": out["b0_hash"],
+                      "b1b2_labels_hash": out["b1b2_hash"],
+                      "evaluation_labels_hash": out["labels_hash"], "unlabelled_outside_periods": out["unlabelled"],
                       "evaluation_labels_before": sealed["evaluation_labels_before"],
                       "fit_receipt_hashes": {year: r["content_hash"] for year, r in walk.items()},
-                      "bootstrap": {"resamples": RESAMPLES, "seed": SEED}, "run_inputs_hash": run_inputs_hash}
+                      "arm_s_receipt_hashes": {year: o["receipt"]["content_hash"] for year, o in s_results.items()},
+                      "b2_implied_hash": implied_hash, "bootstrap": {"resamples": RESAMPLES, "seed": SEED},
+                      "run_inputs_hash": run_inputs_hash,
+                      "b3": {k: b3[k] for k in ("binding", "b3_candidate_id", "m3_candidate_id", "rule", "years",
+                                                "series_hash")}}
             # stage_b_arms is deliberately not stored: which arms enter Stage B is an open decision (issue #3042).
             body = {"schema_version": SCHEMA, "inputs": inputs, "status": verdict["status"],
                     "reasons": verdict["reasons"], "arm_verdicts": verdict["arms"],
@@ -151,7 +191,9 @@ def run_stage_a(sealed, years, admitted, fetch, out_dir, *, production_hash, tab
                     "arms": {arm: {**{k: v for k, v in res.items() if k != "paired_ids"}, "conditional": {
                         **res["conditional"], "rows": res["conditional"]["rows"].rename_axis("event_id").reset_index()}}
                         for arm, res in results.items()},
-                    "crps_exclusions": exclusions, "unlabelled_in_period": per_year}
+                    "crps_exclusions": exclusions, "unlabelled_in_period": out["per_year"],
+                    "reported": out["reported"], "arm_s": out["arm_s"], "headline_flags": out["headline_flags"],
+                    "crps_rows": out["crps_rows"]}
             document = _publish(Path(out_dir), body)
             decision("quantile stage A", f"final status={document['status']} reasons={document['reasons']}")
             return document

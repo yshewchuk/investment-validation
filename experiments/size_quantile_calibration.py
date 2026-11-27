@@ -1,6 +1,6 @@
 """EXP-190 Q3b: calibration and tails for Q and Q_raw (design sections 4, 5, 7), and CRPS for Q, Q_raw and B0 (Q6b).
 Pure over caller-loaded frames of admitted events: no file I/O. `month_tables` is the one tail rule: calibrate uses it
-for Q and Q_raw, score_crps for B0. A thin tail (under MIN_TAIL donors) drops only the CRPS. The Q6 report must print
+for Q and Q_raw, score_crps for every other frame (B0, and S, B1-B3, also scored). A thin tail drops only CRPS. Print
 `floor_report`; the 0.5 floor is provisional."""
 from collections import Counter
 from datetime import date
@@ -10,7 +10,7 @@ import pandas as pd
 
 from engine.v2.ops.errors import fail
 from engine.v2.research.progress import Progress, decision, stage
-from experiments.label_availability import available_before
+from experiments.label_availability import available_before, printed_before
 from experiments.size_quantile_metrics import Rules, crps_quantile
 
 LEVELS = Rules().levels
@@ -40,8 +40,9 @@ def predictions_from_receipts(receipts):
 
 
 def _inputs(predictions, events):
-    if not set(QCOLS) <= set(predictions.columns) or not {"event_date", "y", "label_end"} <= set(events.columns):
-        raise ValueError("predictions need the seven QCOLS; events need event_date, y and label_end")
+    need = {"event_date", "y", "label_end", "available"}
+    if not set(QCOLS) <= set(predictions.columns) or not need <= set(events.columns):
+        raise ValueError("predictions need the seven QCOLS; events need event_date, y, label_end and available")
     if predictions.index.has_duplicates or events.index.has_duplicates:
         raise ValueError("predictions and events must have unique indexes")
     if not set(predictions.index) <= set(events.index):
@@ -51,27 +52,31 @@ def _inputs(predictions, events):
     y = np.asarray(ev["y"], dtype=float)
     if dates.isna().any() or np.isinf(y).any() or (y < 0).any():
         raise ValueError("event_date must be set; y must be finite or NaN and non-negative")
-    label_end = ev["label_end"].to_numpy(dtype=object)
+    label_end, available = (ev[c].to_numpy(dtype=object) for c in ("label_end", "available"))
     try:
-        for text in label_end[np.isfinite(y)]:
-            date.fromisoformat(text)
+        for end, day in zip(label_end[np.isfinite(y)], available[np.isfinite(y)]):
+            date.fromisoformat(end)
+            date.fromisoformat(day)
     except (TypeError, ValueError):
-        raise ValueError("a finite y needs a label_end that is an ISO date") from None
-    return dates, y, label_end, np.sort(predictions[QCOLS].to_numpy(dtype=float), axis=1)
+        raise ValueError("a finite y needs a label_end and available that are ISO dates") from None
+    return dates, y, label_end, available, np.sort(predictions[QCOLS].to_numpy(dtype=float), axis=1)
 
 
-def donor_pool(dates, y, label_end, m):
-    """Positions dated in [m - 12 months, m) with finite y and a label available before month m."""
+def donor_pool(dates, y, label_end, available, m):
+    """Positions dated in [m - 12 months, m) with finite y, a label available before month m (label_end + 1 day) and
+    a native availability printed before m. Both are read only for those rows (finite y, in the window)."""
+    cutoff = f"{m:%Y-%m-%d}"
     window = (dates >= m - pd.DateOffset(months=WINDOW_MONTHS)) & (dates < m) & np.isfinite(y)
-    return np.array([i for i in np.flatnonzero(window) if available_before(label_end[i], f"{m:%Y-%m-%d}")], dtype=int)
+    return np.array([i for i in np.flatnonzero(window)
+                     if available_before(label_end[i], cutoff) and printed_before(available[i], cutoff)], dtype=int)
 
 
-def month_tables(quantiles, y, dates, label_end, months):
+def month_tables(quantiles, y, dates, label_end, available, months):
     """(pools, donors, thin) keyed (arm, month) for {arm: quantiles}: the one tail rule. Each month's pool rows are the
     donors with finite quantiles; a tail with under MIN_TAIL donors makes the month thin: no entry, counted in thin."""
     pools, donors, thin = {}, {}, Counter()
     for m in months.unique().sort_values():
-        pool = donor_pool(dates, y, label_end, m)
+        pool = donor_pool(dates, y, label_end, available, m)
         for arm, q in quantiles.items():
             if not np.isfinite(q[months == m]).all(axis=1).any():
                 continue
@@ -110,7 +115,7 @@ def calibrate(predictions, events):
     """Return (arms, pools, floor_report) for the Q and Q_raw arms."""
     try:
         with stage("quantile calibration"):
-            dates, y, label_end, qhat = _inputs(predictions, events)
+            dates, y, label_end, available, qhat = _inputs(predictions, events)
             n, width = len(predictions), len(QCOLS)
             finite = np.isfinite(qhat).all(axis=1)
             months, years = dates.to_period("M").to_timestamp(), dates.year.to_numpy()
@@ -121,7 +126,7 @@ def calibrate(predictions, events):
             for m in month_list:
                 mine = np.flatnonzero(months == m)
                 ok = mine[finite[mine]]
-                pool = donor_pool(dates, y, label_end, m)
+                pool = donor_pool(dates, y, label_end, available, m)
                 donor_q["Q_raw"][ok] = np.maximum(qhat[ok], 0.0)
                 calib = pool[finite[pool]]
                 if calib.size < MIN_CALIBRATION:
@@ -133,7 +138,7 @@ def calibrate(predictions, events):
                     donor_q["Q"][ok[good]] = fitted[good]
                     reason["Q"][ok[~good]] = "non_finite_output"
                 progress.tick()
-            pools, donors, thin = month_tables(donor_q, y, dates, label_end, months)
+            pools, donors, thin = month_tables(donor_q, y, dates, label_end, available, months)
             arms, frames = {}, []
             for arm in ARMS:
                 counts = Counter(r or "scored" for r in reason[arm])
@@ -170,10 +175,12 @@ def score_crps(frames, events, calibrated):
     calibrate's pools (`calibrated`); any other frame builds its own pools from its quantiles with month_tables."""
     pools, out, exclusions, floors = dict(calibrated), {}, [], []
     for name, frame in frames.items():
-        dates, y, label_end, _ = _inputs(frame, events)
+        if not set(QCOLS + ["reason"]) <= set(frame.columns):
+            raise ValueError(f"{name} frame needs the seven QCOLS and reason")
+        dates, y, label_end, available, _ = _inputs(frame, events)
         months, q = dates.to_period("M").to_timestamp(), frame[QCOLS].to_numpy(float)
         if name not in ARMS:
-            own, donors, _ = month_tables({name: q}, y, dates, label_end, months)
+            own, donors, _ = month_tables({name: q}, y, dates, label_end, available, months)
             pools.update(own)
             floors += _floor_rows(name, q, q, donors, dates.year.to_numpy())
         finite = np.isfinite(q).all(axis=1)
