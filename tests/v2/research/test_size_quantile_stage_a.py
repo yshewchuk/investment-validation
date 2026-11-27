@@ -212,11 +212,11 @@ def _planned_row(digest):
 
 def _guard(case, *, settled=True, min_donors=30):
     """A tmp copy of the real spec (settled unless told otherwise, tail minimum set to min_donors), its PLANNED ledger
-    row and one EXP-190 directory."""
+    row and one EXP-190 directory. stage_b.status is set explicitly either way."""
     spec = yaml.safe_load(REAL_SPEC.read_text(encoding="utf-8"))
     spec["distribution_tails"]["min_donors"] = min_donors
+    spec["stage_b"] = {**spec["stage_b"], "status": "settled" if settled else "pending_decisions"}
     if settled:
-        spec["stage_b"] = {**spec["stage_b"], "status": "settled"}
         spec["preregistered_at"] = STAMP
     spec_path = case / "spec.yaml"
     spec_path.write_text(yaml.safe_dump(spec, sort_keys=False), encoding="utf-8")
@@ -465,6 +465,46 @@ def test_calibrate_gets_each_labels_native_availability_not_the_label_end_proxy(
         assert events.at[event_id, "available"] == want
     proxy = (pd.Timestamp(events.at[late, "label_end"]) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
     assert events.at[late, "available"] == "2022-06-20" and proxy == "2022-06-07"
+
+
+def test_level_width_history_carries_the_later_native_availability(monkeypatch, tmp_path):
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    _install(monkeypatch, world)
+    delayed = next(e["id"] for e in world["events"] if e["date"] == "2024-03-05")
+    read = stage_a.training_labels  # the fake reader; only stage A's own label read is delayed
+
+    def delayed_native(sealed, event_ids, labels_before):
+        frame = read(sealed, event_ids, labels_before).copy()
+        frame.loc[frame["event_id"] == delayed, "target_available_on"] = "2024-09-01"
+        return frame
+    monkeypatch.setattr(stage_a, "training_labels", delayed_native)
+    judged, real_judge = {}, stage_a.judge_arm
+
+    def recording(*args, **kwargs):
+        judged[args[0]] = args[4].copy()
+        return real_judge(*args, **kwargs)
+    monkeypatch.setattr(stage_a, "judge_arm", recording)
+    _run(world, out, guard)
+
+    # label_end + 1 is 2024-03-07 for the delayed event; its native date 2024-09-01 is later, so it wins. Others unchanged.
+    window = [e for e in world["events"] if "2022-01-01" <= e["date"] <= "2025-12-31"]
+    want = [pd.Timestamp(e["date"]) + pd.Timedelta(days=2) for e in window if e["id"] != delayed]
+    want.append(pd.Timestamp("2024-09-01"))
+    assert sorted(pd.to_datetime(judged["Q_raw"]["label_available"])) == sorted(want)
+
+
+@pytest.mark.parametrize("bad_date", ["2023-08-05", "2025-06-05"])  # an in-period event, and a 2025 evaluation event
+def test_an_invalid_lead1_decision_date_refuses_before_any_fit_or_label_read(monkeypatch, tmp_path, bad_date):
+    world, guard, out = _world(), _guard(tmp_path), tmp_path / "out"
+    target = next(t for t in world["sealed"]["context"]["target_events"] if t["event_date"] == bad_date)
+    target["forecasts"][0]["source_session_ceiling"] = bad_date  # lead-1 decision date not before the event
+    calls = _spy(monkeypatch, world)
+    fetched = []
+    with pytest.raises(OpsError) as exc:
+        _run(world, out, guard, calls=fetched)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "decision_date_invalid")
+    assert calls == [] and not _label_fetches(fetched)  # no Q fit, no arm S fit, no training_labels read
+    assert not out.exists()  # no report, no *.tmp, no fit receipt
 
 
 def test_replay_is_identical_and_a_changed_binding_refuses_without_touching_the_report(monkeypatch, tmp_path):

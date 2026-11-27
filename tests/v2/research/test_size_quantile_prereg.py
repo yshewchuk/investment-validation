@@ -17,10 +17,11 @@ STAMP = "2026-11-25T12:00:00+00:00"
 
 
 def _write_spec(case, *, settled=True, drop_stage_b=False, **changes):
-    """Re-dump the real EXP-190 spec.yaml into ``case``: settled stage_b and a stamp unless told otherwise."""
+    """Re-dump the real EXP-190 spec.yaml into ``case``: stage_b status set explicitly (settled, or pending_decisions
+    when settled=False) and a stamp unless told otherwise."""
     spec = yaml.safe_load(read_bounded_state(REAL_SPEC, 1 << 20).decode("utf-8"))
+    spec["stage_b"] = {**spec["stage_b"], "status": "settled" if settled else "pending_decisions"}
     if settled:
-        spec["stage_b"] = {**spec["stage_b"], "status": "settled"}
         spec["preregistered_at"] = STAMP
     if drop_stage_b:
         spec.pop("stage_b")
@@ -192,9 +193,30 @@ def test_non_dict_stage_b_refuses_even_with_a_matching_planned_row(tmp_path):
     assert refusal(lambda: _check(tmp_path, spec, ledger, _own_experiments(tmp_path))) == "stage_b_pending"
 
 
-def test_real_spec_with_a_matching_ledger_row_refuses_stage_b_pending(tmp_path):
+def test_real_spec_unstamped_with_a_matching_ledger_row_refuses_preregistered_at_missing(tmp_path):
+    # stage_b is settled in the real spec now, so the guard gets past the stage_b gate and the ledger; the null stamp refuses.
     ledger = _write_ledger(tmp_path / "LEDGER.csv", [_planned_row(_digest(REAL_SPEC))])
-    assert refusal(lambda: _check(tmp_path, REAL_SPEC, ledger, _own_experiments(tmp_path))) == "stage_b_pending"
+    assert refusal(lambda: _check(tmp_path, REAL_SPEC, ledger, _own_experiments(tmp_path))) == \
+        "preregistered_at_missing"
+
+
+def test_real_spec_stamped_with_a_planned_row_is_accepted_without_overriding_stage_b(tmp_path):
+    spec = yaml.safe_load(read_bounded_state(REAL_SPEC, 1 << 20).decode("utf-8"))
+    spec["preregistered_at"] = STAMP  # the only change: stage_b is the real spec's own
+    path = tmp_path / "spec.yaml"
+    path.write_text(yaml.safe_dump(spec, sort_keys=False))
+    ledger = _write_ledger(tmp_path / "LEDGER.csv", [_planned_row(_digest(path))])
+    receipt = _check(tmp_path, path, ledger, _own_experiments(tmp_path))
+    assert receipt["spec_hash_checked"] is True
+    assert receipt["spec_hash"] == _digest(path)
+
+
+@pytest.mark.parametrize("ledger_text", [None, ",".join(lib.LEDGER_COLUMNS) + "\n"])  # missing file, or header only
+def test_unstamped_real_spec_with_an_empty_ledger_refuses_planned_row_missing(tmp_path, ledger_text):
+    ledger = tmp_path / "LEDGER.csv"
+    if ledger_text is not None:
+        ledger.write_text(ledger_text, encoding="utf-8")
+    assert refusal(lambda: _check(tmp_path, REAL_SPEC, ledger, _own_experiments(tmp_path))) == "planned_row_missing"
 
 
 # --------------------------------------------------------------------------
@@ -256,7 +278,7 @@ def test_check_id_free_refuses_a_fifo_spec_without_hanging(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def test_real_spec_has_the_design_levels_grid_and_pending_decisions():
+def test_real_spec_has_the_design_levels_grid_and_settled_stage_b():
     spec, digest = load_spec()
     assert spec["id"] == "EXP-190"
     assert digest == _digest(REAL_SPEC)
@@ -269,7 +291,7 @@ def test_real_spec_has_the_design_levels_grid_and_pending_decisions():
     product = {(a, b) for a in spec["grid"]["axes"]["max_leaf_nodes"]
                for b in spec["grid"]["axes"]["min_samples_leaf"]}
     assert len(product) == 4
-    assert spec["stage_b"]["status"] == "pending_decisions"
+    assert spec["stage_b"]["status"] == "settled"
     assert spec["stage_b"]["open_decisions"] == {}
     assert spec["preregistered_at"] is None
 
@@ -389,6 +411,9 @@ def test_real_spec_records_the_2026_11_27_decisions():
     assert "return to the user" in spec["walk_forward"]["y0_late"]
     assert "Both Q and Q_raw then enter Stage B" in stage_a["verdict"]
     assert "Disclosed, not fixed" in stage_a["anchor_disclosure"]
+    assert "Annual folds are cut at the earlier of 1 January" in stage_a["anchor_disclosure"]
+    assert spec["code_alignment"].startswith("met")
+    assert "the guard does not enforce this stop" in spec["walk_forward"]["y0_late"]
     assert "informational only" in stage_b["arm_roles"]
     assert "never count toward Stage B's success verdict or any adoption" in stage_b["arm_roles"]
     assert "EQ runs only for a passing source" in stage_b["arm_roles"]
