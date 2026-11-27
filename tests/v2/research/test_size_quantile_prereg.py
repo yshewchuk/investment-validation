@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import os
 from pathlib import Path
 
@@ -255,7 +256,7 @@ def test_check_id_free_refuses_a_fifo_spec_without_hanging(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def test_real_spec_has_the_design_levels_grid_and_pending_stage_b():
+def test_real_spec_has_the_design_levels_grid_and_pending_decisions():
     spec, digest = load_spec()
     assert spec["id"] == "EXP-190"
     assert digest == _digest(REAL_SPEC)
@@ -268,5 +269,78 @@ def test_real_spec_has_the_design_levels_grid_and_pending_stage_b():
     product = {(a, b) for a in spec["grid"]["axes"]["max_leaf_nodes"]
                for b in spec["grid"]["axes"]["min_samples_leaf"]}
     assert len(product) == 4
-    assert spec["stage_b"]["status"] == "pending_part_2"
+    assert spec["stage_b"]["status"] == "pending_decisions"
+    assert set(spec["stage_b"]["open_decisions"]) == {"tau_window_aggregation", "buildability_fallback"}
     assert spec["preregistered_at"] is None
+
+
+# --------------------------------------------------------------------------
+# stage_b and Stage A terms of the real spec (literals, not production modules)
+# --------------------------------------------------------------------------
+
+FVF_ID = "735f3e6cb2fa65c303599152cfa6fead2d7950e9bcb367117d50ed25faffc0b7"
+MANIFEST_SHA = "17ecc75e84d2e261900eccc3ad79a1cbd065af2d58eabdfebfd49dd75001f75d"
+ARMS = {"P0", "E", "W", "LW", "D", "WD", "LWD", "TF", "EQ", "N1", "N2", "ST", "ST0"}
+TAUS = ["p10", "p25", "p40", "p50", "p60", "p75"]
+CONTROLS = {
+    "W": ["P0", "E", "LW"], "D": ["P0", "E"], "EQ": ["P0", "E"], "TF": ["P0", "E"],
+    "WD": ["P0", "E", "LWD"], "N1": ["P0", "E", "N2"], "ST": ["ST0"],
+}
+BOTH = ["centre_peaked", "twin"]
+
+
+def test_fill_model_is_pinned_to_fvf_literals():
+    fill = load_spec()[0]["stage_b"]["fill_model"]
+    assert fill["id"] == "F"
+    assert fill["fvf_id"] == FVF_ID
+    assert fill["carry_dividend_mode"] == "f7_orats_borrow_discrete_dividend"
+    assert fill["reingest"]["manifest_sha256"] == MANIFEST_SHA
+
+
+def test_arms_taus_and_universe_literals():
+    spec = load_spec()[0]
+    assert set(spec["stage_b"]["arms"]) == ARMS
+    assert spec["stage_b"]["tau"]["set"] == TAUS
+    assert spec["stage_b"]["universe"]["centre_peaked"] == ["CND-PS", "BFLY-P", "BFLY-P5", "RAMP7", "CTR5"]
+    assert spec["stage_b"]["universe"]["twin"] == ["TWIN-P", "TWIN-P5"]
+
+
+def test_success_rules_partition_the_arms():
+    success = load_spec()[0]["stage_b"]["success"]
+    assert success["controls"] == CONTROLS
+    assert set(success["judged"]) == set(success["controls"])
+    never = set(success["never_candidates"])
+    assert never.isdisjoint(success["judged"])
+    assert set(success["judged"]) | never == ARMS
+
+
+def test_selection_and_account_settings_are_literal():
+    stage_b = load_spec()[0]["stage_b"]
+    assert stage_b["selection_models"]["configuration"] == {
+        "loss": "squared_error", "max_leaf_nodes": 7, "min_samples_leaf": 300, "learning_rate": 0.03,
+        "l2_regularization": 10.0, "max_iter": 300, "early_stopping": False, "random_state": 0, "tuning": "none",
+    }
+    assert stage_b["accounts"]["policy"] == {
+        "start_equity": 200000, "cap": 0.66, "target_share": 0.25, "expensive_first": True,
+    }
+
+
+def test_spec_hash_covers_stage_b_fill_and_controls():
+    spec = load_spec()[0]
+    base = lib.spec_hash(spec)
+    changed = copy.deepcopy(spec)
+    changed["stage_b"]["fill_model"]["fvf_id"] = "0" * 64
+    assert lib.spec_hash(changed) != base
+    changed = copy.deepcopy(spec)
+    changed["stage_b"]["success"]["controls"]["W"] = ["P0", "E"]
+    assert lib.spec_hash(changed) != base
+
+
+def test_stage_a_terms_are_not_changed_by_stage_b():
+    spec = load_spec()[0]
+    assert set(spec["stage_a"]["settlements"]) == {"status"} | {f"s{i}" for i in range(1, 10)}
+    assert "publishes no receipt for that year" in spec["failure_semantics"]["fit_failed"]
+    assert "Q_raw" in spec["failure_semantics"]["fit_failed"]
+    assert "50-ticker smoke" in spec["real_data_order"]
+    assert "admitted event keys only" in spec["real_data_order"]
+    assert spec["real_data_order"].index("PLANNED row") < spec["real_data_order"].index("50-ticker smoke")
