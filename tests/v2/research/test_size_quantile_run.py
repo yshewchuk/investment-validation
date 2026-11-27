@@ -47,21 +47,21 @@ def _paths(guard):
             "run_log_path": guard["run_log_path"], "experiments_dir": guard["experiments_dir"]}
 
 
-def _inputs(world, out):
-    """What the real load_inputs returns for this world; the labels hash is written here from the bytes it binds."""
-    labels = world["labels"]
-    b0 = content_hash(sorted([e, float(labels.at[e, "abs_move"]), float(labels.at[e, "crush_pct_iv30"])]
-                             for e in labels.index))
-    return {"sealed": world["sealed"], "admitted": world["admitted"], "fetch": base._fake_fetch(world, out, []),
+def _inputs(world, out, calls=None, avail=None):
+    """What the real load_inputs returns for this world; fetch appends each call to calls (when given) and takes
+    label availability overrides from avail."""
+    return {"sealed": world["sealed"], "admitted": world["admitted"],
+            "fetch": base._fake_fetch(world, out, [] if calls is None else calls, avail=avail),
             "production": {"binding": base.PRODUCTION_BINDING, "table_hash": base.TABLE_HASH},
-            "table_hash": base.TABLE_HASH, "b0_labels_hash": b0}
+            "table_hash": base.TABLE_HASH}
 
 
-def _env(monkeypatch, world, out, *, y0=None, regress=None):
+def _env(monkeypatch, world, out, *, y0=None, regress=None, calls=None, avail=None):
     base._install(monkeypatch, world, regress=regress)
     monkeypatch.setattr(run_mod.sources, "_config", lambda _path: CFG)
     monkeypatch.setattr(run_mod.sources, "_open", lambda _cfg: (_Conn(), object()))
-    monkeypatch.setattr(run_mod, "load_inputs", lambda _cfg, _conn, _store: _inputs(world, out))
+    monkeypatch.setattr(run_mod, "load_inputs",
+                        lambda _cfg, _conn, _store: _inputs(world, out, calls=calls, avail=avail))
     monkeypatch.setattr(run_mod, "y0_report", y0 or (lambda _sealed, _spec: dict(YEAR_Y0)))
 
 
@@ -84,33 +84,36 @@ def _patch_load(monkeypatch, calls, *, boom=None, error=None, snapshot_id="SNAP"
              (run_mod, "from_document", None, "REF"), (run_mod, "load_sealed_panel", "sealed", sealed),
              (run_mod.sources, "_bound_snapshot", "bound", None), (run_mod.sources, "_snapshot", "snapshot", "CRUSH"),
              (run_mod, "admit_events", "admit", "ADMIT"), (size_pnl_tables, "tables", "tables", table),
-             (run_mod, "read_production", "production", {"binding": "PB", "table_hash": base.TABLE_HASH}),
-             (run_mod, "read_labels", "labels", "LABELS"), (run_mod, "hash_labels", None, "B0")]
+             (run_mod, "read_production", "production", {"binding": "PB", "table_hash": base.TABLE_HASH})]
     for module, attr, name, value in steps:
         monkeypatch.setattr(module, attr, _recorder(calls, name, value, boom, error))
 
 
-ORDER = ["sealed", "bound", "snapshot", "admit", "tables", "production", "labels"]
+ORDER = ["sealed", "bound", "snapshot", "admit", "tables", "production"]
 
 
 def test_real_load_inputs_runs_in_spec_order(monkeypatch):
-    calls = []
-    _patch_load(monkeypatch, calls)
+    calls, reads = [], []
+
+    def fetch(columns, ids):
+        reads.append((columns, ids))
+        return pd.DataFrame()
+    _patch_load(monkeypatch, calls, fetch=fetch)
     out = run_mod.load_inputs(CFG, _Conn(), object())
     assert calls == ORDER
-    assert out["b0_labels_hash"] == "B0"
+    assert reads == []  # loading reads no table rows itself here, so no label is read
+    assert set(out) == {"sealed", "admitted", "fetch", "production", "table_hash"}
     assert "b3" not in out
 
 
 @pytest.mark.parametrize("boom, reached", [
     ("load_sealed_panel", ["sealed"]),
     ("read_production", ORDER[:6]),
-    ("read_labels", ORDER[:7]),
 ])
 def test_a_refusal_at_each_gate_propagates_unchanged_and_stops_the_order(monkeypatch, boom, reached):
     calls, error = [], fail("EXPERIMENT_IDENTITY_CONFLICT", f"{boom} refused", details={"reason": boom})
-    _patch_load(monkeypatch, calls, boom={"load_sealed_panel": "sealed", "read_production": "production",
-                                          "read_labels": "labels"}[boom], error=error)
+    _patch_load(monkeypatch, calls, boom={"load_sealed_panel": "sealed", "read_production": "production"}[boom],
+                error=error)
     with pytest.raises(OpsError) as exc:
         run_mod.load_inputs(CFG, _Conn(), object())
     assert exc.value is error
@@ -153,12 +156,12 @@ def test_unsettled_spec_refuses_before_the_config_is_read(monkeypatch, tmp_path,
 
 def test_full_run_writes_run_inputs_before_the_first_fit(monkeypatch, tmp_path):
     world, guard, out = _world(), base._guard(tmp_path), tmp_path / "out"
-    seen, real = {}, base._fake_fit()
+    seen, real, calls = {}, base._fake_fit(), []
 
     def regress(recipe, train_x, y, eval_x, *, columns):
         seen.setdefault("run_inputs_exists", (out / "run_inputs.json").exists())
         return real(recipe, train_x, y, eval_x, columns=columns)
-    _env(monkeypatch, world, out, regress=regress)
+    _env(monkeypatch, world, out, regress=regress, calls=calls)
     result = run_mod.run("cfg.json", out, **_paths(guard))
     run_inputs = json.loads((out / "run_inputs.json").read_text(encoding="utf-8"))
     report = json.loads((out / base.REPORT).read_text(encoding="utf-8"))
@@ -168,15 +171,30 @@ def test_full_run_writes_run_inputs_before_the_first_fit(monkeypatch, tmp_path):
     assert run_inputs["schema_version"] == "size_quantile_run_inputs.v1" and run_inputs["mode"] == "full"
     assert run_inputs["years"] == ALL_YEARS and run_inputs["smoke_tickers"] is None
     assert run_inputs["y0"] == YEAR_Y0
-    assert "b3" not in run_inputs
+    assert "b3" not in run_inputs and "b0_labels_hash" not in run_inputs
     assert run_inputs["content_hash"] == content_hash({k: v for k, v in run_inputs.items() if k != "content_hash"})
     assert report["inputs"]["run_inputs_hash"] == run_inputs["content_hash"]
     assert "y0_check" in report["not_included"]
     labels = world["labels"]
     b0 = content_hash(sorted([e, float(labels.at[e, "abs_move"]), float(labels.at[e, "crush_pct_iv30"])]
                              for e in labels.index))
-    assert run_inputs["b0_labels_hash"] == b0 == report["inputs"]["b0_labels_hash"]
+    assert report["inputs"]["b0_labels_hash"] == b0
+    label_calls = base._label_fetches(calls)
+    assert label_calls
+    assert all(c["fits"] for c in label_calls)  # every label read happens after every fit_<year>.json exists
     assert sorted(p.name for p in out.iterdir()) == ["fits", "run_inputs.json", base.REPORT]
+
+
+def test_a_bad_b0_label_refuses_only_after_the_fits_and_publishes_no_report(monkeypatch, tmp_path):
+    world, guard, out = _world(), base._guard(tmp_path), tmp_path / "out"
+    event = world["labels"].index[0]
+    _env(monkeypatch, world, out, avail={event: world["dates"][event]})
+    with pytest.raises(OpsError) as exc:
+        run_mod.run("cfg.json", out, **_paths(guard))
+    assert base._refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "label_availability_missing")
+    assert (out / "run_inputs.json").exists()
+    assert all((out / "fits" / f"fit_{year}.json").exists() for year in ALL_YEARS)
+    assert not (out / base.REPORT).exists()
 
 
 def test_y0_refusal_starts_no_fit_and_writes_nothing(monkeypatch, tmp_path):
@@ -203,10 +221,12 @@ def test_smoke_selects_the_three_smallest_hash_tickers_and_writes_no_stage_a_rep
 
     def no_stage_a(*_args, **_kwargs):
         raise AssertionError("smoke must not run stage A")
-    _env(monkeypatch, world, out)
+    calls = []
+    _env(monkeypatch, world, out, calls=calls)
     monkeypatch.setattr(run_mod, "run_stage_a", no_stage_a)
     ledger_before = guard["ledger_path"].read_bytes()
     run_mod.run("cfg.json", out, 3, **_paths(guard))
+    assert base._label_fetches(calls) == []
     run_inputs = json.loads((out / "run_inputs.json").read_text(encoding="utf-8"))
     smoke = json.loads((out / "smoke_record.json").read_text(encoding="utf-8"))
     assert run_inputs["mode"] == "smoke" and run_inputs["smoke_tickers"] == expected

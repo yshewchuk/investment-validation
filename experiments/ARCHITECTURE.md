@@ -986,7 +986,7 @@ EXP-190 (`guides/size_quantile_move_design.md`): `size_quantile_prereg` never wr
 `size_quantile_arm_s.fit_arm_s` write-once `arm_s_fit_<year>.json`: `raw_receipt_mismatch`, walk refusals, `RESOURCE_LIMIT_EXCEEDED`; `fit_failed` year continues; `scale_burn_in`.
 `size_quantile_calibration`: unscored `non_finite_output`/`calibration_burn_in`; `tail_pool_thin`→no-CRPS. `size_quantile_arm_{tables.evaluate_arm,verdict.{judge_arm,stage_a_verdict}}`: `scored_share_below_floor`/`period_no_paired_events`/`bootstrap_too_few_groups`/`no_usable_cell`/`conditional_bootstrap_too_few_groups`/`calibration_failed`(Q-arm-only)/`fit_failed`(also-Stage-A)→`not_testable`. Both: bad input `ValueError`; `RESOURCE_LIMIT_EXCEEDED`.
 `size_quantile_stage_a.run_stage_a`: `stage_a_{years_invalid,report_changed,tails_mismatch}`, `spec_changed`, reader-refusals; atomic v3 report (`unlabelled_in_period`: denominator-only, unpaired; `crps_exclusions`).
-`size_quantile_run` (manual-only entry/smoke; 8 GiB watchdog→`RESOURCE_LIMIT_EXCEEDED`): `smoke_{tickers_invalid,out_dir_not_fresh}`, `input_unreadable`, `run_inputs_changed`; guard, reader refusals precede fits; smoke: no verdict; `--no-ledger` no-op.
+`size_quantile_run` (manual-only entry/smoke; 8 GiB watchdog→`RESOURCE_LIMIT_EXCEEDED`): `smoke_{tickers_invalid,out_dir_not_fresh}`, `input_unreadable`, `run_inputs_changed`; guard, pre-label refusals precede fits; smoke: no verdict; `--no-ledger` no-op.
 
 ## Fill model F
 

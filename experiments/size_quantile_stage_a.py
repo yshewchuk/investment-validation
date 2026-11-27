@@ -38,9 +38,6 @@ def _plain(value):
     return json.loads(json.dumps(value, default=lambda item: item.to_dict("records") if isinstance(item, pd.DataFrame)
                                  else item.tolist()), parse_constant=lambda _: None)
 
-def hash_labels(labels):
-    return content_hash(sorted(_plain(labels[["abs_move", "crush_pct_iv30"]].reset_index().values.tolist())))
-
 def _score(sealed, walk, production, fetch, admitted):
     """Step 5, after an all-ok walk: admitted labels, calibration, CRPS and the verdicts. Returns (verdict, arms, floor
     rows, CRPS exclusions, labels hash, B0 hash, unlabelled outside the periods, unlabelled in period per year)."""
@@ -65,7 +62,8 @@ def _score(sealed, walk, production, fetch, admitted):
     arms, pools, floors = calibrate(predictions, events)
     with stage("stage A CRPS and verdicts"):
         labels = read_labels(fetch, admitted)  # after the walk: predictions are written before outcomes are read
-        b0_hash = hash_labels(labels)
+        b0_hash = content_hash(sorted(_plain(labels[["abs_move", "crush_pct_iv30"]].reset_index()
+                                             .values.tolist())))
         raw = pd.concat([pd.DataFrame(np.asarray(r["raw"]["{}x{}".format(*r["configuration"])], float),
                                       index=r["event_ids"], columns=QCOLS) for r in walk.values()])
         frames = {"Q": arms["Q"], "Q_raw": arms["Q_raw"], "B0": pool_quantiles(production["frame"], labels, events)}

@@ -19,10 +19,10 @@ from engine.v2.ops.experiments import experiment_spec_from_document
 from engine.v2.research.progress import decision, stage
 from experiments import size_pnl_sources as sources, size_pnl_tables
 from experiments.memory_guard import rss_watchdog
-from experiments.size_pnl_readers import admit_events, read_labels, read_production
+from experiments.size_pnl_readers import admit_events, read_production
 from experiments.size_quantile_prereg import SPEC_PATH, load_spec, require_preregistration
 from experiments.size_quantile_sources import load_sealed_panel
-from experiments.size_quantile_stage_a import _publish, hash_labels, run_stage_a
+from experiments.size_quantile_stage_a import _publish, run_stage_a
 from experiments.size_quantile_walk import fit_walk_forward
 from experiments.size_quantile_y0 import y0_report
 
@@ -46,11 +46,11 @@ def load_inputs(cfg, conn, store):
     tables = size_pnl_tables.tables(repo, snap, admitted, crush_snapshot=crush, max_object_bytes=cap,
                                     expected_hash=cfg["production_hash"])
     cached = functools.cache(tables.fetch)
-    def fetch(columns, ids):  # one read per key: the scored labels are the ones bound before the fit
+    def fetch(columns, ids):  # one read per key: the production rows bound in run_inputs.json are the rows Stage A uses
         return cached(tuple(columns), tuple(ids)).copy()
     production = read_production(fetch, admitted, expected_hash=cfg["production_hash"], table_hash=tables.table_hash)
     return {"sealed": sealed, "admitted": admitted, "fetch": fetch, "production": production,
-            "table_hash": tables.table_hash, "b0_labels_hash": hash_labels(read_labels(fetch, admitted))}
+            "table_hash": tables.table_hash}
 
 
 def smoke_subset(sealed, count):
@@ -85,7 +85,7 @@ def _run(sources_config, out_dir, tickers, **paths):
                 "spec_hash": guard["spec_hash"], "preregistered_at": guard["preregistered_at"],
                 "plan_id": sealed["plan"]["plan_id"], "sealed_binding": sealed["binding"], "years": years, "y0": y0,
                 "production_binding": inputs["production"]["binding"], "production_table_hash": inputs["table_hash"],
-                "b0_labels_hash": inputs["b0_labels_hash"], "smoke_tickers": chosen}
+                "smoke_tickers": chosen}
         record = _publish(out_dir, body, "run_inputs.json", "run_inputs_changed")
         if tickers is None:
             doc = run_stage_a(sealed, years, inputs["admitted"], inputs["fetch"], out_dir,
