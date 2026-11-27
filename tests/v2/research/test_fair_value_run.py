@@ -170,10 +170,10 @@ def test_fvf_id_refuses_source_file_over_read_cap(tmp_path):
 
 def test_source_set_matches_fair_value_modules():
     names = {p.name for p in SRC.glob("fair_value_*.py")}
-    # The fit, constants and solve modules compute no current-F mark, so they are deliberately not in fvf_id; listed here only to match the module set.
-    new = ("fair_value_fit", "fair_value_constants", "fair_value_solve")
+    # The fit, constants, solve and apply modules compute no current-F mark, so they are deliberately not in fvf_id; listed here only to match the module set.
+    new = ("fair_value_fit", "fair_value_constants", "fair_value_solve", "fair_value_apply")
     assert set(run.SOURCE_FILES) | {"fair_value_run.py", *(f"{m}.py" for m in new)} == names
-    assert not {"fair_value_fit.py", "fair_value_constants.py", "fair_value_solve.py"} & set(run.SOURCE_FILES)
+    assert not {"fair_value_fit.py", "fair_value_constants.py", "fair_value_solve.py", "fair_value_apply.py"} & set(run.SOURCE_FILES)
     for name in ["fair_value_run.py", *run.SOURCE_FILES]:
         text = (SRC / name).read_text(encoding="utf-8")
         assert not any(m in text for m in new), name
