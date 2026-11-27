@@ -109,14 +109,14 @@ def _publish(out_dir, body, name=REPORT, reason="stage_a_report_changed"):
     return json.loads(data)
 
 def run_stage_a(sealed, years, admitted, fetch, out_dir, *, production_hash, table_hash, spec_path=SPEC_PATH,
-                ledger_path=None, run_log_path=None, experiments_dir=None, run_inputs_hash=None):
+                ledger_path=None, run_log_path=None, experiments_dir=None, run_inputs_hash=None, bound_spec_hash=None):
     """Run Stage A and publish its report; returns the parsed document (schema in the module docstring)."""
     try:
         with stage("quantile stage A"):
             guard = require_preregistration(spec_path=spec_path, ledger_path=ledger_path,
                                             run_log_path=run_log_path, experiments_dir=experiments_dir)
             spec, digest = load_spec(spec_path)
-            if digest != guard["spec_hash"]:
+            if digest != guard["spec_hash"] or bound_spec_hash not in (None, digest):
                 raise _refuse("spec_changed", "the spec changed after its pre-registration check")
             if spec["distribution_tails"]["min_donors"] != MIN_TAIL:
                 raise _refuse("stage_a_tails_mismatch", f"spec distribution_tails.min_donors is "

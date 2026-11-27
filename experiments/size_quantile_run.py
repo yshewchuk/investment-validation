@@ -93,7 +93,7 @@ def _run(sources_config, out_dir, tickers, **paths):
         if tickers is None:
             doc = run_stage_a(sealed, years, inputs["admitted"], inputs["fetch"], out_dir,
                               production_hash=cfg["production_hash"], table_hash=inputs["table_hash"],
-                              run_inputs_hash=record["content_hash"], **paths)
+                              run_inputs_hash=record["content_hash"], bound_spec_hash=guard["spec_hash"], **paths)
             return {"mode": "full", "status": doc["status"], "reasons": doc["reasons"],
                     "content_hash": doc["content_hash"], "report": str(out_dir / "stage_a_report.json")}
         started = time.monotonic()

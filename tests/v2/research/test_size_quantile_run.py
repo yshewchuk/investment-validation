@@ -9,9 +9,11 @@ from types import SimpleNamespace
 
 import pandas as pd
 import pytest
+import yaml
 
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import OpsError, fail
+from experiments import lib
 from experiments import size_pnl_tables
 from experiments import size_quantile_run as run_mod
 from tests.v2.research import test_size_quantile_stage_a as base
@@ -174,6 +176,11 @@ def test_full_run_writes_run_inputs_before_the_first_fit(monkeypatch, tmp_path):
     assert "b3" not in run_inputs and "b0_labels_hash" not in run_inputs
     assert run_inputs["content_hash"] == content_hash({k: v for k, v in run_inputs.items() if k != "content_hash"})
     assert report["inputs"]["run_inputs_hash"] == run_inputs["content_hash"]
+    assert run_inputs["spec_hash"] == lib.spec_hash(yaml.safe_load(guard["spec_path"].read_text(encoding="utf-8")))
+    assert run_inputs["plan_id"] == world["sealed"]["plan"]["plan_id"]
+    assert run_inputs["production_binding"] == base.PRODUCTION_BINDING
+    assert run_inputs["production_table_hash"] == base.TABLE_HASH
+    assert run_inputs["sealed_binding"] == base.BINDING
     assert "y0_check" in report["not_included"]
     labels = world["labels"]
     b0 = content_hash(sorted([e, float(labels.at[e, "abs_move"]), float(labels.at[e, "crush_pct_iv30"])]
@@ -234,6 +241,15 @@ def test_smoke_selects_the_three_smallest_hash_tickers_and_writes_no_stage_a_rep
     assert run_inputs["sealed_binding"] != base.BINDING
     assert smoke["schema_version"] == "size_quantile_smoke.v1" and smoke["tickers"] == 3
     assert smoke["run_inputs_hash"] == run_inputs["content_hash"] and smoke["peak_rss_bytes"] > 0
+    assert set(smoke) == {"schema_version", "run_inputs_hash", "events", "tickers", "fit_seconds",
+                          "peak_rss_bytes", "fit_status", "fit_receipt_hashes", "content_hash"}
+    assert smoke["events"] == sum(e["ticker"] in expected for e in world["events"])
+    assert smoke["fit_status"]
+    for year, status in smoke["fit_status"].items():
+        receipt = json.loads((out / "fits" / f"fit_{year}.json").read_text(encoding="utf-8"))
+        assert smoke["fit_status"][year] == receipt["status"] == status
+        assert smoke["fit_receipt_hashes"][year] == receipt["content_hash"]
+    assert run_inputs["spec_hash"] == lib.spec_hash(yaml.safe_load(guard["spec_path"].read_text(encoding="utf-8")))
     assert not (out / base.REPORT).exists() and (out / "fits").is_dir()
     kept = {e["id"] for e in world["events"] if e["ticker"] in expected}
     assert (out / "fits" / "fit_2022.json").exists()
@@ -356,3 +372,50 @@ def test_main_accepts_no_ledger_as_a_noop_and_passes_the_same_args(monkeypatch):
     monkeypatch.setattr(run_mod, "run", lambda *args: recorded.append(args) or {"mode": "smoke"})
     assert run_mod.main(["--sources-config", "c.json", "--out-dir", "o", "--tickers", "3", "--no-ledger"]) == 0
     assert recorded == [("c.json", "o", 3)]
+
+
+def test_an_altered_run_inputs_identity_refuses_on_rerun_and_is_left_untouched(monkeypatch, tmp_path):
+    world, guard, out = _world(), base._guard(tmp_path), tmp_path / "out"
+    _env(monkeypatch, world, out)
+    run_mod.run("cfg.json", out, **_paths(guard))
+    path = out / "run_inputs.json"
+    planted = json.loads(path.read_text(encoding="utf-8"))
+    planted["spec_hash"] = "sha256:planted"
+    path.write_text(json.dumps(planted), encoding="utf-8")
+    before = path.read_bytes()
+    with pytest.raises(OpsError) as exc:
+        run_mod.run("cfg.json", out, **_paths(guard))
+    assert base._refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "run_inputs_changed")
+    assert path.read_bytes() == before
+
+
+def test_an_altered_smoke_record_is_never_overwritten_by_a_rerun(monkeypatch, tmp_path):
+    world, guard, out = _world(), base._guard(tmp_path), tmp_path / "out"
+    _env(monkeypatch, world, out)
+    run_mod.run("cfg.json", out, 3, **_paths(guard))
+    path = out / "smoke_record.json"
+    planted = json.loads(path.read_text(encoding="utf-8"))
+    planted["run_inputs_hash"] = "sha256:planted"
+    path.write_text(json.dumps(planted), encoding="utf-8")
+    before = path.read_bytes()
+    with pytest.raises(OpsError) as exc:
+        run_mod.run("cfg.json", out, 3, **_paths(guard))
+    assert base._refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "smoke_out_dir_not_fresh")
+    assert path.read_bytes() == before
+
+
+def test_stage_a_refuses_a_spec_that_differs_from_the_one_bound_in_run_inputs(monkeypatch, tmp_path):
+    world, guard, out = _world(), base._guard(tmp_path), tmp_path / "out"
+    _env(monkeypatch, world, out)
+    received, real = [], run_mod.run_stage_a
+
+    def tampered(*args, **kwargs):
+        received.append(kwargs["bound_spec_hash"])
+        kwargs["bound_spec_hash"] = "sha256:other"
+        return real(*args, **kwargs)
+    monkeypatch.setattr(run_mod, "run_stage_a", tampered)
+    with pytest.raises(OpsError) as exc:
+        run_mod.run("cfg.json", out, **_paths(guard))
+    assert base._refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "spec_changed")
+    assert not (out / "fits").exists() and not (out / base.REPORT).exists()
+    assert received == [lib.spec_hash(yaml.safe_load(guard["spec_path"].read_text(encoding="utf-8")))]
