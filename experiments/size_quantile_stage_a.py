@@ -26,6 +26,7 @@ from experiments.size_quantile_baselines import band_quantiles, implied_quantile
 from experiments.size_quantile_binding import bind_b3
 from experiments.size_quantile_calibration import (MIN_TAIL, PERIOD, QCOLS, calibrate, predictions_from_receipts,
                                                   score_crps)
+from experiments.size_quantile_folds import annual_folds
 from experiments.size_quantile_prereg import SPEC_PATH, load_spec, require_preregistration
 from experiments.size_quantile_reported import headline_flags, implied_table, reported_tables, s_frames
 from experiments.size_quantile_sources import training_labels
@@ -45,13 +46,27 @@ def _plain(value):
     return json.loads(json.dumps(value, default=lambda item: item.to_dict("records") if isinstance(item, pd.DataFrame)
                                  else item.tolist()), parse_constant=lambda _: None)
 
+def _in_period(sealed, targets):
+    """Admitted event ids whose event date is in PERIOD; ``targets`` is the target events indexed by event_id."""
+    return [e["event_id"] for e in sealed["events"]
+            if PERIOD[0] <= pd.Timestamp(targets.at[e["event_id"], "event_date"]) <= PERIOD[1]]
+
+
+def check_decision_dates(sealed, years):
+    """Refuse (decision_date_invalid) before any fit or label read unless every event a fit or Stage A scoring can
+    touch has a valid lead-1 decision date: every annual fold's evaluation event and every in-period event."""
+    targets = pd.DataFrame(sealed["context"]["target_events"]).set_index("event_id")
+    ids = {e for fold in annual_folds(sealed, years).values() for e in fold["evaluation_event_ids"]}
+    ids |= set(_in_period(sealed, targets))
+    lead1_decision_dates(sealed["context"]["target_events"], sorted(ids))
+
+
 def _score(sealed, walk, production, fetch, admitted, s_results, implied, b3):
     """Step 5, after an all-ok walk and the arm S fits: admitted labels, calibration, CRPS, the verdicts and the
     reported tables. Returns a dict of the report's pieces."""
     predictions = predictions_from_receipts(walk)
     targets = pd.DataFrame(sealed["context"]["target_events"]).set_index("event_id")
-    in_period = [e["event_id"] for e in sealed["events"]
-                 if PERIOD[0] <= pd.Timestamp(targets.at[e["event_id"], "event_date"]) <= PERIOD[1]]
+    in_period = _in_period(sealed, targets)
     ids = sorted(set(predictions.index) | set(in_period))
     with stage("stage A inputs"):
         moves = training_labels(sealed, [e["event_id"] for e in sealed["events"]], sealed["evaluation_labels_before"])
@@ -95,9 +110,11 @@ def _score(sealed, walk, production, fetch, admitted, s_results, implied, b3):
             arm_frame = scored[arm]
             ev = events.loc[arm_frame.index]
             ok = arm_frame["reason"].isna().to_numpy() & np.isfinite(ev["y"].to_numpy(float))
+            # the later of label_end+1 and the native availability date
+            ended = pd.to_datetime(ev["label_end"].to_numpy()[ok]) + pd.Timedelta(days=1)
+            native_dates = pd.to_datetime(ev["available"].to_numpy()[ok])
             history = pd.DataFrame({"q50": arm_frame["q50"].to_numpy(float)[ok], "y": ev["y"].to_numpy(float)[ok],
-                                    "label_available": (pd.to_datetime(ev["label_end"].to_numpy()[ok])
-                                                        + pd.Timedelta(days=1)).to_numpy()})
+                                    "label_available": np.maximum(ended.to_numpy(), native_dates.to_numpy())})
             results[arm] = judge_arm(arm, arm_frame, scored["B0"], events, history, raw=raw)
         verdict = stage_a_verdict(results["Q"], results["Q_raw"])
         reported = reported_tables(scored, scored["B0"], events, s_raw)
@@ -153,6 +170,7 @@ def run_stage_a(sealed, years, admitted, fetch, out_dir, *, production_hash, tab
             if not (isinstance(years, (list, tuple)) and all(isinstance(y, str) for y in years)
                     and {"2023", "2024", "2025"} <= set(years) and years[-1] == "2025"):
                 raise fail("INVALID_EXPERIMENT_SPEC", "years invalid", details={"reason": "stage_a_years_invalid"})
+            check_decision_dates(sealed, years)
             production = read_production(fetch, admitted, expected_hash=production_hash, table_hash=table_hash)
             binding = bind_b3(sealed["plan"], b3_read("selection"))
             b3 = {**bind_series(sealed["plan"], b3_read, binding, b3_admit), "rule": binding["rule"],

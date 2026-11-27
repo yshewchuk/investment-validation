@@ -7,7 +7,7 @@ from engine.pnl_sim import MIN_POOL, ResidualPool
 from engine.v2.ops.errors import OpsError
 from engine.v2.research.magnitude_inputs import forecast_cutoff
 from experiments.size_pnl_pool import build_pool
-from experiments.size_quantile_baselines import lead1_decision_dates, pool_quantiles
+from experiments.size_quantile_baselines import _donor_rows_removed, lead1_decision_dates, pool_quantiles
 from experiments.size_quantile_metrics import Rules
 from tests.v2.research.magnitude_trial_support import calendar_sessions
 
@@ -463,6 +463,47 @@ def test_events_with_the_same_eligible_labels_share_one_pool(capsys):
     assert out.loc["a", "n_rows"] == 600
     assert out.loc["b", "n_rows"] == 600
     assert out.loc["c", "n_rows"] == 605
+
+
+def test_donor_rows_removed_counts_each_removed_complete_donor_once_and_logs_it(capsys):
+    # Events: e1 (decided 06-02, dated 06-03), e2 (decided 06-05, dated 06-10), e3 (decided 06-20, dated 06-25).
+    # A donor is removed when some event decided strictly before the donor's availability is dated after the donor.
+    rows = [  # (donor, event_date, available, abs_move); abs_move NaN makes the row incomplete
+        ("on_decision", "2024-05-01", "2024-06-02", 1.0),    # available == e1's decision: eligible, not removed
+        ("two_events", "2024-05-15", "2024-06-06", 2.0),     # removed from e1 and from e2: counted once
+        ("late", "2024-07-01", "2024-06-30", 3.0),           # dated after every target: not counted
+        ("incomplete", "2024-05-10", "2024-06-10", np.nan),  # no abs_move: not a complete row, not counted
+        ("one_event", "2024-05-20", "2024-06-04", 4.0),      # removed from e1 only
+        ("mid", "2024-05-25", "2024-06-15", 5.0),            # removed from e1 and e2
+        ("after_e1", "2024-06-04", "2024-06-12", 6.0),       # removed from e2 only
+    ]
+    ids = [r[0] for r in rows]
+    table = pd.DataFrame({"event_date": pd.to_datetime([r[1] for r in rows]), "pred_move": 1.0, "pred_crush": 0.0},
+                         index=ids)
+    labels = pd.DataFrame({"abs_move": [r[3] for r in rows], "crush_pct_iv30": 0.0,
+                           "available": [r[2] for r in rows]}, index=ids)
+    events = pd.DataFrame({"event_date": pd.to_datetime(["2024-06-03", "2024-06-10", "2024-06-25"]),
+                           "decision_date": pd.to_datetime(["2024-06-02", "2024-06-05", "2024-06-20"]),
+                           "pred_move": [2.0, 2.0, 2.0]}, index=["e1", "e2", "e3"])
+    pool_quantiles(table, labels, events)
+    err = capsys.readouterr().err
+    assert err.count("donor_rows_removed=") == 1  # one log line per call
+    assert "donor_rows_removed=4" in err
+
+
+def test_donor_rows_removed_is_zero_with_no_events_or_no_rows():
+    empty_dates = np.array([], dtype="datetime64[ns]")
+    table = pd.DataFrame({"event_date": pd.Series([], dtype="datetime64[ns]"), "pred_move": pd.Series([], dtype=float),
+                          "pred_crush": pd.Series([], dtype=float)})
+    labels = pd.DataFrame({"abs_move": pd.Series([], dtype=float), "crush_pct_iv30": pd.Series([], dtype=float),
+                           "available": pd.Series([], dtype="datetime64[ns]")})
+    assert _donor_rows_removed(table, labels, empty_dates, empty_dates) == 0
+    one_event = np.array(["2024-06-02"], dtype="datetime64[ns]")
+    assert _donor_rows_removed(table, labels, one_event, np.array(["2024-06-03"], dtype="datetime64[ns]")) == 0
+    donor = pd.DataFrame({"event_date": pd.to_datetime(["2024-05-15"]), "pred_move": [1.0], "pred_crush": [0.0]},
+                         index=["d"])
+    donor_labels = pd.DataFrame({"abs_move": [2.0], "crush_pct_iv30": [0.0], "available": ["2024-06-06"]}, index=["d"])
+    assert _donor_rows_removed(donor, donor_labels, empty_dates, empty_dates) == 0  # no events: nothing removed
 
 
 def _target(event_id, event_date, forecasts):

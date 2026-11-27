@@ -278,6 +278,46 @@ def test_y0_refusal_starts_no_fit_and_writes_nothing(monkeypatch, tmp_path):
     assert not out.exists()
 
 
+def _spoil_lead1(world, match):
+    """Make the lead-1 decision date of the first target that matches equal to its event date (not before it)."""
+    target = next(t for t in world["sealed"]["context"]["target_events"] if match(t))
+    target["forecasts"][0]["source_session_ceiling"] = target["event_date"]
+
+
+def test_smoke_with_a_bad_lead1_date_refuses_before_any_file_or_fit(monkeypatch, tmp_path):
+    world, guard, out = _world(), base._guard(tmp_path), tmp_path / "out"
+    all_tickers = sorted({e["ticker"] for e in world["events"]})
+    chosen = sorted(all_tickers, key=lambda t: (hashlib.sha256(f"{t}|exp190-smoke".encode()).hexdigest(), t))[0]
+    # an evaluation event of 2022 or later, so the annual folds (all years) see it
+    _spoil_lead1(world, lambda t: t["ticker"] == chosen and t["event_date"] >= "2022-01-01")
+
+    def no_fit(*_args, **_kwargs):
+        raise AssertionError("no fit may run")
+    _env(monkeypatch, world, out, regress=no_fit)
+    monkeypatch.setattr(base.arm_s, "fit_regression_predictions", no_fit)
+    monkeypatch.setattr(run_mod, "fit_walk_forward", no_fit)
+    with pytest.raises(OpsError) as exc:
+        run_mod.run("cfg.json", out, 3, **_paths(guard))
+    assert base._refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "decision_date_invalid")
+    assert not out.exists()  # no run_inputs.json, smoke_record.json, fits/ or *.tmp
+
+
+def test_full_run_with_a_bad_lead1_date_refuses_before_any_fit_and_publishes_no_report(monkeypatch, tmp_path):
+    world, guard, out = _world(), base._guard(tmp_path), tmp_path / "out"
+    _spoil_lead1(world, lambda t: t["event_date"] == "2025-06-05")
+
+    def no_fit(*_args, **_kwargs):
+        raise AssertionError("no fit may run")
+    _env(monkeypatch, world, out, regress=no_fit)
+    monkeypatch.setattr(base.arm_s, "fit_regression_predictions", no_fit)
+    with pytest.raises(OpsError) as exc:
+        run_mod.run("cfg.json", out, **_paths(guard))
+    assert base._refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "decision_date_invalid")
+    assert (out / "run_inputs.json").exists()  # written before stage A, as the rule allows
+    assert not (out / base.REPORT).exists() and not list(out.glob("*.tmp"))
+    assert not (out / "fits").exists()
+
+
 def test_smoke_selects_the_three_smallest_hash_tickers_and_writes_no_stage_a_report(monkeypatch, tmp_path):
     world, guard, out = _world(), base._guard(tmp_path), tmp_path / "out"
     all_tickers = sorted({e["ticker"] for e in world["events"]})

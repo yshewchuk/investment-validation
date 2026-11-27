@@ -26,7 +26,7 @@ from experiments.size_quantile_b3 import bind_series
 from experiments.size_quantile_binding import bind_b3
 from experiments.size_quantile_prereg import SPEC_PATH, load_spec, require_preregistration
 from experiments.size_quantile_sources import load_sealed_panel
-from experiments.size_quantile_stage_a import _publish, run_stage_a
+from experiments.size_quantile_stage_a import _publish, check_decision_dates, run_stage_a
 from experiments.size_quantile_walk import fit_walk_forward
 from experiments.size_quantile_y0 import y0_report
 
@@ -92,6 +92,8 @@ def _run(sources_config, out_dir, tickers, **paths):
         y0 = y0_report(inputs["sealed"], spec)
         years = [str(y) for y in range(int(y0["y0"]), END_YEAR + 1)]
         sealed, chosen = (inputs["sealed"], None) if tickers is None else smoke_subset(inputs["sealed"], tickers)
+        if tickers is not None:  # the full path runs this in run_stage_a, after run_inputs.json
+            check_decision_dates(sealed, years)
         body = {"schema_version": "size_quantile_run_inputs.v2", "mode": "full" if tickers is None else "smoke",
                 "spec_hash": guard["spec_hash"], "preregistered_at": guard["preregistered_at"],
                 "plan_id": sealed["plan"]["plan_id"], "sealed_binding": sealed["binding"], "years": years, "y0": y0,
