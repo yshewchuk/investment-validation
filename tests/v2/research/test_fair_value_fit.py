@@ -24,7 +24,7 @@ EXP_30D = "2030-04-03"
 
 
 def make_row(h, c, side, *, hit=50.0, oi=1000.0, **over):
-    """Quote (1-h, 1+h) on a call with strike 100 and spot 101: V = 1, denom = h. Price = V + c*h (buy) or V - c*h (sell)."""
+    """Quote (1-h, 1+h) on a call with strike 100 and spot 101: V = 1, mid = 1, half = h. Price = V + c*h (buy) or V - c*h (sell)."""
     price = 1.0 + c * h if side == "buy" else 1.0 - c * h
     row = {"fill_time": FILL, "snapshot_time": SNAP, "ticker": "XYZ", "expiry": ORDER, "strike": 100.0, "right": "C",
            "side": side, "qty": 1.0, "price": price, "bid": 1.0 - h, "ask": 1.0 + h, "bid_size": 50.0, "ask_size": 50.0,
@@ -37,7 +37,7 @@ def make_row(h, c, side, *, hit=50.0, oi=1000.0, **over):
 
 
 def base_rows(n=120):
-    """n unflagged fills with observed c = 0.30 (the price is built from c and the spread, so c is exact)."""
+    """n unflagged fills with price-space x = 0.30 (the price is built from x and the spread, so x is exact)."""
     return [make_row(0.02 + 0.28 * i / max(n - 1, 1), 0.30, "buy" if i % 2 == 0 else "sell") for i in range(n)]
 
 
@@ -76,32 +76,61 @@ def _refusal(rows, tmp_path) -> dict:
     return err.value.details
 
 
-# --- 1. observed c: hand-written formula, buy and sell, negative c, repaired quote, time value -------------------------
+# --- 1. price space: hand-written x, v, mid, half, bid, ask, spread_term for buy and sell, negative x, repaired quote, T>0 ---
 
-def test_observed_c_matches_hand_formula_for_buy_sell_and_negative_c(tmp_path):
+def test_price_space_columns_match_hand_values_for_buy_sell_and_negative_x(tmp_path):
     rows = [make_row(0.10, 0.30, "buy"), make_row(0.10, 0.30, "sell"), make_row(0.20, -0.10, "buy"), make_row(0.20, -0.10, "sell")]
     d, _ = ff.price_fills(fills_file(tmp_path, blob_of(rows)))
-    assert list(d.columns) == ["c", "x", "thin_size", "thin_oi", "group", "order"]
-    assert d["c"].to_numpy() == pytest.approx([0.30, 0.30, -0.10, -0.10], abs=1e-9)
+    assert list(d.columns) == ["x", "v", "spread_term", "thin_size", "thin_oi", "group", "mid", "half_spread", "bid", "ask", "order"]
+    # quote (0.9, 1.1), V = 1: buy x = (1.03 - 1) / 0.1; sell x = (1 - 0.97) / 0.1; v = 0 because V is the mid
+    # quote (0.8, 1.2), V = 1: buy price 0.98 gives x = (0.98 - 1) / 0.2 = -0.1 (a buy below mid); sell price 1.02 gives x = -0.1
+    assert d["x"].to_numpy() == pytest.approx([0.3, 0.3, -0.1, -0.1], abs=1e-9)
+    assert d["v"].to_numpy() == pytest.approx([0.0] * 4, abs=1e-9)
+    assert d["mid"].to_numpy() == pytest.approx([1.0] * 4, abs=1e-9)
+    assert d["half_spread"].to_numpy() == pytest.approx([0.1, 0.1, 0.2, 0.2], abs=1e-9)
+    assert d["bid"].to_numpy() == pytest.approx([0.9, 0.9, 0.8, 0.8], abs=1e-9)
+    assert d["ask"].to_numpy() == pytest.approx([1.1, 1.1, 1.2, 1.2], abs=1e-9)
+    # spread_term = min((hi - lo) / mid / 0.5, 1): 0.2 / 1 / 0.5 = 0.4 and 0.4 / 1 / 0.5 = 0.8
+    assert d["spread_term"].to_numpy() == pytest.approx([0.4, 0.4, 0.8, 0.8], abs=1e-9)
 
 
-def test_repaired_quote_uses_075_and_125_of_the_stored_price(tmp_path):
+def test_repaired_quote_uses_075_and_125_of_the_stored_price_and_stores_the_stored_quote(tmp_path):
     rows = [make_row(0.05, 0.0, "buy", bid=1.0, ask=1.0, quote_repaired="true", price=1.1),
             make_row(0.05, 0.0, "sell", bid=1.0, ask=1.0, quote_repaired="true", price=0.9)]
     d, _ = ff.price_fills(fills_file(tmp_path, blob_of(rows)))
-    # effective quote (0.75, 1.25) and V = 1: buy c = (1.1 - 1) / 0.25, sell c = (1 - 0.9) / 0.25
-    assert d["c"].to_numpy() == pytest.approx([0.4, 0.4], abs=1e-9)
+    # effective quote (0.75, 1.25), so mid = 1 and half = 0.25; V = 1 is inside.
+    # buy x = (1.1 - 1) / 0.25; sell x = (1 - 0.9) / 0.25; v = 0
+    assert d["x"].to_numpy() == pytest.approx([0.4, 0.4], abs=1e-9)
+    assert d["v"].to_numpy() == pytest.approx([0.0, 0.0], abs=1e-9)
+    assert d["mid"].to_numpy() == pytest.approx([1.0, 1.0], abs=1e-9)
+    assert d["half_spread"].to_numpy() == pytest.approx([0.25, 0.25], abs=1e-9)
+    # the bid and ask columns hold the stored quote (P = 1.0 on both sides), not the effective one
+    assert d["bid"].to_numpy() == pytest.approx([1.0, 1.0], abs=1e-9)
+    assert d["ask"].to_numpy() == pytest.approx([1.0, 1.0], abs=1e-9)
+    # spread_term = min((1.25 - 0.75) / 1 / 0.5, 1) = 1
+    assert d["spread_term"].to_numpy() == pytest.approx([1.0, 1.0], abs=1e-9)
 
 
 def test_time_value_call_matches_black_scholes_from_order_date(tmp_path):
-    rows = []
+    rows, cases = [], []  # cases: (lo, hi, V, price, buy) with V the test's own Black-Scholes value
     for k, side in ((99.0, "buy"), (100.0, "sell"), (101.0, "buy"), (102.0, "sell")):
         v = bs_call(101.0, k, 30 / 365, 0.04, 0.25)  # snapshot spot 101; 30 days from the order date; b = r; no dividend
         h = 0.05
         price = v + 0.3 * h if side == "buy" else v - 0.3 * h
         rows.append(long_row(strike=k, bid=v - h, ask=v + h, price=price, side=side))
+        cases.append((v - h, v + h, v, price, side == "buy"))
     d, _ = ff.price_fills(fills_file(tmp_path, blob_of(rows)))
-    assert d["c"].to_numpy() == pytest.approx([0.3] * 4, abs=1e-9)
+    # hand formulas: x = (price - mid) / half for a buy, (mid - price) / half for a sell; v likewise from V
+    exp_x = [(p - (lo + hi) / 2.0) / ((hi - lo) / 2.0) if buy else ((lo + hi) / 2.0 - p) / ((hi - lo) / 2.0) for lo, hi, _, p, buy in cases]
+    exp_v = [(V - (lo + hi) / 2.0) / ((hi - lo) / 2.0) if buy else ((lo + hi) / 2.0 - V) / ((hi - lo) / 2.0) for lo, hi, V, _, buy in cases]
+    assert d["x"].to_numpy() == pytest.approx(exp_x, abs=1e-6)
+    assert d["x"].to_numpy() == pytest.approx([0.3] * 4, abs=1e-6)
+    assert d["v"].to_numpy() == pytest.approx(exp_v, abs=1e-6)
+    assert d["mid"].to_numpy() == pytest.approx([(lo + hi) / 2.0 for lo, hi, _, _, _ in cases], abs=1e-9)
+    assert d["half_spread"].to_numpy() == pytest.approx([(hi - lo) / 2.0 for lo, hi, _, _, _ in cases], abs=1e-9)
+    assert d["bid"].to_numpy() == pytest.approx([lo for lo, _, _, _, _ in cases], abs=1e-9)
+    assert d["ask"].to_numpy() == pytest.approx([hi for _, hi, _, _, _ in cases], abs=1e-9)
+    assert d["spread_term"].to_numpy() == pytest.approx([min((hi - lo) / ((lo + hi) / 2.0) / 0.5, 1.0) for lo, hi, _, _, _ in cases], abs=1e-9)
 
 
 # --- 2. group assignment from the side-hit size; unknown for empty size or open interest -------------------------------
@@ -146,14 +175,42 @@ def test_each_exclusion_counted_once(tmp_path):
     v = bs_call(101.0, 100.0, 30 / 365, 0.04, 0.25)  # quote around V so the row is priced, not clipped to the ask
     rows.append(long_row(rates_date="2030-02-25", bid=v - 0.05, ask=v + 0.05, price=v + 0.01))  # 7 days old: accepted
     rows.append(long_row(smvVol=None))  # no smile fallback: no_fair_value
-    rows.append(make_row(0.05, 0.3, "buy", spot=105.0))  # intrinsic 5 above ask: V == ask, so small_denominator
+    rows.append(make_row(0.0, 0.3, "buy"))  # bid == ask == 1.0, not repaired: zero_half_spread
     _, receipt = ff.price_fills(fills_file(tmp_path, blob_of(rows)))
     counts = receipt["counts"]
     assert counts["unpriceable"] == 1
     assert counts["rate_unknown"] == 1
     assert counts["no_fair_value"] == 1
-    assert counts["small_denominator"] == 1
+    assert counts["zero_half_spread"] == 1
     assert counts["outside_window"] == 0
+
+
+def test_v_clamped_to_the_quote_edge_is_used_with_v_plus_one(tmp_path):
+    rows = [make_row(0.05, 0.0, "buy", spot=105.0, price=1.02),  # intrinsic 5 above the ask 1.05: V clamped to the ask
+            make_row(0.05, 0.0, "sell", spot=95.0, price=0.98)]  # intrinsic 0 below the bid 0.95: V clamped to the bid
+    d, receipt = ff.price_fills(fills_file(tmp_path, blob_of(rows)))
+    assert receipt["counts"]["used"] == 2
+    assert d["v"].to_numpy() == pytest.approx([1.0, 1.0], abs=1e-9)
+    # buy x = (1.02 - 1) / 0.05; sell x = (1 - 0.98) / 0.05
+    assert d["x"].to_numpy() == pytest.approx([0.4, 0.4], abs=1e-9)
+
+
+def test_non_repaired_zero_half_spread_is_counted_not_used(tmp_path):
+    rows = base_rows() + [make_row(0.0, 0.3, "buy"), make_row(0.0, 0.3, "sell")]  # bid == ask == 1.0, not repaired
+    _, receipt = ff.price_fills(fills_file(tmp_path, blob_of(rows)))
+    assert receipt["counts"]["zero_half_spread"] == 2
+    assert receipt["counts"]["unpriceable"] == 0
+    assert receipt["counts"]["used"] == 120
+
+
+def test_one_cent_spread_is_used(tmp_path):
+    rows = [make_row(0.05, 0.3, "buy", bid=1.00, ask=1.01, price=1.0075)]  # mid 1.005, half 0.005; V = 1 is inside
+    d, receipt = ff.price_fills(fills_file(tmp_path, blob_of(rows)))
+    assert receipt["counts"]["used"] == 1
+    assert receipt["counts"]["zero_half_spread"] == 0
+    # x = (1.0075 - 1.005) / 0.005 = 0.5; v = (1 - 1.005) / 0.005 = -1
+    assert d["x"].to_numpy() == pytest.approx([0.5], abs=1e-9)
+    assert d["v"].to_numpy() == pytest.approx([-1.0], abs=1e-9)
 
 
 def test_out_of_range_rate_and_borrow_are_counted_and_treated_as_missing(tmp_path):

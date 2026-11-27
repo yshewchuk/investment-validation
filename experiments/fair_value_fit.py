@@ -1,5 +1,5 @@
-"""Fill model F, slice F6a of design section 9: validate fills, price them at the quote snapshot's own spot (user decision B1;
-60-minute window), write fit_receipt.json. The fit is slice F6b. No F constant changes; schema: experiments/README.md."""
+"""Fill model F, slice F6a (design section 9). User decisions: V at the quote snapshot's own spot, 60-minute window; observed fills in price space.
+Validates fills and writes fit_receipt.json. The fit and its one-tick floor are slice F6b; no F constant changes; schema in experiments/README.md."""
 import argparse
 import hashlib
 import io
@@ -84,19 +84,19 @@ def _price(t: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         model = fvc.value(spot, t["strike"], years, t["smvVol"], rate, b, div, np.where(applied, div_days / 365.0, 0.0), t["put"])
         lo, hi = fvl.effective_quote(t["bid"], t["ask"], t["repaired"])
         V = np.clip(model, lo, hi)
-        denom = np.where(buy, hi - V, V - lo)
-        c = np.where(buy, (price - V) / denom, (V - price) / denom)
+        mid, half, sign = (lo + hi) / 2.0, (hi - lo) / 2.0, np.where(buy, 1.0, -1.0)
+        x, v = sign * (price - mid) / half, sign * (V - mid) / half  # price space: +1 is the side hit
         s, size, oi = (hi - lo) / ((hi + lo) / 2.0), np.where(buy, t["ask_size"], t["bid_size"]), t["open_interest"].to_numpy()
         masks = ((t["fill"] - t["snap"]).abs().to_numpy() > pd.Timedelta(minutes=60), ~fvi.usable_quote(t["bid"], t["ask"]),
-                 (years > 0) & ~np.isfinite(rate), ~np.isfinite(model) | ~(np.isfinite(spot) & (spot > 0)), denom < 0.005)
+                 (years > 0) & ~np.isfinite(rate), ~np.isfinite(model) | ~(np.isfinite(spot) & (spot > 0)), ~(half > 1e-9))
         left = np.ones(n, dtype=bool)
-        for name, mask in zip(("outside_window", "unpriceable", "rate_unknown", "no_fair_value", "small_denominator"), masks):
+        for name, mask in zip(("outside_window", "unpriceable", "rate_unknown", "no_fair_value", "zero_half_spread"), masks):
             counts[name], left = int((left & mask).sum()), left & ~mask
         ts, to = fvf._thin(size, fvf.THIN_SIZE_BELOW), fvf._thin(oi, fvf.THIN_OI_BELOW)
         group = np.select([np.isnan(size) | np.isnan(oi), (ts == 1) & (to == 1), ts == 1, to == 1],
                           ["unknown", "both", "size_only", "oi_only"], default="unflagged")
-        d = pd.DataFrame({"c": c, "x": np.minimum(s / fvf.SPREAD_SCALE, 1.0), "thin_size": ts, "thin_oi": to, "group": group,
-                          "order": t["order"].to_numpy()})[left]
+        d = pd.DataFrame({"x": x, "v": v, "spread_term": np.minimum(s / fvf.SPREAD_SCALE, 1.0), "thin_size": ts, "thin_oi": to, "group": group,
+                "mid": mid, "half_spread": half, "bid": t["bid"].to_numpy(), "ask": t["ask"].to_numpy(), "order": t["order"].to_numpy()})[left]
     return d, {**counts, "used": len(d), **{g: int((d["group"] == g).sum()) for g in ("unflagged", "size_only", "oi_only", "both", "unknown")}}
 
 
