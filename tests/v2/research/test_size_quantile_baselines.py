@@ -3,14 +3,16 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from engine.pnl_sim import ResidualPool
+from engine.pnl_sim import MIN_POOL, ResidualPool
+from engine.v2.ops.errors import OpsError
 from experiments.size_pnl_pool import build_pool
-from experiments.size_quantile_baselines import pool_quantiles
+from experiments.size_quantile_baselines import lead1_decision_dates, pool_quantiles
 from experiments.size_quantile_metrics import Rules
 
 LEVELS = Rules().levels
 QCOLS = [f"q{round(a * 100)}" for a in LEVELS]
 EVENT_DATE = "2024-06-03"
+DECISION_DATE = "2024-06-02"
 EVENT_COLS = QCOLS + ["bucket", "fallback", "n_rows", "reason"]
 
 
@@ -37,19 +39,33 @@ def bucket_donors(n=3000):
     return dates, pred, pred + err
 
 
+def plus_days(dates, days):
+    """ISO text ``days`` after each date."""
+    return [(pd.Timestamp(d) + pd.Timedelta(days=days)).strftime("%Y-%m-%d") for d in np.asarray(dates)]
+
+
 def frames(dates, pred, abs_move, crush=None):
-    """(table, labels) indexed by generated event ids; pred_crush is 0 and crush defaults to 0."""
+    """(table, labels) indexed by generated event ids; pred_crush is 0, crush defaults to 0, and each label is
+    available the day after its donor's event date."""
     ids = [f"e{i:06d}" for i in range(len(pred))]
     table = pd.DataFrame({"event_date": pd.to_datetime(np.asarray(dates)),
                           "pred_move": np.asarray(pred, dtype=float), "pred_crush": 0.0}, index=ids)
     crush = np.zeros(len(ids)) if crush is None else np.asarray(crush, dtype=float)
-    labels = pd.DataFrame({"abs_move": np.asarray(abs_move, dtype=float), "crush_pct_iv30": crush},
-                          index=ids)
+    labels = pd.DataFrame({"abs_move": np.asarray(abs_move, dtype=float), "crush_pct_iv30": crush,
+                           "available": plus_days(dates, 1)}, index=ids)
     return table, labels
 
 
+def causal_frames(dates, pred, abs_move, available):
+    """Like frames, with each label's available_as_of_date given explicitly (ISO text)."""
+    table, labels = frames(dates, pred, abs_move)
+    return table, labels.assign(available=list(available))
+
+
 def events_frame(ids, dates, pred):
-    return pd.DataFrame({"event_date": pd.to_datetime(np.asarray(dates)),
+    """Events with event_date, decision_date (the day before the event) and pred_move."""
+    when = pd.to_datetime(np.asarray(dates))
+    return pd.DataFrame({"event_date": when, "decision_date": when - pd.Timedelta(days=1),
                          "pred_move": np.asarray(pred, dtype=float)}, index=ids)
 
 
@@ -63,6 +79,14 @@ def oracle(pred, err, f, *, levels=LEVELS):
     bucket = int(np.searchsorted(edges, f, "right"))
     members = np.searchsorted(edges, pred, "right") == bucket
     return np.quantile(np.maximum(f + err[members], 0.0), levels), bucket, int(members.sum())
+
+
+def causal_oracle(pred, err, f):
+    """oracle() with ResidualPool's fallback: every eligible donor when the forecast's bucket holds under MIN_POOL."""
+    quant, bucket, members = oracle(pred, err, f)
+    if members < MIN_POOL:
+        return np.quantile(np.maximum(f + err, 0.0), LEVELS), bucket, err.size
+    return quant, bucket, members
 
 
 def with_decoys(dates, pred, abs_move):
@@ -152,6 +176,7 @@ def test_forecast_missing_is_not_drawn(missing):
     dates, pred, abs_move = donors(600)
     table, labels = frames(dates, pred, abs_move)
     events = pd.DataFrame({"event_date": pd.to_datetime([EVENT_DATE] * 2),
+                           "decision_date": pd.to_datetime([DECISION_DATE] * 2),
                            "pred_move": pd.Series([missing, 2.0], index=["a", "b"], dtype=object)}, index=["a", "b"])
     out = pool_quantiles(table, labels, events)
     assert out.loc["a", "reason"] == "forecast_missing"
@@ -164,6 +189,7 @@ def test_empty_events_keep_columns():
     dates, pred, abs_move = donors(600)
     table, labels = frames(dates, pred, abs_move)
     events = pd.DataFrame({"event_date": pd.Series([], dtype="datetime64[ns]"),
+                           "decision_date": pd.Series([], dtype="datetime64[ns]"),
                            "pred_move": pd.Series([], dtype=float)})
     out = pool_quantiles(table, labels, events)
     assert out.empty
@@ -239,7 +265,7 @@ def test_logging_goes_to_stderr_only(capsys):
     pool_quantiles(table, labels, events_frame(["ev"], [EVENT_DATE], [2.0]))
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert "quantile B0" in captured.err and "scored=1" in captured.err
+    assert "quantile B0" in captured.err and "scored=1" in captured.err and "pools=1" in captured.err
 
 
 def test_sampled_rows_lie_in_oracle_members():
@@ -311,3 +337,125 @@ def test_guard_raises_when_draw_disagrees(monkeypatch):
     table, labels = frames(dates, pred, abs_move)
     with pytest.raises(RuntimeError):
         score(table, labels, 2.0)
+
+
+# ---------- causal donors: available_as_of_date <= the lead-1 decision date ----------
+
+def test_donor_available_on_the_decision_date_counts_and_one_day_later_does_not():
+    base = donors(250)
+    on_day = (np.array(["2024-05-01"], dtype="datetime64[ns]"), np.array([1.0]), np.array([31.0]))
+    late = (np.array(["2024-06-01"], dtype="datetime64[ns]"), np.array([1.0]), np.array([-39.0]))
+    dates, pred, abs_move = concat(base, on_day, late)
+    available = plus_days(base[0], 1) + ["2024-06-02", "2024-06-03"]
+    table, labels = causal_frames(dates, pred, abs_move, available)
+    row = score(table, labels, 2.0)
+    err = np.concatenate([base[2] - base[1], [30.0]])
+    assert row.reason is None and row.n_rows == 251
+    np.testing.assert_allclose(row[QCOLS].to_numpy(float), np.quantile(np.maximum(2.0 + err, 0), LEVELS))
+
+
+@pytest.mark.parametrize("eligible, scored", [(249, False), (250, True)])
+def test_min_pool_threshold_counts_eligible_donors_only(eligible, scored):
+    base = donors(eligible)
+    late = (np.array(["2024-05-30"], dtype="datetime64[ns]"), np.array([1.0]), np.array([1001.0]))
+    dates, pred, abs_move = concat(base, late)
+    table, labels = causal_frames(dates, pred, abs_move, plus_days(base[0], 1) + ["2024-06-03"])
+    row = score(table, labels, 2.0)
+    if scored:
+        err = base[2] - base[1]
+        assert row.reason is None and row.n_rows == eligible == 250
+        np.testing.assert_allclose(row[QCOLS].to_numpy(float), np.quantile(np.maximum(2.0 + err, 0), LEVELS))
+    else:
+        assert row.reason == "refused_draw" and row.n_rows == 0
+
+
+def test_each_target_uses_its_own_eligible_donors_whatever_the_input_order():
+    old = donors(600)
+    new = donors(300, start="2024-01-01")
+    dates, pred, abs_move = concat(old, new)
+    available = plus_days(old[0], 1) + plus_days(new[0], 1)
+    table, labels = causal_frames(dates, pred, abs_move, available)
+    err = abs_move - pred
+    avail = pd.to_datetime(available).to_numpy()
+
+    def want(event_date, f):
+        cutoff = pd.Timestamp(event_date).to_datetime64()
+        decision_day = (pd.Timestamp(event_date) - pd.Timedelta(days=1)).to_datetime64()
+        keep = (avail <= decision_day) & (dates < cutoff)
+        return causal_oracle(pred[keep], err[keep], f)
+
+    ids, days, forecasts = ["late", "early"], ["2024-12-02", "2024-03-02"], [2.0, 3.0]
+    out = pool_quantiles(table, labels, events_frame(ids, days, forecasts))
+    assert out.index.tolist() == ids
+    for eid, day, f in zip(ids, days, forecasts):
+        quant, bucket, n = want(day, f)
+        row = out.loc[eid]
+        assert row.reason is None and row.n_rows == n and row.bucket == bucket
+        np.testing.assert_allclose(row[QCOLS].to_numpy(float), quant)
+    reversed_out = pool_quantiles(table, labels, events_frame(ids[::-1], days[::-1], forecasts[::-1]))
+    pd.testing.assert_frame_equal(reversed_out.loc[ids], out)
+
+
+def test_bucket_edges_come_only_from_eligible_donors():
+    base_dates, base_pred, base_abs = bucket_donors()
+    late_dates = (pd.Timestamp("2024-05-01") + pd.to_timedelta(np.arange(200) % 30, unit="D")).to_numpy()
+    dates = np.concatenate([base_dates, late_dates])
+    pred = np.concatenate([base_pred, np.full(200, 4.2)])
+    abs_move = np.concatenate([base_abs, np.full(200, 104.2)])  # the late donors would carry error +100 at 4.2
+    available = plus_days(base_dates, 1) + ["2024-06-03"] * 200
+    table, labels = causal_frames(dates, pred, abs_move, available)
+    row = pool_quantiles(table, labels, events_frame(["ev"], [EVENT_DATE], [4.2])).iloc[0]
+    want, bucket, n = oracle(base_pred, base_abs - base_pred, 4.2)
+    assert row.reason is None and not row.fallback
+    assert row.bucket == bucket and row.n_rows == n
+    np.testing.assert_allclose(row[QCOLS].to_numpy(float), want)
+
+
+@pytest.mark.parametrize("break_it", ["no_decision_column", "null_decision", "decision_on_event_date",
+                                      "no_available_column", "null_available"])
+def test_missing_null_or_non_causal_dates_raise(break_it):
+    dates, pred, abs_move = donors(600)
+    table, labels = frames(dates, pred, abs_move)
+    events = events_frame(["ev"], [EVENT_DATE], [2.0])
+    if break_it == "no_decision_column":
+        events = events.drop(columns="decision_date")
+    elif break_it == "null_decision":
+        events["decision_date"] = pd.NaT
+    elif break_it == "decision_on_event_date":
+        events["decision_date"] = events["event_date"]
+    elif break_it == "no_available_column":
+        labels = labels.drop(columns="available")
+    else:
+        labels["available"] = None
+    with pytest.raises(ValueError):
+        pool_quantiles(table, labels, events)
+
+
+def _target(event_id, event_date, forecasts):
+    return {"event_id": event_id, "event_date": event_date, "forecasts": forecasts}
+
+
+def test_lead1_decision_date_is_the_horizon_one_entry():
+    targets = [_target("a", "2024-06-03", [{"horizon_sessions": 5, "decision_date": "2024-05-24"},
+                                           {"horizon_sessions": 3, "decision_date": "2024-05-29"},
+                                           {"horizon_sessions": 1, "decision_date": "2024-06-02"}])]
+    out = lead1_decision_dates(targets, pd.Index(["a"]))
+    assert out.index.tolist() == ["a"]
+    assert pd.api.types.is_datetime64_dtype(out)
+    assert out.iloc[0] == pd.Timestamp("2024-06-02")
+
+
+@pytest.mark.parametrize("case", ["no_lead1", "two_lead1", "missing_id", "bad_text", "not_before_event"])
+def test_lead1_decision_date_refusals(case):
+    good = {"horizon_sessions": 1, "decision_date": "2024-06-02"}
+    targets = {
+        "no_lead1": [_target("a", "2024-06-03", [{"horizon_sessions": 3, "decision_date": "2024-05-29"}])],
+        "two_lead1": [_target("a", "2024-06-03", [good, dict(good)])],
+        "missing_id": [_target("b", "2024-06-03", [good])],
+        "bad_text": [_target("a", "2024-06-03", [{"horizon_sessions": 1, "decision_date": "2024-02-30"}])],
+        "not_before_event": [_target("a", "2024-06-03", [{"horizon_sessions": 1, "decision_date": "2024-06-03"}])],
+    }[case]
+    with pytest.raises(OpsError) as exc:
+        lead1_decision_dates(targets, pd.Index(["a"]))
+    assert exc.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert exc.value.problem.details.get("reason") == "decision_date_invalid"
