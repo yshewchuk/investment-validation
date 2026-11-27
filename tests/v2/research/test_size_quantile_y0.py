@@ -344,3 +344,35 @@ def test_capped_chain_keys_returns_exact_present_pairs_and_propagates_the_cap_re
         assert exc.value.code == "RESULT_LIMIT_EXCEEDED"
     finally:
         conn.close()
+
+
+class _ScanRepo:
+    marker = "extra"
+
+    def __init__(self):
+        self.calls = []
+
+    def scan(self, query, *, table_name, max_object_bytes=None):
+        self.calls.append((table_name, max_object_bytes))
+        return "rows"
+
+
+def test_label_scans_are_byte_capped_and_the_caller_keeps_the_inner_repository():
+    inner, rec, seen = _ScanRepo(), Recorder(), []
+
+    def labels(sealed, ids, before):
+        repo = sealed["repository"]
+        repo.scan("q", table_name="computed_moves")
+        repo.scan("q", table_name="earnings_events")
+        repo.scan("q", table_name="computed_moves", max_object_bytes=7)
+        seen.append(repo.marker)
+        return rec.labels(sealed, ids, before)
+
+    sealed = _sealed()
+    sealed["repository"] = inner
+    out = y0_report(sealed, SPEC, max_object_bytes=1234, calendar=rec.calendar, chain_keys=rec.chain_keys,
+                    labels=labels)
+    assert out["y0"] == "2021"
+    assert inner.calls == [("computed_moves", 1048576), ("earnings_events", 1234), ("computed_moves", 7)]
+    assert seen == ["extra"]
+    assert sealed["repository"] is inner
