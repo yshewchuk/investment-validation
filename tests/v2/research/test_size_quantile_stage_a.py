@@ -137,9 +137,11 @@ def _planned_row(digest):
             "sharpe_trade": "", "promoted": "False"}
 
 
-def _guard(case, *, settled=True):
-    """A tmp copy of the real spec (settled unless told otherwise), its PLANNED ledger row and one EXP-190 directory."""
+def _guard(case, *, settled=True, min_donors=30):
+    """A tmp copy of the real spec (settled unless told otherwise, tail minimum set to min_donors), its PLANNED ledger
+    row and one EXP-190 directory."""
     spec = yaml.safe_load(REAL_SPEC.read_text(encoding="utf-8"))
+    spec["distribution_tails"]["min_donors"] = min_donors
     if settled:
         spec["stage_b"] = {**spec["stage_b"], "status": "settled"}
         spec["preregistered_at"] = STAMP
@@ -443,6 +445,17 @@ def test_spec_changed_after_the_check_refuses_before_any_label_read_or_fit(monke
         _run(world, out, guard)
     assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "spec_changed")
     assert calls == [] and not out.exists()
+
+
+@pytest.mark.parametrize("min_donors", [50, 29])
+def test_tail_minimum_other_than_the_code_refuses_before_any_fetch_label_read_or_fit(monkeypatch, tmp_path,
+                                                                                     min_donors):
+    world, guard, out = _world(), _guard(tmp_path, min_donors=min_donors), tmp_path / "out"
+    reads, fetched = _spy(monkeypatch, world), []
+    with pytest.raises(OpsError) as exc:
+        _run(world, out, guard, calls=fetched)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "stage_a_tails_mismatch")
+    assert reads == [] and fetched == [] and not out.exists()
 
 
 @pytest.mark.parametrize("years", [

@@ -271,8 +271,9 @@ def test_thin_months_are_logged_once_per_arm_not_per_event(capsys):
     calib.calibrate(*_frames(rows))
     err = capsys.readouterr().err
     # Q's thin months: 2020-01 (S, donors all burn-in) and 2020-02 (T). Two, counted, not one line per event.
-    q_line = next(line for line in err.splitlines() if "arm=Q events=" in line)
-    assert q_line.endswith("thin_months=2")
+    q_lines = [line for line in err.splitlines() if "arm=Q events=" in line]
+    assert len(q_lines) == 1
+    assert q_lines[0].endswith("thin_months=2")
     assert "tail_pool_thin" not in err
 
 

@@ -20,7 +20,7 @@ from experiments.size_pnl_prereg import _read_bounded
 from experiments.size_pnl_readers import read_labels, read_production
 from experiments.size_quantile_arm_verdict import judge_arm, stage_a_verdict
 from experiments.size_quantile_baselines import pool_quantiles
-from experiments.size_quantile_calibration import PERIOD, QCOLS, calibrate, predictions_from_receipts, score_crps
+from experiments.size_quantile_calibration import MIN_TAIL, PERIOD, QCOLS, calibrate, predictions_from_receipts, score_crps
 from experiments.size_quantile_prereg import SPEC_PATH, load_spec, require_preregistration
 from experiments.size_quantile_sources import training_labels
 from experiments.size_quantile_walk import fit_walk_forward
@@ -118,6 +118,9 @@ def run_stage_a(sealed, years, admitted, fetch, out_dir, *, production_hash, tab
             spec, digest = load_spec(spec_path)
             if digest != guard["spec_hash"]:
                 raise _refuse("spec_changed", "the spec changed after its pre-registration check")
+            if spec["distribution_tails"]["min_donors"] != MIN_TAIL:
+                raise _refuse("stage_a_tails_mismatch", f"spec distribution_tails.min_donors is "
+                              f"{spec['distribution_tails']['min_donors']} but the code's MIN_TAIL is {MIN_TAIL}")
             if not (isinstance(years, (list, tuple)) and all(isinstance(y, str) for y in years)
                     and {"2023", "2024", "2025"} <= set(years) and years[-1] == "2025"):
                 raise fail("INVALID_EXPERIMENT_SPEC", "years invalid", details={"reason": "stage_a_years_invalid"})
