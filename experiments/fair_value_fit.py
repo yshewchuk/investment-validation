@@ -1,5 +1,5 @@
-"""Fill model F, slice F6a (design section 9). User decisions: V at the quote snapshot's own spot, 60-minute window; observed fills in price space.
-Validates fills and writes fit_receipt.json. The fit and its one-tick floor are slice F6b; no F constant changes; schema in experiments/README.md."""
+"""Fill model F, slices F6a and F6b (design section 9): validates fills, fits price-space constants and the one-tick floor, writes constants.json and fit_receipt.json.
+User decisions: V at the quote snapshot's own spot, 60-minute window. No F constant changes; schema in experiments/README.md."""
 import argparse
 import hashlib
 import io
@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from experiments import fair_value_carry as fvc, fair_value_fills as fvf, fair_value_inputs as fvi, fair_value_legs as fvl, fair_value_run as fvr
+from experiments import fair_value_constants as fvk, fair_value_solve as fvs
 
 NEVER_NULL = ["fill_time", "snapshot_time", "ticker", "expiry", "strike", "right", "side", "qty", "price", "quote_repaired"]
 
@@ -121,16 +122,22 @@ def run_fit(fills_path, out_dir) -> dict:
     out_dir = Path(out_dir)
     if out_dir.exists():
         raise fvi.FairValueRefusal("out_dir_exists", "the output directory already exists")
-    receipt = price_fills(fills_path)[1]
+    d, receipt = price_fills(fills_path)
+    constants, fit, residuals = fvs.solve(d)
+    blob = json.dumps(fvk.constants_document(constants), sort_keys=True, allow_nan=False, indent=1).encode()
+    src = {m: hashlib.sha256(fvi._read_capped(Path(p), 1 << 20, m)).hexdigest() for m, p in (("fair_value_constants", fvk.__file__), ("fair_value_solve", fvs.__file__))}
+    receipt.update(constants_id=fvk.constants_id(constants), constants_sha256=hashlib.sha256(blob).hexdigest(), fit=fit, residuals=residuals,
+                   constants_source_sha256=src["fair_value_constants"], solve_source_sha256=src["fair_value_solve"])
     with tempfile.TemporaryDirectory(dir=out_dir.parent, prefix=".fit-") as hold:
         Path(hold, "out").mkdir()
-        (Path(hold, "out") / "fit_receipt.json").write_bytes(json.dumps(receipt, sort_keys=True, allow_nan=False, indent=1).encode())
+        (Path(hold, "out") / "constants.json").write_bytes(blob)
+        (Path(hold, "out") / "fit_receipt.json").write_bytes(json.dumps(receipt, sort_keys=True, allow_nan=False, indent=1).encode())  # last
         Path(hold, "out").rename(out_dir)
     return receipt
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="Fill model F pricing, slice F6a; one JSON line on stdout.")
+    parser = argparse.ArgumentParser(description="Fill model F price-space fit, slices F6a and F6b; one JSON line on stdout.")
     parser.add_argument("--fills", required=True)
     parser.add_argument("--out-dir", required=True)
     args = parser.parse_args(argv)
@@ -141,7 +148,7 @@ def main(argv=None) -> int:
         refusal = err if hasattr(err, "details") else fvi.FairValueRefusal("input_unreadable", "input unreadable", error_type=type(err).__name__)
         print(json.dumps({"refusal": refusal.code, "details": refusal.details}, default=str))
         return 2
-    print(json.dumps({"input_sha256": receipt["input_sha256"], "counts": receipt["counts"]}, allow_nan=False))
+    print(json.dumps({"input_sha256": receipt["input_sha256"], "counts": receipt["counts"], "constants_id": receipt["constants_id"]}, allow_nan=False))
     return 0
 
 
