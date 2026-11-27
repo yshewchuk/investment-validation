@@ -40,7 +40,8 @@ from tests.v2.research.test_size_width_run import FAKE, _argv, _gates, _install,
 
 DOC = fvk.constants_document(fvk.primary_constants(0.21, 0.0, 0.15, 0.10))  # base, spread, thin_size, thin_oi
 EXPERIMENTS = Path(__file__).resolve().parents[3] / "experiments"
-A_SOURCES = ("fair_value_apply.py", "fair_value_constants.py", "size_width_a_fills.py", "size_width_f_fills.py", "size_width_f_quotes.py")
+A_SOURCES = ("fair_value_apply.py", "fair_value_constants.py", "size_width_a_fills.py", "size_width_f_fills.py",
+             "size_width_f_quotes.py", "size_pnl_shortvol.py", "size_width_fills.py", "size_width_pricing.py")
 WEIGHT = {"primary": 0.0, "spread050": 0.50}  # the spread weight each variant sets (the fixtures' sizes and open interest are not thin)
 MODEL = af.ModelA(DOC, DOC["constants_id"], "primary")
 
@@ -161,6 +162,14 @@ def test_the_report_refuses_an_a_run_and_writes_no_report(tmp_path, monkeypatch,
         report.assemble(out, expected=src.expected)
     assert caught.value.details["reason"] == "tuning_receipt_changed"
     assert not (out / "REPORT.md").exists()
+
+
+def test_a_source_over_the_cap_refuses_input_too_large_before_any_quote_is_read(tmp_path, monkeypatch):
+    _constants(tmp_path, monkeypatch)
+    monkeypatch.setattr(af, "MAX_SOURCE_BYTES", 10)
+    with pytest.raises(fvi.FairValueRefusal) as caught:
+        af.load(DOC["constants_id"], "primary")
+    assert caught.value.details["reason"] == "input_too_large" and caught.value.code == "RESOURCE_LIMIT_EXCEEDED"
 
 
 def _unread(expiries):
