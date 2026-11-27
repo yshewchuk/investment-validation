@@ -147,7 +147,7 @@ def test_an_outer_under_another_variant_than_the_inners_refuses_and_writes_no_ou
     _a_run(src, out, "inner", _a_fill(pins), frames, pins, "primary")
     with pytest.raises(Refusal) as caught:
         _a_run(src, out, "outer", _a_fill(pins), frames, pins, "spread050")
-    assert caught.value.details["reason"] == "tuning_receipt_changed"
+    assert caught.value.details["reason"] == "tuning_receipt_changed" and caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert not (out / "receipts" / "inputs_outer.json").exists()
     assert not (out / "receipts" / "outer_summary.json").exists()
 
@@ -160,7 +160,7 @@ def test_the_report_refuses_an_a_run_and_writes_no_report(tmp_path, monkeypatch,
         _a_run(src, out, stage, _a_fill(pins), frames, pins, "primary")
     with pytest.raises(Refusal) as caught:
         report.assemble(out, expected=src.expected)
-    assert caught.value.details["reason"] == "tuning_receipt_changed"
+    assert caught.value.details["reason"] == "tuning_receipt_changed" and caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert not (out / "REPORT.md").exists()
 
 
@@ -198,9 +198,10 @@ def test_open_run_refuses_model_a_inputs_before_any_quote_is_read(tmp_path, monk
     if case == "f_with_spread050":
         fill = _fill(pins)
     variant = {"variant_x": "x", "f_with_spread050": "spread050"}.get(case, "primary")
-    with pytest.raises(ValueError) as caught:
+    with pytest.raises((fvi.FairValueRefusal, FairValueRefusal)) as caught:
         sel.open_run(fill, sel.FInputs(pins, _unread, "snap-1", variant), qt.DEFAULT_PLAN, "snap-1", root=tmp_path)
     assert caught.value.details["reason"] == reason
+    assert caught.value.code == ("RESOURCE_LIMIT_EXCEEDED" if reason == "input_too_large" else "EXPERIMENT_IDENTITY_CONFLICT")
 
 
 def _spec(*amendments):
@@ -210,7 +211,7 @@ def _spec(*amendments):
 def _refused(reason, call):
     with pytest.raises(fvi.FairValueRefusal) as caught:
         call()
-    assert caught.value.details["reason"] == reason
+    assert caught.value.details["reason"] == reason and caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 F_CARRIER = {"id": "F", "fvf_id": fvr.fvf_id()}
@@ -256,7 +257,7 @@ def test_a_leg_table_with_another_pinned_pair_refuses_legs_constants_mismatch(tm
     table = _structure_table(fq, chunk, exit_).assign(**{column: value})
     with pytest.raises(FairValueRefusal) as caught:
         af.AFills(fq, MODEL)._structure(table, exit_)
-    assert caught.value.details["reason"] == "legs_constants_mismatch"
+    assert caught.value.details["reason"] == "legs_constants_mismatch" and caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 @pytest.mark.parametrize("exit_", [False, True], ids=["entry", "exit"])
@@ -265,7 +266,19 @@ def test_a_leg_table_without_the_binding_columns_refuses_legs_unbound(tmp_path, 
     table = _structure_table(fq, chunk, exit_).drop(columns=["variant"])
     with pytest.raises(FairValueRefusal) as caught:
         af.AFills(fq, MODEL)._structure(table, exit_)
-    assert caught.value.details["reason"] == "legs_unbound"
+    assert caught.value.details["reason"] == "legs_unbound" and caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+@pytest.mark.parametrize("exit_", [False, True], ids=["entry", "exit"])
+@pytest.mark.parametrize("column", ["constants_id", "variant"])
+def test_a_leg_table_with_a_null_binding_value_refuses_legs_unbound(tmp_path, exit_, column):
+    fq, chunk = _model_quotes(tmp_path, qt._frames(), MODEL)
+    table = _structure_table(fq, chunk, exit_)
+    table[column] = table[column].astype(object)
+    table.loc[table.index[0], column] = None  # the columns exist; one row's binding is missing
+    with pytest.raises(FairValueRefusal) as caught:
+        af.AFills(fq, MODEL)._structure(table, exit_)
+    assert caught.value.details["reason"] == "legs_unbound" and caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 def test_a_wide_quote_is_refused_as_f_fill_over_mid_and_is_a_skip_reason_only_of_model_a(tmp_path, monkeypatch):
