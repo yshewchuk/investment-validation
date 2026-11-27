@@ -78,9 +78,17 @@ def _spec(share=0.5, floor=2):
 SPEC = _spec()
 
 
+class _FakeRepo:
+    def scan(self, query, *, table_name, max_object_bytes=None):
+        raise AssertionError("unexpected scan")
+
+
+REPO = _FakeRepo()
+
+
 def _sealed(rows=ROWS, admitted=None):
     return {
-        "binding": "bind-y0", "repository": "repo", "snapshot": "snap",
+        "binding": "bind-y0", "repository": REPO, "snapshot": "snap",
         "events": [{"event_id": r[0], "ticker": r[1], "event_date": r[2], "session": r[3]}
                    for r in rows if admitted is None or r[0] in admitted],
         "context": {"target_events": [{"event_id": r[0], "ticker": r[1], "event_date": r[2],
@@ -136,7 +144,7 @@ def test_happy_path_returns_the_hand_written_report_and_calls_each_source_once(c
     out = _run(rec, max_object_bytes=1234)
     assert out == {"y0": "2021", "sealed_binding": "bind-y0", "chain_share_min": 0.5, "training_years_min": 2,
                    "years": HAPPY}
-    assert rec.calendar_calls == [("repo", "snap", 1234)]
+    assert rec.calendar_calls == [(REPO, "snap", 1234)]
     assert rec.chain_caps == [1234] * len(MONTHS)
     assert rec.label_calls == [(sorted(r[0] for r in ROWS if _year(r) <= "2024"), "2025-01-01")]
     assert [{(k[1].year, k[1].month) for k in call} for call in rec.chain_calls] == [{m} for m in MONTHS]
