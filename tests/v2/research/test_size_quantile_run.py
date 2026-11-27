@@ -171,7 +171,7 @@ def test_full_run_writes_run_inputs_before_the_first_fit(monkeypatch, tmp_path):
     assert "b3" not in run_inputs
     assert run_inputs["content_hash"] == content_hash({k: v for k, v in run_inputs.items() if k != "content_hash"})
     assert report["inputs"]["run_inputs_hash"] == run_inputs["content_hash"]
-    assert "y0_check" not in report["not_included"]
+    assert "y0_check" in report["not_included"]
     labels = world["labels"]
     b0 = content_hash(sorted([e, float(labels.at[e, "abs_move"]), float(labels.at[e, "crush_pct_iv30"])]
                              for e in labels.index))
@@ -304,3 +304,10 @@ def test_main_success_prints_one_json_line_and_returns_0(monkeypatch, capsys):
     assert run_mod.main(["--sources-config", "c.json", "--out-dir", "o", "--tickers", "3"]) == 0
     lines = capsys.readouterr().out.splitlines()
     assert len(lines) == 1 and json.loads(lines[0]) == {"mode": "smoke", "content_hash": "sha256:x"}
+
+
+def test_main_accepts_no_ledger_as_a_noop_and_passes_the_same_args(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(run_mod, "run", lambda *args: recorded.append(args) or {"mode": "smoke"})
+    assert run_mod.main(["--sources-config", "c.json", "--out-dir", "o", "--tickers", "3", "--no-ledger"]) == 0
+    assert recorded == [("c.json", "o", 3)]

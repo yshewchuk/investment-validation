@@ -148,7 +148,7 @@ def run_stage_a(sealed, years, admitted, fetch, out_dir, *, production_hash, tab
                     "reasons": verdict["reasons"], "arm_verdicts": verdict["arms"],
                     "fit_status": {year: r["status"] for year, r in walk.items()},
                     "selection_period_disclosure": spec["stage_a"]["selection_period_disclosure"],
-                    "not_included": NOT_INCLUDED[run_inputs_hash is not None:], "floor_report": floors,
+                    "not_included": NOT_INCLUDED, "floor_report": floors,
                     "arms": {arm: {**{k: v for k, v in res.items() if k != "paired_ids"}, "conditional": {
                         **res["conditional"], "rows": res["conditional"]["rows"].rename_axis("event_id").reset_index()}}
                         for arm, res in results.items()},

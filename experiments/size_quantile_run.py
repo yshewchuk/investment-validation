@@ -120,6 +120,7 @@ def main(argv=None):
     parser.add_argument("--sources-config", required=True)
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--tickers", type=int, default=None, help="smoke: this many tickers (smallest sha256 ranks)")
+    parser.add_argument("--no-ledger", action="store_true", help="accepted no-op: this runner never writes the ledger")
     args = parser.parse_args(argv)
     try:
         print(json.dumps(run(args.sources_config, args.out_dir, args.tickers)))
