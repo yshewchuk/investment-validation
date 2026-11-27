@@ -13,7 +13,7 @@ def _in(frames, window):
 
 
 def _skipped(cands):
-    return set() if cands.empty else set(cands.loc[cands["reason"].isin(ff.ENTRY_REASONS), "event_id"])
+    return set() if cands.empty else set(cands.loc[cands["reason"].isin(ff.SKIP_REASONS), "event_id"])
 
 
 def views(rows, names):

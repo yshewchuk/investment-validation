@@ -58,16 +58,17 @@ def _admit(plan):
         raise fvi.FairValueRefusal("plan_invalid", "plan: null, duplicate event_id, bad ticker, bad date, or misordered dates")
 
 
-def _price(rows, vols, side):
+def _price(rows, vols, side, price=None):
     """batches start about every fvr.BATCH_ROWS rows and never split an expiry (a batch may exceed it); input order kept."""
+    price = price or fvf.leg_fills
     if not len(rows):
-        return fvf.leg_fills(rows, vols)
+        return price(rows, vols)
     grouped = rows.groupby(_EXPIRY)
     starts = grouped.size().cumsum().shift(fill_value=0).to_numpy() // fvr.BATCH_ROWS
     batches, parts, done = rows.groupby(starts[grouped.ngroup().to_numpy()]), [], 0
     started, total = time.monotonic(), len(rows)
     for _, part in batches:
-        parts.append(fvf.leg_fills(part, vols))
+        parts.append(price(part, vols))
         done, elapsed = done + len(part), time.monotonic() - started
         _LOG.info("F quotes %s batch %d/%d rows %d/%d rows/s=%.0f eta=%.0fs rss=%.0fMiB", side, len(parts), batches.ngroups,
                   done, total, done / max(elapsed, 1e-9), elapsed / done * (total - done), _rss_mib())
@@ -78,13 +79,14 @@ class FQuotes:
     """read_quotes(expiries) must return every listed row (fvi.QUOTE_COLUMNS) of each requested (ticker, obs_date, expiry)."""
 
     def __init__(self, plan, read_quotes, *, tables_root, pins, snapshot_id, expected_snapshot_id, vol_scale, rate_scale,
-                 rate_rules=None):
+                 rate_rules=None, model=None):
         if not (isinstance(snapshot_id, str) and snapshot_id and snapshot_id == expected_snapshot_id):
             raise fvi.FairValueRefusal("snapshot_binding", "snapshot ids are missing or differ")
         admit_inputs(pins, read_quotes)
         _admit(plan)
         self._plan = plan.set_axis(plan["event_id"].astype(str).to_numpy(), axis=0)
         self._read, self._root, self._pins, self._rules = read_quotes, tables_root, pins, dict(rate_rules or {})
+        self._model = model  # None is model F; a model A (size_width_a_fills.ModelA) prices the fills and binds the leg table
         self._ids, self._scales = (snapshot_id, expected_snapshot_id), (vol_scale, rate_scale)
         self.counts, self.table_hashes, self._chunk, self._tables = Counter(), {}, None, {}
         self._built = {}
@@ -129,7 +131,7 @@ class FQuotes:
                                  rate_scale=self._scales[1], file_sha256={r: self._pins["files"][r] for r in rels}, **self._rules)
         self.table_hashes.update(tables.hashes)
         inputs = rows.join(fvi.lookup_inputs(rows, tables.rates))
-        priced = _price(inputs, tables.vols, side)
+        priced = _price(inputs, tables.vols, side, *(() if self._model is None else (self._model.leg_fills,)))
         self.coverage.append(ri.leg_counts(priced, inputs, point=side))  # each priced row once: a table is built once per (chunk key, side)
         priced[RAW_COLS], priced["smvVol"] = inputs[RAW_COLS], fvi.attach_vol(rows, tables.vols)
         priced["bid"], priced["ask"] = (pd.to_numeric(rows[c], errors="coerce") for c in ("bid", "ask"))
@@ -147,6 +149,8 @@ class FQuotes:
     def legs(self, chunk, i, resolved, *, exit=False):
         side, table, event = ("exit" if exit else "entry"), self.table(chunk, exit=exit), str(chunk["event_id"][i])
         names, pieces = (("bid_x", "ask_x") if exit else ("bid_e", "ask_e")), []
+        cols = _LEG_COLS if self._model is None else _LEG_COLS + list(self._model.columns())
+        bind = {} if self._model is None else self._model.columns()
         for leg in resolved:
             idx = leg["idx"]
             key = self.leg_key(chunk, i, idx, exit=exit)
@@ -163,9 +167,9 @@ class FQuotes:
             if listed:
                 pieces.append(table.iloc[[pos]])
             else:  # F's unlisted exit quote: unpriceable, unknown liquidity, thin terms at F's values
-                vals = dict.fromkeys(_LEG_COLS, np.nan) | dict(zip(_KEY, key)) | {
+                vals = dict.fromkeys(cols, np.nan) | dict(zip(_KEY, key)) | {
                     "status": "unpriceable", "repaired": False, "clamp_side": None, "source": None, "carry_fallback": False,
                     "dividend_fallback": False, "dividend_applied": False, "unknown_bid_size": True, "unknown_ask_size": True,
-                    "unknown_oi": True, "thin_size_buy": fvf.UNKNOWN_THIN, "thin_size_sell": fvf.UNKNOWN_THIN, "thin_oi": fvf.UNKNOWN_THIN}
-                pieces.append(pd.DataFrame([vals], columns=_LEG_COLS))
-        return pd.concat(pieces or [table.iloc[:0]], ignore_index=True)[_LEG_COLS]
+                    "unknown_oi": True, "thin_size_buy": fvf.UNKNOWN_THIN, "thin_size_sell": fvf.UNKNOWN_THIN, "thin_oi": fvf.UNKNOWN_THIN} | bind
+                pieces.append(pd.DataFrame([vals], columns=cols))
+        return pd.concat(pieces or [table.iloc[:0]], ignore_index=True)[cols]

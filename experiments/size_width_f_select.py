@@ -1,4 +1,4 @@
-"""EXP-189 A1: the spec selects model F via its one amendment carrying ``fill_model``, id "F" (A1.7 R5, A1.9). ``open_run`` builds the F run (pricing and receipt binding); ``check_report`` refuses a report whose inputs do not bind what this registration selects."""
+"""EXP-189 A1 and A2: the spec selects model F via its one amendment carrying ``fill_model``, id "F" (A1.7 R5, A1.9); when the carriers are exactly F then A in amendment order, model A is selected (Amendment 2 supersedes; Amendment 1's entry stays), and a lone carrier may be F or A. ``open_run`` builds the F run (pricing and receipt binding); ``check_report`` refuses a report whose inputs do not bind what this registration selects."""
 import hashlib
 import json
 from collections import namedtuple
@@ -8,19 +8,21 @@ from engine import paths
 from experiments import fair_value_inputs as fvi
 from experiments import fair_value_run as fvr
 from experiments import size_pnl_receipts as receipts
-from experiments import size_width_f_fills, size_width_f_quotes, size_width_pricing
+from experiments import size_width_a_fills, size_width_f_fills, size_width_f_quotes, size_width_pricing
 
 MODE = "f7_orats_borrow_discrete_dividend"
-FInputs = namedtuple("FInputs", "pins read_quotes snapshot_id")
+FInputs = namedtuple("FInputs", "pins read_quotes snapshot_id variant", defaults=("primary",))
 FRun = namedtuple("FRun", "pricing binding")
 
 
 def _validate(fill):
-    """The one shared check of a selected fill_model: a mapping with id "F" and a matching fvf_id. Returns it."""
+    """The one shared check of a selected fill_model: a mapping with id "F" or "A" (A with a constants_id string) and a matching fvf_id. Returns it."""
     if not isinstance(fill, dict):
         raise fvi.FairValueRefusal("fill_model_invalid", "fill_model is not a mapping")
-    if fill.get("id") != "F":
-        raise fvi.FairValueRefusal("fill_model_id", "fill_model id is not F")
+    if fill.get("id") not in ("F", "A"):
+        raise fvi.FairValueRefusal("fill_model_id", "fill_model id is not F or A")
+    if fill["id"] == "A" and not (isinstance(fill.get("constants_id"), str) and fill["constants_id"]):
+        raise fvi.FairValueRefusal("fill_model_invalid", "fill_model A has no constants_id string")
     fvf = fill.get("fvf_id")
     if not isinstance(fvf, str) or not fvf:
         raise fvi.FairValueRefusal("fill_model_invalid", "fill_model has no fvf_id string")
@@ -29,13 +31,13 @@ def _validate(fill):
 
 
 def fill_model(spec):
-    """The validated dict of the one amendment carrying ``fill_model`` (id "F"), or None when no amendment carries one."""
+    """The validated dict of the amendment carrying ``fill_model``: the one carrier, or the pair F then A in amendment order (A is returned); None when no amendment carries one."""
     carriers = [a["fill_model"] for a in spec.get("amendments", []) if isinstance(a, dict) and "fill_model" in a]
-    if len(carriers) > 1:
-        raise fvi.FairValueRefusal("fill_model_ambiguous", f"{len(carriers)} amendments carry fill_model")
     if not carriers:
         return None
-    return _validate(carriers[0])
+    if len(carriers) > 1 and [c.get("id") if isinstance(c, dict) else None for c in carriers] != ["F", "A"]:
+        raise fvi.FairValueRefusal("fill_model_ambiguous", f"{len(carriers)} amendments carry fill_model")
+    return _validate(carriers[-1])
 
 
 def open_run(fill, inputs=None, plan=None, expected_snapshot_id=None, *, root=None):
@@ -56,6 +58,9 @@ def open_run(fill, inputs=None, plan=None, expected_snapshot_id=None, *, root=No
             and all(isinstance(k, str) and isinstance(v, str) for k, v in r["manifest_units"].items())):
         raise fvi.FairValueRefusal("fill_model_invalid", "fill_model lacks a field, or its rate rules, reingest path, hash or units are malformed")
     if fill["carry_dividend_mode"] != MODE: raise fvi.FairValueRefusal("carry_dividend_mode", "the carry and dividend mode is not the registered one")
+    model, extra = None, {}
+    if fill["id"] == "A": model, extra = size_width_a_fills.load(fill["constants_id"], inputs.variant)
+    elif inputs.variant != "primary": raise fvi.FairValueRefusal("fill_variant_unexpected", "a fill variant applies to model A only")
     tables = Path(paths.ROOT if root is None else root) / r["path"]
     vol, rate = fvi._unit_scale(fill["vol_scale"], "vol_scale"), fvi._unit_scale(fill["rate_scale"], "rate_scale")
     blob = fvi._read_capped(tables / "manifest.json", fvi.MAX_MANIFEST_BYTES, "manifest.json") if (tables / "manifest.json").is_file() else b""
@@ -66,13 +71,14 @@ def open_run(fill, inputs=None, plan=None, expected_snapshot_id=None, *, root=No
     if not (hashlib.sha256(blob).hexdigest() == pins["manifest_sha256"] == r["manifest_sha256"] and units == r["manifest_units"]):
         raise fvi.FairValueRefusal("manifest_binding", "the manifest, the pins, or the reingest hash or units differ")
     quotes = size_width_f_quotes.FQuotes(plan, inputs.read_quotes, tables_root=tables, pins=pins, snapshot_id=inputs.snapshot_id,
-                                         expected_snapshot_id=expected_snapshot_id, vol_scale=vol, rate_scale=rate, rate_rules=rules)
-    binding = {"fill_model_id": "F", "fvf_id": fill["fvf_id"], "reingest_manifest_sha256": r["manifest_sha256"],
+                                         expected_snapshot_id=expected_snapshot_id, vol_scale=vol, rate_scale=rate, rate_rules=rules, model=model)
+    binding = {"fill_model_id": fill["id"], "fvf_id": fill["fvf_id"], "reingest_manifest_sha256": r["manifest_sha256"],
                "every_table_file_sha256": dict(sorted(pins["files"].items())), "quote_snapshot_id": inputs.snapshot_id,
                "units": {"vol_scale": vol, "rate_scale": rate, "manifest_units": r["manifest_units"]},
                "rate_out_of_range": rules["rate_out_of_range"], "rate_empty_row": rules["rate_empty_row"],
-               "carry_dividend_mode": fill["carry_dividend_mode"]}
-    return FRun(size_width_pricing.load(fills=size_width_f_fills.FFills(quotes)), binding)
+               "carry_dividend_mode": fill["carry_dividend_mode"], **extra}
+    fills = size_width_f_fills.FFills(quotes) if model is None else size_width_a_fills.AFills(quotes, model)
+    return FRun(size_width_pricing.load(fills=fills), binding)
 
 
 def check_report(receipt, out_dir):
@@ -82,6 +88,6 @@ def check_report(receipt, out_dir):
     if fill is not None: _validate(fill)
     inputs = receipts.load_receipt(path)
     bound = inputs.get("fill_model")
-    ok = "fill_model" not in inputs if fill is None else (isinstance(bound, dict) and bound.get("fill_model_id") == "F" and inputs.get("spec_hash") == receipt.get("spec_hash"))
+    ok = "fill_model" not in inputs if fill is None else (isinstance(bound, dict) and bound.get("fill_model_id") == fill["id"] and inputs.get("spec_hash") == receipt.get("spec_hash"))
     if not ok:
         raise fvi.FairValueRefusal("f_report_unbound", "the out-dir's inputs do not bind what this registration selects")

@@ -35,6 +35,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--sources-config", default=None, help="JSON config read by the --sources factory")
     parser.add_argument("--f-pins", default=None, help="F spec only, inner and outer: JSON with manifest_sha256 and files (the pinned tables)")
     parser.add_argument("--f-quotes", default=None, help="F spec only, inner and outer: MODULE:FUNC, called with the parsed args, returns (read_quotes, snapshot_id)")
+    parser.add_argument("--fill-variant", default=None, help="model A spec only, inner and outer: primary (default) or spread050; recorded in the receipts")
     parser.add_argument("--f-max-object-bytes", type=int, default=None, help="F spec only: per-fragment byte cap of the experiments.size_width_f_chains reader (default 256 MiB)")
     parser.add_argument("--no-ledger", action="store_true", required=True, help="required: every non-recorded run uses --no-ledger")
     return parser
@@ -94,12 +95,13 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 from experiments import size_pnl_driver, size_width_driver  # after the gates, so a missing PLANNED row refuses first
                 if (args.f_pins is None) != (args.f_quotes is None): raise fail(_INVALID, "--f-pins and --f-quotes must be given together", details={"reason": "f_inputs_incomplete"})
+                if args.fill_variant is not None and args.f_pins is None: raise fail(_INVALID, "--fill-variant needs --f-pins and --f-quotes", details={"reason": "f_inputs_incomplete"})
                 sources = size_pnl_driver.check_sources(_factory(args.sources, args, "--sources", "sources_invalid"))
                 if sources.expected != args.expected_identities:
                     raise fail(_CONFLICT, "--expected differs from the sources' expected identities", details={"reason": "expected_mismatch"})
                 pair = _factory(args.f_quotes, args, "--f-quotes", "f_quotes_invalid") if args.f_quotes is not None else None
                 if pair is not None and not (isinstance(pair, (tuple, list)) and len(pair) == 2 and callable(pair[0])): raise fail(_INVALID, "--f-quotes must return (read_quotes, snapshot_id)", details={"reason": "f_quotes_invalid"})
-                kwargs = {} if pair is None else {"f_inputs": size_width_f_select.FInputs(_read_json(args.f_pins), *pair)}
+                kwargs = {} if pair is None else {"f_inputs": size_width_f_select.FInputs(_read_json(args.f_pins), *pair, "primary" if args.fill_variant is None else args.fill_variant)}
                 summary = size_width_driver.run(sources, args.stage, args.out_dir, event_ids=event_ids, prereg=lambda: receipt, **kwargs)
     except (OpsError, Refusal, DataError, fair_value_inputs.FairValueRefusal, fair_value_legs.FairValueRefusal) as exc:
         details = exc.problem.details if isinstance(exc, (OpsError, DataError)) else exc.details

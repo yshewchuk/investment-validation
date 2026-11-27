@@ -990,7 +990,7 @@ EXP-190 (`guides/size_quantile_move_design.md`): `size_quantile_prereg` never wr
 
 ## Fill model F
 
-EXP-189 ([design](../guides/fair_value_fill_design.md)). `fair_value_carry` prices; `fair_value_legs` clamps; `fair_value_fills` fills (uses `engine.fills.MIN_MEANINGFUL_COST`; [README](README.md)). Unwired `fair_value_apply` applies fitted fills.
+EXP-189 ([design](../guides/fair_value_fill_design.md)). `fair_value_carry` prices; `fair_value_legs` clamps; `fair_value_fills` fills (uses `engine.fills.MIN_MEANINGFUL_COST`; [README](README.md)). `size_width_a_fills` wires `fair_value_apply`.
 
 |Condition|Outcome|
 |-|-|
@@ -1000,7 +1000,7 @@ EXP-189 ([design](../guides/fair_value_fill_design.md)). `fair_value_carry` pric
 |Entry leg not `ok`|`undetermined`|
 |Guard `not_a_debit`/`fill_over_fair`/`spread_over_debit`|`skip`|
 |`fair_value_apply` guard: `fill_over_mid` replaces `fill_over_fair`|`skip`|
-|`fair_value_apply`: `constants_invalid`/`constants_id_mismatch`/`variant_unknown`/`legs_unbound`/`legs_constants_mismatch`|`FairValueRefusal`, no output|
+|`fair_value_apply`/`size_width_a_fills`: `constants_unreadable`/`constants_invalid`/`constants_id_mismatch`/`variant_unknown`/`legs_unbound`/`legs_constants_mismatch`|`FairValueRefusal`, no output|
 |Exit leg `unpriceable`|`unpriceable`|
 |Exit fair value unavailable|mid, `exit_fair_mid`|
 |`exit_negative`|kept|
