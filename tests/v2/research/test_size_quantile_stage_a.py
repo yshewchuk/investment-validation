@@ -75,8 +75,10 @@ def _world():
     events.sort(key=lambda e: e["id"])
     ids = [e["id"] for e in events]
     # Outer training lists are the annual rule's: every event dated before the year starts, in event order.
-    folds = [{"outer": {"year": y, "training_candidate_event_ids": [
-        e["id"] for e in events if e["date"] < f"{y}-01-01"]}} for y in ("2023", "2024", "2025")]
+    folds = [{"outer": {"year": "2025", "training_candidate_event_ids": [
+        e["id"] for e in events if e["date"] < "2025-01-01"]},
+        "inner": [{"year": y, "training_candidate_event_ids": [
+            e["id"] for e in events if e["date"] < f"{y}-01-01"]} for y in ("2023", "2024")]}]
     sealed = {
         "binding": BINDING, "dictionary_hash": DICT, "model_columns": ["f_mu", "f_s", "f_empty"],
         "evaluation_labels_before": "2026-02-01", "events": [{"event_id": i} for i in ids],

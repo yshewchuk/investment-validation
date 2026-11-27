@@ -49,16 +49,18 @@ def _evaluation(fold, sealed, targets, embargoed):
 
 
 def _parity(sealed, targets, embargoed):
-    outers = [g["outer"] for g in sealed["plan"]["folds"]]
-    if [outer["year"] for outer in outers] != list(SEALED_YEARS):
-        raise _refuse("fold_parity_mismatch", "the sealed outer years are not 2023, 2024, 2025")
-    for outer in outers:
-        year = outer["year"]
+    # The sealed SIZE plan nests 2023 and 2024 as inner folds of the 2025 outer fold.
+    folds = sorted([fold for g in sealed["plan"]["folds"] for fold in [*g["inner"], g["outer"]]],
+                   key=lambda f: f["year"])
+    if [fold["year"] for fold in folds] != list(SEALED_YEARS):
+        raise _refuse("fold_parity_mismatch", "the sealed fold years are not 2023, 2024, 2025, each once")
+    for fold in folds:
+        year = fold["year"]
         try:
             _, kept = _rule_fold(year, sealed, targets, embargoed)
         except DataError:
             raise _refuse("fold_parity_mismatch", f"the {year} fold cannot be rebuilt from the sealed events") from None
-        if kept != outer["training_candidate_event_ids"]:
+        if kept != fold["training_candidate_event_ids"]:
             raise _refuse("fold_parity_mismatch", f"the {year} training list differs from the sealed plan")
 
 
@@ -89,7 +91,7 @@ def _folds(sealed, years):
 
 def annual_folds(sealed, years):
     """Annual outer folds for the requested years, returned only after the rule reproduces the sealed 2023-2025
-    outer TRAINING id lists exactly (ids and order). Evaluation ids are not compared."""
+    fold (2025 outer, 2023 and 2024 inner) TRAINING id lists exactly (ids and order). Evaluation ids are not compared."""
     _check_years(years)
     with stage("quantile folds"):
         try:

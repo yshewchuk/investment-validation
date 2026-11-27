@@ -40,12 +40,12 @@ T24 = ["e20a", "e20b", "e21a", "e21b", "e22a", "e22b", "e23a", "e23b", "e23c"]
 T25 = ["e20a", "e20b", "e21a", "e21b", "e22a", "e22b", "e23a", "e23b", "e23c", "e24a", "e24b", "e24c"]
 
 
-def _outer(year, ids):
-    return {"outer": {"year": year, "training_candidate_event_ids": list(ids)}}
+def _fold(year, ids):
+    return {"year": year, "training_candidate_event_ids": list(ids)}
 
 
 def _plan(t23=T23, t24=T24, t25=T25):
-    return [_outer("2023", t23), _outer("2024", t24), _outer("2025", t25)]
+    return [{"outer": _fold("2025", t25), "inner": [_fold("2023", t23), _fold("2024", t24)]}]
 
 
 def _sealed(rows=ROWS, plan=None, windows=(), admitted=None, evaluation_labels_before=EVAL_BEFORE):
@@ -140,13 +140,24 @@ def test_admission_removes_the_event_but_it_still_counts_for_the_cutoff():
     assert out["2025"]["evaluation_event_ids"] == ["e25a", "e25b", "e25c"]
 
 
+YEAR_BREAKS = [
+    pytest.param({"plan": [{"outer": _fold("2025", T25), "inner": [_fold("2023", T23)]}]}, id="sealed_year_missing"),
+    pytest.param({"plan": [{"outer": _fold("2025", T25), "inner": [_fold("2023", T23), _fold("2024", T24),
+                                                                  _fold("2024", T24)]}]}, id="repeated_year"),
+    pytest.param({"plan": [{"outer": _fold("2025", T25), "inner": [_fold("2023", T23), _fold("2024", T24),
+                                                                  _fold("2022", T23)]}]}, id="extra_year"),
+    pytest.param({"plan": [{"outer": _fold("2023", T23), "inner": [_fold("2023", T23)]},
+                           {"outer": _fold("2024", T24), "inner": [_fold("2023", T23)]},
+                           {"outer": _fold("2025", T25), "inner": [_fold("2023", T23), _fold("2024", T24)]}]},
+                 id="three_outers_with_inners"),
+]
 PARITY_BREAKS = [
     pytest.param({"plan": _plan(t24=[i for i in T24 if i != "e22b"])}, id="missing_id"),
     pytest.param({"plan": _plan(t25=T25 + ["e25a"])}, id="extra_id"),
     pytest.param({"plan": _plan(t24=["e20a", "e20b", "e21b", "e21a", "e22a", "e22b", "e23a", "e23b", "e23c"])},
                  id="reordered"),
-    pytest.param({"plan": _plan()[:2]}, id="sealed_year_missing"),
     pytest.param({"rows": [r for r in ROWS if r["event_date"][:4] != "2025"]}, id="sealed_year_without_events"),
+    *YEAR_BREAKS,
 ]
 
 
@@ -158,6 +169,31 @@ def test_parity_refusals(change):
     message = exc.value.problem.message
     assert message.startswith("fold_parity_mismatch: ")
     assert not any(event_id in message for event_id in ALL_IDS)
+
+
+@pytest.mark.parametrize("change", YEAR_BREAKS)
+def test_year_set_refusals_name_the_sealed_fold_years(change):
+    with pytest.raises(OpsError) as exc:
+        annual_folds(_sealed(**change), ["2024"])
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "fold_parity_mismatch")
+    assert "sealed fold years" in exc.value.problem.message
+
+
+def test_inner_folds_listed_in_reverse_year_order_still_pass():
+    plan = [{"outer": _fold("2025", T25), "inner": [_fold("2024", T24), _fold("2023", T23)]}]
+    out = annual_folds(_sealed(plan=plan), ["2024"])
+    assert out["2024"]["training_event_ids"] == T24
+
+
+@pytest.mark.parametrize("plan", [
+    pytest.param([{"outer": _fold("2023", T23)}, {"outer": _fold("2024", T24)}, {"outer": _fold("2025", T25)}],
+                 id="old_shape_outers_without_inner"),
+    pytest.param([{"inner": [_fold("2023", T23), _fold("2024", T24)]}], id="group_missing_outer"),
+])
+def test_malformed_group_refuses_sealed_malformed(plan):
+    with pytest.raises(OpsError) as exc:
+        annual_folds(_sealed(plan=plan), ["2024"])
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "sealed_malformed")
 
 
 def test_parity_refuses_even_when_only_an_earlier_year_is_requested():
