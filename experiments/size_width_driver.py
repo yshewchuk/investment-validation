@@ -143,7 +143,8 @@ def _load(src, stage, ids, receipt, f=None):
     if f is not None:
         body["fill_model"] = f.binding
     inputs_hash = content_hash(body)
-    inputs = {**body, "inputs_hash": inputs_hash, "table": base._table_binding(ready["M0"], ids),
+    # recorded per stage, outside inputs_hash and fill_model
+    inputs = {**body, **(f.recorded if f is not None else {}), "inputs_hash": inputs_hash, "table": base._table_binding(ready["M0"], ids),
               "plan": content_hash(base._plan_rows(plan)), "facts": content_hash(base._facts_rows(survivors, stage_ids))}
     return {"ids": ids, "plan": plan, "table": table, "labels": labels, "facts_all": facts_all, "sessions": base._sessions(src),
             "exits": base._exits(src), "inputs_hash": inputs_hash, "inputs": inputs, "pricing": f.pricing if f is not None else PRICING}

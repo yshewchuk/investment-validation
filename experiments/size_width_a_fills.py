@@ -4,7 +4,7 @@
 ``constants_unreadable`` (not a readable regular file), ``input_too_large`` (over MAX_CONSTANTS_BYTES, RESOURCE_LIMIT_EXCEEDED),
 ``constants_unreadable`` (not JSON), then fair_value_apply.load_constants' ``constants_invalid``, ``constants_id_mismatch``,
 ``variant_unknown``. It returns the ModelA and the extra receipt fields: constants_id, variant, constants_file_sha256
-(the bytes parsed) and model_a_source_sha256 (one hash per SOURCE_FILES file).
+(the bytes parsed) and model_a_source_sha256 (one hash per SOURCE_FILES file). constants_file_sha256 is recorded in each stage's inputs receipt (top level) and compared with nothing across stages (the pinned constants_id already refuses any changed constant).
 ``AFills`` is FFills with model A entry and exit; the columns debit_F and proceeds_F hold model A values. The leg table
 carries constants_id and variant (#3104 choice B). Entry and exit each refuse ``legs_unbound`` or
 ``legs_constants_mismatch`` unless every row carries the pinned pair, so a trade's two tables cannot differ.
@@ -70,3 +70,10 @@ class AFills(FFills):
         if any((table[c] != v).any() for c, v in bound.items()):
             raise FairValueRefusal("legs_constants_mismatch")
         return fva.structure_entry(table)
+
+    def exit_value_at_eff_mid(self, trade):
+        if self.exit_result(trade).outcome == "unpriceable": return float("nan")
+        legs = [leg for leg in trade.legs if leg["qty"] > 0]
+        table = self.quotes.legs(trade.chunk, trade.i, legs, exit=True)
+        mid = ((table["eff_bid"] + table["eff_ask"]) / 2).to_numpy(dtype=float)
+        return float(sum(leg["qty"] * (1.0 if leg["side"] == "buy" else -1.0) * x for leg, x in zip(legs, mid)))

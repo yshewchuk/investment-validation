@@ -12,7 +12,7 @@ from experiments import size_width_a_fills, size_width_f_fills, size_width_f_quo
 
 MODE = "f7_orats_borrow_discrete_dividend"
 FInputs = namedtuple("FInputs", "pins read_quotes snapshot_id variant", defaults=("primary",))
-FRun = namedtuple("FRun", "pricing binding")
+FRun = namedtuple("FRun", "pricing binding recorded", defaults=({},))
 
 
 def _validate(fill):
@@ -61,6 +61,7 @@ def open_run(fill, inputs=None, plan=None, expected_snapshot_id=None, *, root=No
     model, extra = None, {}
     if fill["id"] == "A": model, extra = size_width_a_fills.load(fill["constants_id"], inputs.variant)
     elif inputs.variant != "primary": raise fvi.FairValueRefusal("fill_variant_unexpected", "a fill variant applies to model A only")
+    recorded = {"constants_file_sha256": extra.pop("constants_file_sha256")} if model is not None else {}
     tables = Path(paths.ROOT if root is None else root) / r["path"]
     vol, rate = fvi._unit_scale(fill["vol_scale"], "vol_scale"), fvi._unit_scale(fill["rate_scale"], "rate_scale")
     blob = fvi._read_capped(tables / "manifest.json", fvi.MAX_MANIFEST_BYTES, "manifest.json") if (tables / "manifest.json").is_file() else b""
@@ -78,7 +79,7 @@ def open_run(fill, inputs=None, plan=None, expected_snapshot_id=None, *, root=No
                "rate_out_of_range": rules["rate_out_of_range"], "rate_empty_row": rules["rate_empty_row"],
                "carry_dividend_mode": fill["carry_dividend_mode"], **extra}
     fills = size_width_f_fills.FFills(quotes) if model is None else size_width_a_fills.AFills(quotes, model)
-    return FRun(size_width_pricing.load(fills=fills), binding)
+    return FRun(size_width_pricing.load(fills=fills), binding, recorded)
 
 
 def check_report(receipt, out_dir):

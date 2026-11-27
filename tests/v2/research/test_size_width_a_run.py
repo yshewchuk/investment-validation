@@ -26,9 +26,11 @@ from experiments import size_width_f_counts as fc
 from experiments import size_width_f_fills as ff
 from experiments import size_width_f_quotes as wf
 from experiments import size_width_f_select as sel
+from experiments import size_width_f_store as fstore
 from experiments import size_width_report as report
 from experiments.fair_value_legs import FairValueRefusal
 from experiments.size_pnl_shortvol import Refusal
+from experiments.size_pnl_straddle import EXIT_UNQUOTED
 from experiments.size_width_fills import Skip
 from tests.v2.research import test_size_pnl_driver as pnl
 from tests.v2.research import test_size_width_f_quotes as qt
@@ -84,7 +86,11 @@ def test_the_a_run_prices_every_taken_arm_1_0_row_at_model_a_and_binds_its_recei
     frames, root, pins, src = _setup(tmp_path, monkeypatch)
     path = _constants(tmp_path, monkeypatch)
     out, fill = tmp_path / "out", _a_fill(pins)
+    loaded = {}
     for stage in ("inner", "outer"):
+        if stage == "outer" and variant == "spread050":
+            path.write_text(json.dumps(DOC, indent=2), encoding="utf-8")  # the same constants, re-formatted: only the bytes change
+        loaded[stage] = path.read_bytes()
         _a_run(src, out, stage, fill, frames, pins, variant)
     frozen = pd.read_parquet(out / "months" / "2025-02.parquet")
     taken = frozen[(frozen["status"] == "taken") & (frozen["arm_or_rule"] == "1.0")]
@@ -94,13 +100,36 @@ def test_the_a_run_prices_every_taken_arm_1_0_row_at_model_a_and_binds_its_recei
         debit, proceeds = _a_oracle(_traded(chunk, pos, str(rec["event_id"]), rec["structure"]), chunk, variant)
         assert rec["entry_cost"] == pytest.approx(debit, rel=1e-9, abs=1e-12)
         assert rec["exit_value"] == pytest.approx(proceeds, rel=1e-9, abs=1e-12)
+    receipt = {}
     for stage in ("inner", "outer"):
-        bound = receipts.load_receipt(out / "receipts" / f"inputs_{stage}.json")["fill_model"]
+        receipt[stage] = receipts.load_receipt(out / "receipts" / f"inputs_{stage}.json")
+        bound = receipt[stage]["fill_model"]
         assert bound["fill_model_id"] == "A" and bound["constants_id"] == DOC["constants_id"] and bound["variant"] == variant
-        assert bound["constants_file_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+        assert "constants_file_sha256" not in bound
+        assert receipt[stage]["constants_file_sha256"] == hashlib.sha256(loaded[stage]).hexdigest()
         assert bound["model_a_source_sha256"] == {n: hashlib.sha256((EXPERIMENTS / n).read_bytes()).hexdigest() for n in A_SOURCES}
         assert bound["fvf_id"] == fill["fvf_id"] and bound["quote_snapshot_id"] == "snap-1"
+    assert receipt["inner"]["inputs_hash"] == receipt["outer"]["inputs_hash"]
+    if variant == "spread050":
+        assert receipt["inner"]["constants_file_sha256"] != receipt["outer"]["constants_file_sha256"]
     assert (out / "receipts" / "inner_summary.json").exists() and (out / "receipts" / "outer_summary.json").exists()
+    checked = 0
+    for name in ("taken", "legs"):
+        for part in sorted((out / "report_inputs" / "outer").glob(f"{name}_*.parquet")):
+            rows = pd.read_parquet(part)
+            assert (rows["constants_id"] == DOC["constants_id"]).all() and (rows["variant"] == variant).all()
+            if name != "taken": continue
+            for rec in rows.to_dict("records"):
+                if rec["arm"] != "1.0" or rec["rung"] == EXIT_UNQUOTED or rec["k"] != 1.0: continue
+                want = sum(leg["qty"] * (1.0 if leg["side"] == "buy" else -1.0) * _quote(float(chunk["strike"][leg["idx"]]))[0]
+                           for leg in _traded(chunk, pos, str(rec["event_id"]), rec["structure"]))
+                assert rec["exit_value_at_eff_mid"] == pytest.approx(want, rel=1e-9, abs=1e-12)
+                checked += 1
+    assert checked >= 1
+
+
+def test_a_store_built_without_a_model_binds_nothing():
+    assert fstore.Store(None, "inner", None).bind == {}
 
 
 def test_the_two_variants_oracle_fills_differ_for_a_leg():

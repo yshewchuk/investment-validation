@@ -3,13 +3,16 @@
 grid-k candidates F priced, plus taken legs. ``taken_NNNN``: the taken rows plus ``arm``. No legs or taken rows of the anchor or fake draws are stored, only their A1.4 counts: inner table
 ``anchor_c_nontrades`` (columns arm, draws, structure, k, year, metric, reason, count; ``draws`` = sweeps summed; metric ``candidates`` is the
 denominator, metric ``nontrade`` is per decline reason, all reasons, by event year over the inner window). No C rows when C is omitted (the inner
-summary's c_status says why). Only run stages open a Store."""
+summary's c_status says why). Only run stages open a Store.
+Model A (an F store with a model) adds constants_id and variant to legs_ and taken_, and exit_value_at_eff_mid to taken_.
+Its other exit concession inputs are the existing proceeds_F, debit_F, exit_value_at_v, excluded_rung3, excluded_unpriceable and the legs' eff_bid, eff_ask, c_buy, c_sell, status."""
 import sys
 import time
 
 import pandas as pd
 
 from experiments import size_width_f_counts as fcounts, size_width_f_report_inputs as ri, size_width_f_rows
+from experiments.size_pnl_straddle import EXIT_UNQUOTED
 from experiments.size_width_sweep import WINDOWS
 from experiments.size_pnl_ladder import _rss_mib
 from experiments.size_width_fills import Trade
@@ -24,13 +27,14 @@ _NONTRADE_OUT = ["arm", "draws", "structure", "k", "year", "metric", "reason", "
 
 def open_store(out, stage, pricing):
     """A Store for an F run stage; None for current pricing, which records nothing and calls nothing new."""
-    return Store(out, stage, pricing.fills.quotes) if size_width_f_rows.is_f(pricing) else None
+    return Store(out, stage, pricing.fills.quotes, getattr(pricing.fills, "model", None)) if size_width_f_rows.is_f(pricing) else None
 
 
 class Store:
-    def __init__(self, out, stage, quotes):
+    def __init__(self, out, stage, quotes, model=None):
         self.out, self.stage, self.quotes, self.keys, self.taken_buf, self.parts, self.flags, self.n = out, stage, quotes, [], [], {}, [], 0
         self.arm_counts = {}  # arm -> one count frame per sweep counted (A1.4)
+        self.bind = {} if model is None else model.columns()
 
     def _resolved(self, sweep, chunk, events, triples):
         """(position, event_id, structure, k, resolved legs) for each (event_id, structure, k) triple of the chunk."""
@@ -58,11 +62,15 @@ class Store:
 
     def taken(self, sweep, chunk, events, rows, arm):
         """Entry and exit legs of each taken row, plus the rows labelled with their arm (fallback: phi and factors)."""
-        for i, eid, name, k, legs in self._resolved(sweep, chunk, events, zip(rows["event_id"].astype(str), rows["structure"], rows["k"])):
+        resolved = list(self._resolved(sweep, chunk, events, zip(rows["event_id"].astype(str), rows["structure"], rows["k"])))
+        for i, eid, name, k, legs in resolved:
             self._buffer(chunk, i, eid, name, k, legs, ("entry", "exit"))
         label = str(arm) if getattr(sweep, "phi", None) is None else (
             f"fallback phi={sweep.phi} factors=" + ",".join(f"{n}={v}" for n, v in sorted(sweep.factors.items())))
-        self.taken_buf.append(rows.assign(arm=label))
+        model = {**self.bind, "exit_value_at_eff_mid": [float("nan") if rung == EXIT_UNQUOTED else
+                                                       sweep.pricing.fills.exit_value_at_eff_mid(Trade(chunk, i, eid, name, tuple(legs)))
+                                                       for (i, eid, name, k, legs), rung in zip(resolved, rows["rung"])]} if self.bind else {}
+        self.taken_buf.append(rows.assign(arm=label, **model))
 
     def count_sweep(self, arm, sweep):
         """A1.4 non-trade counts of one anchor or C sweep: candidates and decline reasons per name and grid k, per window (E is not counted)."""
@@ -102,7 +110,7 @@ class Store:
                              **{c: got[c].astype(object).where(got[c].notna(), None) for c in ("source", "chain_kind", "assetType", "status")})
             parts.append(pd.concat([part.reset_index(drop=True), got], axis=1))
         legs = pd.concat(parts, ignore_index=True)
-        return legs.assign(year=pd.to_datetime(legs["obs_date"]).dt.year, mid=(legs["bid"] + legs["ask"]) / 2)[_LEG]
+        return legs.assign(year=pd.to_datetime(legs["obs_date"]).dt.year, mid=(legs["bid"] + legs["ask"]) / 2, **self.bind)[[*_LEG, *self.bind]]
 
     def close(self, inputs_hash, scope):
         """Writes the stage's receipt with the coverage, exit-flag and (when a sweep was counted) A1.4 non-trade tables; refused while any leg or taken row is unflushed."""
