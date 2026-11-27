@@ -14,7 +14,8 @@ FITTED = ("C_BASE", "C_SPREAD", "C_THIN_SIZE", "C_THIN_OI")
 
 
 def tick_size(bid, ask):
-    grid = (np.abs(bid / 0.05 - np.round(bid / 0.05)) < 1e-6) & (np.abs(ask / 0.05 - np.round(ask / 0.05)) < 1e-6)
+    m = TICK_FLOOR["multiple"]
+    grid = (np.abs(bid / m - np.round(bid / m)) < 1e-6) & (np.abs(ask / m - np.round(ask / m)) < 1e-6)
     mid = (bid + ask) / 2.0
     return np.where(~grid, TICK_FLOOR["penny"], np.where(mid < TICK_FLOOR["mid_break"] - 1e-9, TICK_FLOOR["nickel"], TICK_FLOOR["dime"]))
 

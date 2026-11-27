@@ -291,6 +291,9 @@ def test_privacy_success_and_refusal_leak_no_row_values(tmp_path, capsys, caplog
     out = tmp_path / "out"
     assert ff.main(["--fills", str(p), "--out-dir", str(out)]) == 0
     captured = capsys.readouterr()
+    stdout = json.loads(captured.out)  # the one JSON line
+    assert set(stdout) == {"input_sha256", "counts", "constants_id"}
+    assert stdout["constants_id"] == json.loads((out / "constants.json").read_text())["constants_id"]
     written = "".join(f.read_text() for f in out.iterdir())
     text = captured.out + captured.err + caplog.text + written
     assert "ZZPRIVATE" not in text and str(p) not in text and "secret_fills_name" not in text
@@ -331,7 +334,7 @@ def test_zero_used_fills_is_a_receipt_not_a_refusal(tmp_path):
     assert json.loads((out / "fit_receipt.json").read_text())["counts"]["used"] == 0
 
 
-def test_run_fit_writes_only_the_receipt(tmp_path):
+def test_run_fit_writes_constants_and_receipt(tmp_path):
     p = tmp_path / "fills.csv"
     p.write_bytes(blob_of(base_rows()))
     out = tmp_path / "out"
