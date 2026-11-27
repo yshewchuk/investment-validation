@@ -1,6 +1,6 @@
 # Fair-value marks and spread-aware fills, model F (shared design)
 
-**Status: design only.** A shared experiment-side module for EXP-190 Stage B (`guides/size_quantile_move_design.md`, section 6) and EXP-189 Amendment 1 (its owner's work); no EXP-188 or EXP-189 file or spec changes here. A consumer adopts F in its own spec and pre-registration. Content: user decisions of 2026-11-25; rules marked "mine" are my judgement calls inside them.
+**Status:** a design, partly built (section 12's slices, F6a and F6b among them, are in the code); section 9's model A is built but no experiment uses it yet. A shared experiment-side module for EXP-190 Stage B (`guides/size_quantile_move_design.md`, section 6) and EXP-189 Amendment 1 (its owner's work); no EXP-188 or EXP-189 file or spec changes here. A consumer adopts F in its own spec and pre-registration. Content: user decisions of 2026-11-25 and, in section 9, 2026-11-27; rules marked "mine" are my judgement calls inside them.
 
 **Carry and dividend amendment (2026-11-25, user decision).** Fair value uses ORATS's options-implied borrow as the carry rate, and ORATS's dividend inputs, to reprice consistently with the inputs behind `smvVol` (an aim: we have not confirmed which inputs ORATS used). It replaces the zero-dividend approximation (sections 3, 4 and their consequences in sections 7-12). The re-ingest tool (version 4) carries the fields. **New slice F7** consumes them; F1, F2 (#2901) and F3 stay as they are, pricing with carry equal to the risk-free rate and no dividend. F5 now follows F7, so no `fvf_id`, and so no consumer registration, predates it.
 
@@ -86,6 +86,8 @@ With `s = (ask - bid)/mid`:
 
 **Scale.** With `V` at mid, F equals ladder alpha `0.5 - c/2`: 0.375 for the tightest liquid quote, 0.125 at `s >= 0.50`, 0 when also thin on both counts. All are below EXP-105's breakeven 0.423. With `V` away from mid, one side can fill **better than mid** (at `V = ask`, `c = 0.25` sells at alpha 0.75). A search could favour such legs, so F reports their share by side, and a third sensitivity, **mid-floored F** (a buy never below mid, a sell never above), re-marks the same taken set.
 
+**Replaced for the next constants (user's decision, 2026-11-27).** This section is F as built. Section 9's mid-anchored **model A** replaces its fill; it is built in a separate module that no experiment uses yet.
+
 ## 6. Structure level
 
 Legs have side and positive quantity; every sum is per share and quantity-weighted. A debit is buys minus sells:
@@ -102,6 +104,8 @@ Legs have side and positive quantity; every sum is per share and quantity-weight
 3. `spread_over_debit`: `spread_sum > debit_F`.
 
 The guard is evaluated **once**, at entry, and never at exit. A skip is a non-trade, and the same skip applies to every fill view, sensitivity, arm and control of the consumer's comparison.
+
+This is the guard as built. With model A (section 9), `fill_over_fair` becomes `fill_over_mid`.
 
 ## 7. Outputs
 
@@ -126,11 +130,29 @@ F is used in **selection and scoring alike**:
 
 ## 9. Recalibration from the user's real fills (only if supplied)
 
-Needed per fill: time, contract, side, quantity, price, and `bid`, `ask` and spot at order time, plus the size on the side hit and open interest as known at order time (either may be null, which is unknown; they set the flags by section 5's thresholds). `V` comes from the same pricer at the order-time spot, with `smvVol` and the `rates` row (rate, carry and dividend) from the latest end of day strictly before the order date, never a same-day row; section 4's interpolation and fallbacks apply to that row, with days to expiry and dividend timing counted from the order date, clamped to the order-time quote. Observed `c` is `(price - V)/(ask - V)` for a buy and `(V - price)/(V - bid)` for a sell; denominators under $0.005 are skipped and counted; price improvement is kept as negative.
+**Amended 2026-11-27** ([#3095](https://github.com/yshewchuk/investment-validation/issues/3095)). Model A, price space, the B1 window and a new constants id for new constants (B2) are the **user's decisions of 2026-11-27**. Judgement calls name their owner; unlabelled grid and minimum rules carry over from the earlier text (mine). The fills file is private: never commit it, fitted constants or fill-level values beyond the aggregates below.
 
-The base and spread constants are fitted by least absolute deviation on fills with neither thin flag nor an unknown (a deterministic 0.01 grid over [0, 1] each; ties to the larger constants), with the 0.50 spread scale fixed. Each thin penalty is then the median residual of the fills with that flag set and the other flag known and 0, floored at 0; fills with both flags set or any unknown enter neither penalty fit. The fit needs 100 unflagged fills, and 30 flagged ones for a penalty; otherwise the constant stays. Spread orders without leg prices instead fit one multiplier on `c`. The guard fraction, thin thresholds and the unknown value 0.5 are not calibrated (all mine).
+**Built, not yet used.** The follow-up, **F6c: model A fit plus leg fills** ([#3104](https://github.com/yshewchuk/investment-validation/issues/3104), reworked), is built: the fit and constants document ([#3113](https://github.com/yshewchuk/investment-validation/pull/3113)), then leg fills, guard and exit ([#3124](https://github.com/yshewchuk/investment-validation/pull/3124)). The `fair_value_fit`, `fair_value_solve` and `fair_value_apply` rows of [`experiments/README.md`](../experiments/README.md) are the contract. No production caller or experiment uses model A: binding it is a later slice. The rest of this document describes F, which experiments still run.
 
-New constants are a **new constants id**. A consumer needs a new spec hash and PLANNED row before a new run, states the fills' date range and any overlap with its evaluation periods, and never re-scores an old run with constants chosen by that result.
+**Model A, mid-anchored.** `c = min(1, base + spread*min(s/0.50, 1) + thin_size_w*thin_size + thin_oi_w*thin_oi)`, with section 5's `s` and thin flags. On the effective quote a **buy fills at `mid + c*half_spread`** and a **sell at `mid - c*half_spread`**. The fill has **no fair value `V`, no one-tick floor and no tick rule**.
+
+**Guard (supervisor's judgement).** `fill_over_fair` becomes `fill_over_mid`, the same 25% rule against the mid debit: `debit_F - debit_mid > 0.25 * debit_mid`.
+
+**Why (user's near-close fills; aggregates from the supervisor's private run, 2026-11-27).** Fair value priced from the prior day's `smvVol` sits at the quote edge on 45% of those near-close fills. Every fair-value form fit worse than the mid anchor: mean absolute error 0.96-1.01 half-spreads against 0.90. The mid anchor's average bias is about 0; current F averages 0.13 half-spreads too harsh. The spread weight fits to 0, but only 17 fills have a spread above 20%, hence the variant below.
+
+**Fills used (B1 window).** Each fill is matched to a quote snapshot, and only fills within 60 minutes of it enter (two-sided, 60 included: supervisor's judgement), so the snapshot's quote can be later than the fill. Each excluded fill is counted under the first of `outside_window`, `unpriceable`, `rate_unknown`, `no_fair_value` and `zero_half_spread` (effective half-spread at most 1e-9, which leaves `x` undefined; that threshold is the F6a owner's judgement). The built fit keeps the `V` inputs and so still applies `rate_unknown` and `no_fair_value`, although model A's prediction does not use `V`.
+
+**Price-space loss.** On the effective quote, `x = (price - mid)/half_spread` for a buy and `(mid - price)/half_spread` for a sell (+1 is the side hit). Observed `x` is not clipped, so price improvement stays. The fit minimises the mean `|x - min(1, c)|`, each fill weighted equally, whatever its quantity. The earlier `c`-space loss and its $0.005 denominator rule are removed.
+
+**Fit.** A deterministic grid, 0.00 to 1.00 in 0.01 steps; losses within 1e-9 tie.
+
+- **Base and spread**, jointly, on unflagged fills (both flags known and 0). Ties: the largest base plus spread, then the largest base (F6b owner's judgement). Under 100 such fills both keep F's current values, without refusing, and the penalties are still fitted (F6b owner's judgement).
+- **Each thin penalty** (supervisor's judgement): with base and spread fixed, the grid value with the least same loss on fills with that flag set and the other known and 0; ties to the larger. It is fitted only with at least 30 such fills; otherwise the current value stays. Fills with both flags set or any unknown enter no fit.
+- **Not calibrated:** the spread scale, guard fraction, thin thresholds and unknown value 0.5. A multiplier fit for spread orders without leg prices is not built.
+
+**Constants id and variant.** Model A's constants get a **new constants id** (B2). The one named variant is **`spread050`** (spread = 0.50), a user-requested wide-leg sensitivity: it changes only the spread weight and leaves the primary id unchanged. It replaces B2's earlier pair, so there is no `spread025`. The id hashes `anchor` (`mid`), the constants and the variant list. A consumer needs a new spec hash and PLANNED row before a new run, pre-registers `spread050`, states the fills' date range and any overlap with its evaluation periods, and never re-scores an old run with constants chosen by that result.
+
+**F6c's slices and failure semantics** are in section 12.
 
 ## 10. Failure semantics (R1-R6)
 
@@ -158,7 +180,7 @@ Progress logging follows AGENTS.md.
 - Only the next dividend is priced; an expiry spanning two omits the later one, uncounted.
 - We have not verified that historical `divAmt` and `divDate` are what was known on `obs_date`; a later revision would be look-ahead that data dates cannot detect.
 
-## 12. Split list (code slices; none starts until this design merges)
+## 12. Split list (code slices)
 
 Estimates: non-test code lines / test lines / doc words, excluding the re-ingest tool.
 
@@ -169,8 +191,26 @@ Estimates: non-test code lines / test lines / doc words, excluding the re-ingest
 | F3 | Fit set, smile, source choice, leg table values | ~120 / ~150 / 40 | F2 |
 | F4 | Concession, repaired and unknown rules, sensitivities, structure entry, guard, exit | ~150 / ~180 / 50 | F3 |
 | F5 | `fvf_id`, receipts, diagnostics (with status and source coverage), chunked smoke | ~130 / ~130 / 60 | F1, F4, F7 |
-| F6 | Calibration from real fills; only if supplied | ~110 / ~120 / 40 | F4, F7 |
+| F6 | Calibration from real fills; only if supplied. Built as F6a and F6b, whose anchor and floor section 9 supersedes | ~110 / ~120 / 40 | F4, F7 |
 | F7 | Carry and dividend amendment: a carry and dividend pricer in a new module (F2's unchanged), binding the new columns and units, section 4's fallbacks and flags in the leg values | ~150 / ~180 / 60 | F1, F3 |
+| F6c-1 | **Model A fit** ([#3104](https://github.com/yshewchuk/investment-validation/issues/3104), reworked): the built CLI end to end, fills CSV to the two files. **Built** ([#3113](https://github.com/yshewchuk/investment-validation/pull/3113)) | ~100 / ~160 / 150 | - |
+| F6c-2 | **Model A leg fills** (#3104): entry, `fill_over_mid` guard, exit. **Built** ([#3124](https://github.com/yshewchuk/investment-validation/pull/3124)) | ~140 / ~180 / 120 | F6c-1 |
+
+### F6c: model A fit plus leg fills
+
+Two PRs. Sizes are the amendment owner's estimates (added lines and words). The slices run in order, since F6c-2 consumes F6c-1's constants. Both log progress to stderr, use no randomness or clock in values (R3), and test against hand-computed values. A refusal is `EXPERIMENT_IDENTITY_CONFLICT` with a `details.reason`, except a size cap (`RESOURCE_LIMIT_EXCEEDED`). Both are built.
+
+| Rule | F6c-1 | F6c-2 |
+| --- | --- | --- |
+| R1 inputs, in order | existing output directory, size cap, unreadable file, missing column, empty file, invalid value, `not_causal`, `vol_unit`; all before output | constants document (`constants_invalid`), then id (`constants_id_mismatch`), then variant (`variant_unknown`), all before pricing; exit then checks legs as F does, then `legs_unbound`, `legs_constants_mismatch` |
+| R1 per row | counted, first match: `outside_window`, `unpriceable`, `rate_unknown`, `no_fair_value`, `zero_half_spread` | F's statuses (section 7) |
+| R2 resources | the built 16 MiB cap | section 10's chunking and limits; no new store |
+| R4 outputs | both files by one directory rename, receipt last, no partial output; an existing output directory refuses; no `fsync`, so all-or-nothing covers a process failure, not a power loss | pure functions that store nothing; no partial result on a refusal |
+| R5 identity | receipt binds the parsed fills bytes, the written constants bytes, the new constants id and the source hashes | the new code is outside `fvf_id`, so the caller pins the constants id and variant (`primary` or `spread050`); leg rows carry both; exit refuses a mismatch; entry does not check the pin |
+| R6 causality | the snapshot quote may follow the fill by up to 60 minutes (B1); `vol_date` and `rates_date` are strictly before the order date | entry values never read exit-date rows |
+| Stored artifacts | `constants.json` (section 9's four constants, F's unchanged ones, the id, `spread050`) and `fit_receipt.json` (those bindings, window, counts, used date range, per-group loss, tie counts, residual statistics) | none |
+
+**Questions this list carried, now answered by the built code.** Q1: the fit keeps its `V` inputs and exclusions. Q2 (the #3124 owner's call): leg statuses, `not_a_debit` (which still tests `debit_fair`) and `exit_fair_mid` stay; only `fill_over_fair` becomes `fill_over_mid`; fills use no `V`, and `midfloor` equals the base. Q3: F's source files are unchanged. Q4 (the supervisor's choice, option B of #3104): leg rows carry the constants id and variant, exit checks its own rows, and the binding caller must compare entry with exit.
 
 ## 13. Amendment 1 (2026-11-25, before any F1 code)
 
