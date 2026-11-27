@@ -206,9 +206,9 @@ def test_q_delta_uses_unfloored_errors_then_sorts_then_floors():
 # ---------- 3. window and label availability at the 499/500 boundary ----------
 
 @pytest.mark.parametrize("extra_date, extra_label, expected", [
-    ("2020-03-01", "2020-03-10", "tail_pool_thin"),       # exactly m - 12 months: in pool, 500 rows: calibrated
+    ("2020-03-01", "2020-03-10", None),                  # exactly m - 12 months: in pool, 500 rows: calibrated
     ("2020-02-29", "2020-03-10", "calibration_burn_in"),  # one day before the window: out, 499 rows
-    ("2020-06-01", "2021-02-27", "tail_pool_thin"),       # label_end + 1 = 2021-02-28 < m: available, 500 rows
+    ("2020-06-01", "2021-02-27", None),                  # label_end + 1 = 2021-02-28 < m: available, 500 rows
     ("2020-06-01", "2021-02-28", "calibration_burn_in"),  # label_end + 1 = m: not available, 499 rows
     ("2020-06-01", "2021-03-01", "calibration_burn_in"),  # label_end = m: not available, 499 rows
     ("2021-03-01", "2021-02-27", "calibration_burn_in"),  # dated in month m: never in its own pool, 499 rows
@@ -217,9 +217,16 @@ def test_pool_window_and_label_availability_at_the_499_500_boundary(extra_date, 
     rows = [(f"c{i:03d}", "2020-03-02", "2020-03-10", _qrow(i), 1.0) for i in range(499)]
     rows.append(("x", extra_date, extra_label, _qrow(0), 1.0))
     rows.append(("t", "2021-03-15", "2021-03-20", _qrow(0), 1.0))
-    arms, _, _ = calib.calibrate(*_frames(rows))
-    # "tail_pool_thin" means the month passed calibration (>= 500 rows) but has no Q-arm donors.
-    assert arms["Q"].loc["t", "reason"] == expected
+    arms, pools, _ = calib.calibrate(*_frames(rows))
+    # The window and label rules decide the calibration rows: 500 gives reason None, 499 is burn-in.
+    got = arms["Q"].loc["t", "reason"]
+    if expected is None:  # a scored row's reason is NaN in pandas, not None
+        assert pd.isna(got)
+    else:
+        assert got == expected
+    # Every donor has y = 1.0, below its own Q90, so the month has no upper-tail donor: thin (Q3). The quantiles keep,
+    # and only the pool (CRPS) is absent.
+    assert ("Q", pd.Timestamp("2021-03-01")) not in pools
 
 
 # ---------- 4. causality ----------
@@ -245,21 +252,29 @@ def test_later_labels_do_not_change_earlier_quantiles_or_pools():
 
 # ---------- 5. tail thinness and thin donors ----------
 
-@pytest.mark.parametrize("n_hi, n_lo, scored", [(49, 50, False), (50, 49, False), (50, 50, True)])
-def test_tail_thin_below_50_donors_per_side_and_thin_donors_still_donate(n_hi, n_lo, scored):
+@pytest.mark.parametrize("n_hi, n_lo, pooled", [(29, 50, False), (50, 29, False), (30, 30, True)])
+def test_thin_tail_below_30_donors_keeps_quantiles_and_drops_only_the_pool(n_hi, n_lo, pooled):
     rows, arms, pools, _ = _run(n_hi, n_lo)
     b_ids, s_ids, t_ids = _pick(rows, "b")[0], _pick(rows, "s")[0], _pick(rows, "t")[0]
     assert (arms["Q"].loc[b_ids, "reason"] == "calibration_burn_in").all()
-    assert (arms["Q"].loc[s_ids, "reason"] == "tail_pool_thin").all()  # S is thin but its quantiles donate
+    assert arms["Q"].loc[s_ids, "reason"].isna().all()  # S is thin, is still scored, and its quantiles donate
     got = arms["Q"].loc[t_ids]
-    if scored:
+    assert got[calib.QCOLS].notna().all().all() and got["reason"].isna().all()  # thin or not: quantiles kept
+    if pooled:
         assert len(pools[("Q", T_MONTH)][0]) == n_lo and len(pools[("Q", T_MONTH)][1]) == n_hi
-        assert got[calib.QCOLS].notna().all().all()
-        assert got["reason"].isna().all()
     else:
         assert ("Q", T_MONTH) not in pools
-        assert got[calib.QCOLS].isna().all().all()
-        assert (got["reason"] == "tail_pool_thin").all()
+
+
+def test_thin_months_are_logged_once_per_arm_not_per_event(capsys):
+    rows = _chain_rows(29, 50)
+    calib.calibrate(*_frames(rows))
+    err = capsys.readouterr().err
+    # Q's thin months: 2020-01 (S, donors all burn-in) and 2020-02 (T). Two, counted, not one line per event.
+    q_lines = [line for line in err.splitlines() if "arm=Q events=" in line]
+    assert len(q_lines) == 1
+    assert q_lines[0].endswith("thin_months=2")
+    assert "tail_pool_thin" not in err
 
 
 # ---------- 6. donor pools: oracle per arm, strict tails, width floor ----------
@@ -471,19 +486,20 @@ def test_floor_report_counts_and_shares_on_the_chain():
     _, qb, yb = _pick(rows, "b")
     _, qs, ys = _pick(rows, "s")
     t_ids, qt, _ = _pick(rows, "t")
-    tq = _oracle_q(qt, np.vstack([qb, qs]), np.concatenate([yb, ys]))
+    # S (thin, but scored now: its quantiles keep) and T are both scored Q events of 2020: 200 + 4.
+    tq = np.vstack([_oracle_q(qs, qb, yb), _oracle_q(qt, np.vstack([qb, qs]), np.concatenate([yb, ys]))])
 
     q_rows = report[report["arm"] == "Q"].set_index("year")
     assert list(q_rows.index) == [2019, 2020]
     r = q_rows.loc[2020]
-    assert r["events"] == 4
+    assert r["events"] == len(tq) == 204
     assert r["event_hi_bound"] == int(np.sum(tq[:, 6] - tq[:, 3] < 0.5))
     assert r["event_lo_bound"] == int(np.sum(tq[:, 3] - tq[:, 0] < 0.5))
     # Donors are the 50 S-hi and 50 S-lo rows; 17 of each have a spread below 0.5 (the narrow pattern).
     assert (r["donors_hi"], r["donors_hi_bound"], r["donors_lo"], r["donors_lo_bound"]) == (50, 17, 50, 17)
     assert r["donor_hi_share"] == pytest.approx(17 / 50)
     assert r["donor_lo_share"] == pytest.approx(17 / 50)
-    assert r["event_hi_share"] == pytest.approx(r["event_hi_bound"] / 4)
+    assert r["event_hi_share"] == pytest.approx(r["event_hi_bound"] / 204)
     z = q_rows.loc[2019]
     assert z["events"] == 0 and z["donors_hi"] == 0 and z["donors_lo"] == 0
     assert np.isnan(z["event_hi_share"]) and np.isnan(z["donor_lo_share"])
@@ -499,5 +515,71 @@ def test_floor_lines_are_logged_one_per_report_row_on_stderr_only(capsys):
     captured = capsys.readouterr()
     floor = [line for line in captured.err.splitlines() if line.startswith("  [quantile calibration] floor ")]
     assert len(floor) == len(report)
-    assert any(line.startswith("  [quantile calibration] floor arm=Q year=2020 events=4 ") for line in floor)
+    assert any(line.startswith("  [quantile calibration] floor arm=Q year=2020 events=204 ") for line in floor)
     assert captured.out == ""
+
+
+# ---------- 9. score_crps: a thin tail drops only the CRPS (Q3), for Q (calibrated pools) and B0 (own pools) ----------
+
+CRPS_Q = [5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]  # spread 3 on each side, so the 0.5 floor does not bind
+
+
+def _crps_frames():
+    """Donors: 30 with y = 15 (above Q90 = 11, so (15 - 11) / 3 = 4/3) and 30 with y = 0 (below Q10 = 5, so
+    (0 - 5) / 3 = -5/3), all dated Jan 2023. Every y is non-negative. t1 (Jul 2023) is in the 2023-07 pool of 30 + 30
+    donors. t2 (Jun 2024) and t3 (Dec 2025) have no donor in their 12 months, so they are thin. t4 is in t1's month but
+    has no label."""
+    rows = [(f"d{i:02d}", "2023-01-15", "2023-01-20", 15.0 if i < 30 else 0.0) for i in range(60)]
+    rows += [("t1", "2023-07-05", "2023-07-10", 7.0), ("t2", "2024-06-05", "2024-06-10", 7.0),
+             ("t3", "2025-12-05", "2025-12-10", 7.0), ("t4", "2023-07-06", "2023-07-10", np.nan)]
+    events = pd.DataFrame({"event_date": [r[1] for r in rows], "label_end": [r[2] for r in rows],
+                           "y": [r[3] for r in rows]}, index=[r[0] for r in rows])
+    frame = pd.DataFrame([CRPS_Q] * len(rows), index=events.index, columns=calib.QCOLS)
+    frame["reason"] = None
+    return events, frame
+
+
+def test_thin_tails_change_only_the_crps_for_q_and_b0_with_exclusions_per_arm_and_year(capsys):
+    events, frame = _crps_frames()
+    # Q takes calibrate's pool, given here for 2023-07 only; B0 builds its own pools from the same rule.
+    calibrated = {("Q", pd.Timestamp("2023-07-01")): (np.full(30, -5 / 3), np.full(30, 4 / 3))}
+    out, exclusions, floors = calib.score_crps({"Q": frame, "B0": frame}, events, calibrated)
+    want = _dense_crps(7.0, CRPS_Q, np.full(30, -5 / 3), np.full(30, 4 / 3))
+    for name in ("Q", "B0"):
+        got = out[name]
+        pd.testing.assert_frame_equal(got.drop(columns="crps"), frame)  # quantiles and reasons are untouched
+        assert list(got.index[got["crps"].notna()]) == ["t1"]  # the donors' and thin events' CRPS is NaN
+        assert got.loc["t1", "crps"] == pytest.approx(want, abs=1e-4)
+    # Scored: finite y and reason None (t4 has no label, so it is not counted). Excluded: scored with no pool.
+    got = {(r["arm"], r["year"]): (r["scored"], r["crps_excluded"]) for r in exclusions}
+    assert got == {(arm, year): pair for arm in ("Q", "B0")
+                   for year, pair in ((2023, (1, 0)), (2024, (1, 1)), (2025, (1, 1)))}
+    assert all(r["arm"] == "B0" for r in floors)
+    rows = {r["year"]: r for r in floors}
+    assert (rows[2023]["events"], rows[2024]["events"], rows[2025]["events"]) == (62, 1, 1)
+    assert (rows[2023]["donors_hi"], rows[2023]["donors_lo"]) == (30, 30)
+    # Thin months with finite rows: 2023-01 (no donor dated in its 12 months), 2024-06 and 2025-12, for both frames.
+    assert "[stage A CRPS] arm=B0 scored=63 thin_months=3" in capsys.readouterr().err
+
+
+def _set(events, id_, column, value):
+    events = events.copy()
+    events.at[id_, column] = value
+    return events
+
+
+@pytest.mark.parametrize("name", ["Q", "B0"])
+@pytest.mark.parametrize("mutate", [
+    lambda e: _set(e, "t1", "y", -1.0),                  # negative y
+    lambda e: _set(e, "t1", "y", np.inf),                # +inf y
+    lambda e: pd.concat([e, e.loc[["t1"]]]),             # duplicate events index
+    lambda e: _set(e, "t1", "event_date", None),         # null event_date
+    lambda e: _set(e, "t1", "label_end", None),          # finite y, null label_end
+    lambda e: _set(e, "t1", "label_end", "not-a-date"),  # finite y, non-ISO label_end
+    lambda e: _set(e, "t3", "label_end", None),          # t3 (Dec 2025): no later month reads its label
+    lambda e: _set(e, "t3", "label_end", "2025-13-10"),  # same row, non-ISO label_end
+])
+def test_score_crps_refuses_what_calibrate_refuses(name, mutate):
+    events, frame = _crps_frames()
+    with pytest.raises(ValueError):
+        calib.score_crps({name: frame}, mutate(events), {})

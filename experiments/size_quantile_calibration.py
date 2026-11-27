@@ -1,5 +1,6 @@
-"""EXP-190 Q3b: calibration and tails for Q and Q_raw (design sections 4, 5, 7). Pure over caller-loaded frames of
-admitted events: no file I/O, no production caller yet (Q5b/Q6 first). The Q6 report must print
+"""EXP-190 Q3b: calibration and tails for Q and Q_raw (design sections 4, 5, 7), and CRPS for Q, Q_raw and B0 (Q6b).
+Pure over caller-loaded frames of admitted events: no file I/O. `month_tables` is the one tail rule: calibrate uses it
+for Q and Q_raw, score_crps for B0. A thin tail (under MIN_TAIL donors) drops only the CRPS. The Q6 report must print
 `floor_report`; the 0.5 floor is provisional."""
 from collections import Counter
 from datetime import date
@@ -10,12 +11,13 @@ import pandas as pd
 from engine.v2.ops.errors import fail
 from engine.v2.research.progress import Progress, decision, stage
 from experiments.label_availability import available_before
-from experiments.size_quantile_metrics import Rules
+from experiments.size_quantile_metrics import Rules, crps_quantile
 
 LEVELS = Rules().levels
 QCOLS = ["q10", "q25", "q40", "q50", "q60", "q75", "q90"]
-WINDOW_MONTHS, MIN_CALIBRATION, MIN_TAIL, FLOOR = 12, 500, 50, 0.5
+WINDOW_MONTHS, MIN_CALIBRATION, MIN_TAIL, FLOOR = 12, 500, 30, 0.5
 ARMS = ("Q", "Q_raw")
+PERIOD = (pd.Timestamp("2023-07-01"), pd.Timestamp("2025-12-31"))
 
 
 def predictions_from_receipts(receipts):
@@ -58,6 +60,33 @@ def _inputs(predictions, events):
     return dates, y, label_end, np.sort(predictions[QCOLS].to_numpy(dtype=float), axis=1)
 
 
+def donor_pool(dates, y, label_end, m):
+    """Positions dated in [m - 12 months, m) with finite y and a label available before month m."""
+    window = (dates >= m - pd.DateOffset(months=WINDOW_MONTHS)) & (dates < m) & np.isfinite(y)
+    return np.array([i for i in np.flatnonzero(window) if available_before(label_end[i], f"{m:%Y-%m-%d}")], dtype=int)
+
+
+def month_tables(quantiles, y, dates, label_end, months):
+    """(pools, donors, thin) keyed (arm, month) for {arm: quantiles}: the one tail rule. Each month's pool rows are the
+    donors with finite quantiles; a tail with under MIN_TAIL donors makes the month thin: no entry, counted in thin."""
+    pools, donors, thin = {}, {}, Counter()
+    for m in months.unique().sort_values():
+        pool = donor_pool(dates, y, label_end, m)
+        for arm, q in quantiles.items():
+            if not np.isfinite(q[months == m]).all(axis=1).any():
+                continue
+            keep = pool[np.isfinite(q[pool]).all(axis=1)]
+            qq, yy = q[keep], y[keep]
+            hi, lo = yy > qq[:, 6], yy < qq[:, 0]
+            d_hi = np.sort((yy[hi] - qq[hi, 6]) / np.maximum(qq[hi, 6] - qq[hi, 3], FLOOR))
+            d_lo = np.sort((yy[lo] - qq[lo, 0]) / np.maximum(qq[lo, 3] - qq[lo, 0], FLOOR))
+            if min(d_lo.size, d_hi.size) < MIN_TAIL:
+                thin[arm] += 1
+            else:
+                pools[(arm, m)], donors[(arm, m)] = (d_lo, d_hi), (keep[lo], keep[hi])
+    return pools, donors, thin
+
+
 def _floor_rows(arm, out, dq, donors, years):
     """One floor_report row per scoring year: scored events and distinct donors, with their 0.5 bounds."""
     rows, scored_all = [], np.isfinite(out).all(axis=1)
@@ -85,16 +114,14 @@ def calibrate(predictions, events):
             n, width = len(predictions), len(QCOLS)
             finite = np.isfinite(qhat).all(axis=1)
             months, years = dates.to_period("M").to_timestamp(), dates.year.to_numpy()
-            donor_q, out = ({a: np.full((n, width), np.nan) for a in ARMS} for _ in range(2))
+            donor_q = {a: np.full((n, width), np.nan) for a in ARMS}
             reason = {a: np.where(finite, None, "non_finite_output") for a in ARMS}
-            pools, donors, month_list = {}, {}, months.unique().sort_values()
+            month_list = months.unique().sort_values()
             progress = Progress("quantile calibration", len(month_list))
             for m in month_list:
                 mine = np.flatnonzero(months == m)
                 ok = mine[finite[mine]]
-                window = (dates >= m - pd.DateOffset(months=WINDOW_MONTHS)) & (dates < m) & np.isfinite(y)
-                pool = np.array([i for i in np.flatnonzero(window)
-                                 if available_before(label_end[i], f"{m:%Y-%m-%d}")], dtype=int)
+                pool = donor_pool(dates, y, label_end, m)
                 donor_q["Q_raw"][ok] = np.maximum(qhat[ok], 0.0)
                 calib = pool[finite[pool]]
                 if calib.size < MIN_CALIBRATION:
@@ -105,27 +132,16 @@ def calibrate(predictions, events):
                     good = np.isfinite(fitted).all(axis=1)
                     donor_q["Q"][ok[good]] = fitted[good]
                     reason["Q"][ok[~good]] = "non_finite_output"
-                for arm in ARMS:
-                    have = mine[np.isfinite(donor_q[arm][mine]).all(axis=1)]
-                    if have.size:
-                        pool_arm = pool[np.isfinite(donor_q[arm][pool]).all(axis=1)]
-                        q, yy = donor_q[arm][pool_arm], y[pool_arm]
-                        hi, lo = yy > q[:, 6], yy < q[:, 0]
-                        d_hi = np.sort((yy[hi] - q[hi, 6]) / np.maximum(q[hi, 6] - q[hi, 3], FLOOR))
-                        d_lo = np.sort((yy[lo] - q[lo, 0]) / np.maximum(q[lo, 3] - q[lo, 0], FLOOR))
-                        if min(d_lo.size, d_hi.size) < MIN_TAIL:
-                            reason[arm][have] = "tail_pool_thin"
-                        else:
-                            out[arm][have] = donor_q[arm][have]
-                            pools[(arm, m)], donors[(arm, m)] = (d_lo, d_hi), (pool_arm[lo], pool_arm[hi])
                 progress.tick()
+            pools, donors, thin = month_tables(donor_q, y, dates, label_end, months)
             arms, frames = {}, []
             for arm in ARMS:
                 counts = Counter(r or "scored" for r in reason[arm])
                 decision("quantile calibration", f"arm={arm} events={n} scored={counts['scored']} "
-                         f"by_reason={dict(sorted(counts.items()))}")
-                arms[arm] = pd.DataFrame(out[arm], predictions.index, QCOLS).assign(month=months, reason=reason[arm])
-                frames += _floor_rows(arm, out[arm], donor_q[arm], donors, years)
+                         f"by_reason={dict(sorted(counts.items()))} thin_months={thin[arm]}")
+                arms[arm] = pd.DataFrame(donor_q[arm], predictions.index, QCOLS).assign(
+                    month=months, reason=reason[arm])
+                frames += _floor_rows(arm, donor_q[arm], donor_q[arm], donors, years)
             for r in frames:
                 decision("quantile calibration", "floor " + " ".join(f"{k}={v}" for k, v in r.items()))
             return arms, pools, pd.DataFrame(frames)
@@ -147,3 +163,33 @@ def quantile_points(quantiles, d_lo, d_hi):
     u = np.concatenate([np.insert(u_lo, cross + 1, u_cross), np.array(LEVELS), np.linspace(0.9, 1.0, d_hi.size)])
     x = np.concatenate([np.insert(np.maximum(line, 0.0), cross + 1, 0.0), q, upper])
     return u, x
+
+
+def score_crps(frames, events, calibrated):
+    """(frames with a crps column, Q3 CRPS exclusion rows, floor rows of the frames not in ARMS). An ARMS frame uses
+    calibrate's pools (`calibrated`); any other frame builds its own pools from its quantiles with month_tables."""
+    pools, out, exclusions, floors = dict(calibrated), {}, [], []
+    for name, frame in frames.items():
+        dates, y, label_end, _ = _inputs(frame, events)
+        months, q = dates.to_period("M").to_timestamp(), frame[QCOLS].to_numpy(float)
+        if name not in ARMS:
+            own, donors, _ = month_tables({name: q}, y, dates, label_end, months)
+            pools.update(own)
+            floors += _floor_rows(name, q, q, donors, dates.year.to_numpy())
+        finite = np.isfinite(q).all(axis=1)
+        ok = frame["reason"].isna().to_numpy() & finite & np.isfinite(y)
+        pooled = np.array([(name, m) in pools for m in months], dtype=bool)
+        crps = np.full(len(frame), np.nan)
+        todo = np.flatnonzero(ok & pooled)
+        progress = Progress(f"stage A CRPS {name}", int(todo.size))
+        for k in todo:
+            crps[k] = crps_quantile(y[k], *quantile_points(q[k], *pools[(name, months[k])]))
+            progress.tick()
+        thin = len({m for m in months[finite] if (name, m) not in pools})
+        decision("stage A CRPS", f"arm={name} scored={int(ok.sum())} thin_months={thin}")
+        out[name] = frame.assign(crps=crps)
+        inper = ok & (dates >= PERIOD[0]) & (dates <= PERIOD[1])
+        exclusions += [{"arm": name, "year": yr, "scored": int((inper & (dates.year == yr)).sum()),
+                        "crps_excluded": int((inper & (dates.year == yr) & ~pooled).sum())}
+                       for yr in (2023, 2024, 2025)]
+    return out, exclusions, floors

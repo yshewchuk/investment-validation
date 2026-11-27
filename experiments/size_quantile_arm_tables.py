@@ -46,8 +46,8 @@ def _pair(arm, b0, events, raw):
     ev = events[inper].assign(quarter=quarter[inper], period=quarter[inper].map(QUARTER_PERIOD),
                               year=dates[inper].dt.year)
     y = ev["y"].to_numpy(dtype=float)
-    if ev["ticker"].isna().any() or not np.isfinite(y).all() or (y < 0).any():
-        raise ValueError("in-period events need a ticker and finite non-negative y")
+    if ev["ticker"].isna().any() or np.isinf(y).any() or (y < 0).any():
+        raise ValueError("in-period events need a ticker and non-negative, non-infinite y")
     for frame in (arm, b0):
         ok = frame["reason"].isna().to_numpy()
         if not np.isfinite(frame.loc[ok, QCOLS].to_numpy(dtype=float)).all():
@@ -56,7 +56,7 @@ def _pair(arm, b0, events, raw):
     for frame in (arm, b0):
         reason = frame["reason"].reindex(ev.index)
         text = np.where(reason.isna(), "scored", reason.astype(str))
-        labels.append(np.where(ev.index.isin(frame.index), text, "no_output"))
+        labels.append(np.where(np.isnan(y), "label_missing", np.where(ev.index.isin(frame.index), text, "no_output")))
     return ev, labels[0], labels[1]
 
 
@@ -66,6 +66,7 @@ def _row(slice_name, label, m, a):
     covb = {k: v[m] for k, v in a["covb"].items()}
     y, q, pa, pb = a["y"][m], a["q"][m], a["pa"][m], a["pb"][m]
     crps = a["crps"][m][np.isfinite(a["crps"][m])]
+    bc = a["b0crps"][m]
     sel0, sel3 = m & np.isfinite(a["m0"]), m & np.isfinite(a["m3"])
     lv = pa.mean(axis=0) if len(pa) else np.full(len(LEVELS), NAN)
     return {"slice": slice_name, "label": label, "n": int(m.sum()),
@@ -79,7 +80,8 @@ def _row(slice_name, label, m, a):
             "crps": _mean(crps), "n_crps": int(crps.size),
             "crossing_rate": crossing_rate(a["raw"][m]) if a["raw"] is not None else NAN,
             "b0_mean_pinball": _mean(pb), "b0_cover_p25_p75": _mean(covb["p25_p75"]),
-            "b0_cover_p10_p90": _mean(covb["p10_p90"])}
+            "b0_cover_p10_p90": _mean(covb["p10_p90"]),
+            "b0_crps": _mean(bc[np.isfinite(bc)]), "b0_n_crps": int(np.isfinite(bc).sum())}
 
 
 def evaluate_arm(name, arm, b0, events, *, raw=None, resamples=RESAMPLES, seed=SEED):
@@ -99,11 +101,12 @@ def evaluate_arm(name, arm, b0, events, *, raw=None, resamples=RESAMPLES, seed=S
             y = sub["y"].to_numpy(dtype=float)
             q, qb = (f.loc[pid, QCOLS].to_numpy(dtype=float) for f in (arm, b0))
             crps = arm["crps"].reindex(pid).to_numpy(dtype=float) if "crps" in arm else np.full(len(pid), NAN)
+            b0crps = b0["crps"].reindex(pid).to_numpy(dtype=float) if "crps" in b0 else np.full(len(pid), NAN)
             m0, m3 = sub["m0"].to_numpy(dtype=float), sub["m3"].to_numpy(dtype=float)
             pa, pb = pinball(y, q, LEVELS), pinball(y, qb, LEVELS)
             cov, covb = ({k: v.to_numpy() for k, v in coverage(y, x, LEVELS).items()} for x in (q, qb))
             a = {"y": y, "q": q, "pa": pa, "pb": pb, "cov": cov, "covb": covb, "raw": rawq, "crps": crps,
-                 "m0": m0, "m3": m3,
+                 "b0crps": b0crps, "m0": m0, "m3": m3,
                  "quarter": sub["quarter"].to_numpy(), "period": sub["period"].to_numpy(),
                  "ticker": sub["ticker"].to_numpy()}
             share = []
