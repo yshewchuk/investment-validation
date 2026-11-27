@@ -419,6 +419,8 @@ def test_bucket_edges_come_only_from_eligible_donors():
     ("decision_on_event_date", "events decision_date must be strictly before event_date"),
     ("no_available_column", "labels must have an available column"),
     ("null_available", "labels available must not be null or unparseable"),
+    ("unparseable_decision", "events decision_date must not be null or unparseable"),
+    ("unparseable_available", "labels available must not be null or unparseable"),
 ])
 def test_missing_null_or_non_causal_dates_raise(break_it, message):
     dates, pred, abs_move = donors(600)
@@ -432,10 +434,35 @@ def test_missing_null_or_non_causal_dates_raise(break_it, message):
         events["decision_date"] = events["event_date"]
     elif break_it == "no_available_column":
         labels = labels.drop(columns="available")
-    else:
+    elif break_it == "null_available":
         labels["available"] = None
+    elif break_it == "unparseable_decision":
+        events["decision_date"] = "not-a-date"
+    elif break_it == "unparseable_available":
+        labels["available"] = "not-a-date"
     with pytest.raises(ValueError, match=message):
         pool_quantiles(table, labels, events)
+
+
+def test_events_with_the_same_eligible_labels_share_one_pool(capsys):
+    # Donors dated 2010-2011 are all available well before 2024-06. Five late donors dated 2024-06-05 become available
+    # 2024-06-06: after "a" (decision 06-02) and "b" (decision 06-03), before "c" (decision 06-09).
+    # So "a" and "b" admit the same 600 labels and share one pool; "c" admits 605 labels and builds a second pool.
+    base = donors(600)
+    late = (np.array(["2024-06-05"] * 5, dtype="datetime64[ns]"), np.full(5, 1.0), np.full(5, 2.0))
+    dates, pred, abs_move = concat(base, late)
+    table, labels = causal_frames(dates, pred, abs_move, plus_days(base[0], 1) + ["2024-06-06"] * 5)
+    events = events_frame(["a", "b", "c"], ["2024-06-03", "2024-06-04", "2024-06-10"], [2.0, 2.0, 2.0])
+    out = pool_quantiles(table, labels, events)
+    err = capsys.readouterr().err
+    assert "events=3 scored=3" in err and "pools=2" in err
+    assert all(reason is None for reason in out["reason"])
+    # Ten buckets of about 60 donors each are under MIN_POOL, so every event draws its whole eligible pool.
+    assert out["fallback"].all()
+    # a and b: the 600 base donors (all dated before their events). c: those 600 plus the 5 late donors.
+    assert out.loc["a", "n_rows"] == 600
+    assert out.loc["b", "n_rows"] == 600
+    assert out.loc["c", "n_rows"] == 605
 
 
 def _target(event_id, event_date, forecasts):
@@ -480,3 +507,5 @@ def test_lead1_decision_date_refusals(case):
         lead1_decision_dates(targets, pd.Index(["a"]))
     assert exc.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert exc.value.problem.details.get("reason") == "decision_date_invalid"
+    assert "decision_date_invalid" in exc.value.problem.message
+    assert "event a " in exc.value.problem.message

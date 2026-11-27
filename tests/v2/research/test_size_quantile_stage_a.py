@@ -700,5 +700,11 @@ def test_b0_labels_hash_binds_each_label_availability(monkeypatch, tmp_path, ful
     late = (date.fromisoformat(event["date"]) + timedelta(days=2)).isoformat()  # still after the event
     doc = _run(world, out, guard, avail={event["id"]: late})
     assert doc["inputs"]["b0_labels_hash"] != full_run["doc"]["inputs"]["b0_labels_hash"]
+    # Hand-built rows as in the full-run test, with only the changed event's availability replaced by `late`.
+    labels = world["labels"]
+    rows = sorted([e, float(labels.at[e, "abs_move"]), float(labels.at[e, "crush_pct_iv30"]),
+                   late if e == event["id"] else (date.fromisoformat(world["dates"][e]) + timedelta(days=1)).isoformat()]
+                  for e in labels.index)
+    assert doc["inputs"]["b0_labels_hash"] == content_hash(rows)
 
 

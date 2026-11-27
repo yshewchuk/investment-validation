@@ -429,3 +429,12 @@ def test_b3_excludes_a_donor_available_after_the_decision_date():
     # excluding d500 removes exactly one row.
     assert out.loc["d518", "fallback"]
     assert out.loc["d518", "n_rows"] == base.loc["d518", "n_rows"] - 1
+    # Independent oracle: d518's forecast is its series value, 1 + 0.01 * 518. Donor dk is dated 2023-01-01 + k days
+    # and its label is available the next day. d518's decision date is 2024-06-01, so donors k <= 516 are eligible
+    # (k = 516 is dated 2024-05-31, available 2024-06-01); k = 517 onward are not. Drop d500. Each donor's error is
+    # ERR[k] (abs_move minus its M3 value). The bucket holds under MIN_POOL, so the whole eligible pool is drawn.
+    positions = list(range(0, 500)) + list(range(501, 517))
+    f = 1.0 + 0.01 * 518
+    expected = np.quantile(np.maximum(f + ERR[positions], 0.0), ORACLE_LEVELS)
+    assert out.loc["d518", "n_rows"] == len(positions) == 516
+    np.testing.assert_allclose(out.loc["d518", QCOLS].to_numpy(dtype=float), expected)
