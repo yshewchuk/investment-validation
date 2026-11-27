@@ -178,7 +178,7 @@ def test_constants_id_mismatch_for_a_fitted_value_changed_without_recomputing_th
 
 # --- 4. variant_unknown ------------------------------------------------------------------------------------------------
 
-@pytest.mark.parametrize("variant", ["spread025", None])
+@pytest.mark.parametrize("variant", ["spread025", None, pd.NA, ["primary"]], ids=["unknown_name", "none", "pd_na", "list"])
 def test_variant_unknown(variant):
     assert load_reason(doc(), variant=variant) == "variant_unknown"
 

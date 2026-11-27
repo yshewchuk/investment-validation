@@ -32,7 +32,7 @@ def load_constants(document, expected_id, variant) -> dict:
         raise FairValueRefusal("constants_invalid")
     if not (rebuilt["constants_id"] == expected_id and document.get("constants_id") == rebuilt["constants_id"]):
         raise FairValueRefusal("constants_id_mismatch")
-    if variant != PRIMARY and (not isinstance(variant, str) or variant not in fvk.SPREAD_SENSITIVITIES):
+    if not isinstance(variant, str) or (variant != PRIMARY and variant not in fvk.SPREAD_SENSITIVITIES):
         raise FairValueRefusal("variant_unknown")
     out = dict(rebuilt["constants"])
     if variant != PRIMARY:
