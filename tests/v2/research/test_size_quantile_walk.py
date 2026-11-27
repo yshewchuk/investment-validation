@@ -45,8 +45,9 @@ CONFIG = {"2023": [7, 300], "2024": [15, 1000], "2025": [15, 1000]}
 
 
 def _outer_folds():
-    return [{"outer": {"year": y, "training_candidate_event_ids": ids}}
-            for y, ids in (("2023", T23), ("2024", T24), ("2025", T25))]
+    return [{"outer": {"year": "2025", "training_candidate_event_ids": T25},
+             "inner": [{"year": "2023", "training_candidate_event_ids": T23},
+                       {"year": "2024", "training_candidate_event_ids": T24}]}]
 
 
 def _candidates():
@@ -541,10 +542,11 @@ def test_replay_refuses_a_defective_mapping_as_a_fresh_fit_does(monkeypatch, tmp
 
 
 def _duplicate_training_fold(sealed):
-    """Repeat e20a as a training candidate in fold_events and in every sealed outer list, so parity still holds."""
+    """Repeat e20a as a training candidate in fold_events and in every sealed fold list, so parity still holds."""
     sealed["fold_events"].append(dict(sealed["fold_events"][0]))
     for group in sealed["plan"]["folds"]:
-        group["outer"]["training_candidate_event_ids"] = [*group["outer"]["training_candidate_event_ids"], "e20a"]
+        for fold in [group["outer"], *group["inner"]]:
+            fold["training_candidate_event_ids"] = [*fold["training_candidate_event_ids"], "e20a"]
     return sealed
 
 
