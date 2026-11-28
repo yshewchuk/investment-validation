@@ -281,6 +281,12 @@ def test_an_f_run_writes_the_binding_and_the_post_hoc_report(tmp_path, monkeypat
         receipt = receipts.load_receipt(out / "receipts" / f"inputs_{stage}.json")
         assert receipt["fill_model"] == binding
     summary = report.assemble(out, expected=src.expected)
+    # The stored taken parts carry exp_pnl_sim, and the report has the D1 and D2 diagnostics.
+    parts = [p for stage in ("inner", "outer") for p in (out / "report_inputs" / stage).glob("taken_*.parquet")]
+    assert parts
+    for part in parts:
+        assert "exp_pnl_sim" in pd.read_parquet(part).columns
+    assert "### D1 beside T5" in (out / "REPORT.md").read_text(encoding="utf-8")
     # Oracle (guides/size_width_tuning_design.md section 7): an arm passes only if its account return strictly beats
     # production's in each of 2025, 2023H2 and 2024; "None passing: recommend no change". PLAN has events only in 2024
     # and 2025, so in 2023H2 neither production nor any arm can trade, no arm can strictly beat production, and the

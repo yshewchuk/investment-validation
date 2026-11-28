@@ -17,10 +17,10 @@ WINDOWS = {"2023H2": (pd.Timestamp("2023-07-01"), pd.Timestamp("2024-01-01")),
            "2024": (pd.Timestamp("2024-01-01"), pd.Timestamp("2025-01-01")),
            "2025": (pd.Timestamp("2025-01-01"), pd.Timestamp("2026-01-01"))}
 INNER = (pd.Timestamp("2023-07-01"), pd.Timestamp("2025-01-01"))
-_TAKEN = ["event_id", "event_date", "structure", "k", "entry_date", "exit_date", "entry_cost", "exit_value",
+_TAKEN = ["event_id", "event_date", "structure", "k", "exp_pnl_sim", "entry_date", "exit_date", "entry_cost", "exit_value",
           "exit_value_mid", "pnl_dollars", "pnl_dollars_mid", "secured_per_contract"]
 RET_COLS = [f"ret_a{a:.2f}" for a in LADDER]
-_DECLINED = ["event_id", "event_date", "structure", "status", "reason", "arm"]
+_DECLINED = ["event_id", "event_date", "structure", "status", "reason", "exp_pnl_sim", "arm"]
 TAKEN_COLS = _TAKEN  # public alias for the other width modules
 
 
@@ -112,7 +112,7 @@ class Sweep:
             return
         decided = self.pricing.decide(pd.concat(history, ignore_index=True))
         declined = decided[decided["event_id"].isin(ids) & (decided["structure"] == name) & (decided["status"] != "taken")]
-        self.declined_frames.setdefault(key, []).append(out := declined[["event_id", "event_date", "structure", "status", "reason"]].assign(arm=str(arm)))
+        self.declined_frames.setdefault(key, []).append(out := declined[["event_id", "event_date", "structure", "status", "reason", "exp_pnl_sim"]].assign(arm=str(arm)))
         self.fresh_declined.append(out)
         reasons = self.declined.setdefault(key, {})
         for reason, count in declined["reason"].fillna("none").value_counts().items():
@@ -134,7 +134,7 @@ class Sweep:
                 .merge(mid[["event_id", "exit_value", "pnl_dollars"]].rename(columns={"exit_value": "exit_value_mid",
                                                                                      "pnl_dollars": "pnl_dollars_mid"}), on="event_id")
                 .merge(sec, on="event_id")
-                .merge(mine[["event_id", "event_date"]], on="event_id"))
+                .merge(mine[["event_id", "event_date", "exp_pnl_sim"]], on="event_id"))
         if self.f:
             rows = rows.merge(extra, on="event_id")
         lads = {}

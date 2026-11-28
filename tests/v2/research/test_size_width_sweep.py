@@ -178,6 +178,28 @@ def test_in_window_is_half_open():
     assert set(in_window(f, WINDOWS["2024"])["event_id"]) == {"start", "inside"}
 
 
+def test_taken_and_declined_rows_carry_the_scored_exp_pnl_sim(monkeypatch):
+    """Each stored exp_pnl_sim is the score of that row's own arm (grid k, or E's chosen k), rescored here from the same simulation."""
+    _small_window(monkeypatch)
+    pool = build_pool(*_tables(), floor=None)
+    chunk, prior, cur, sessions = _two_months()
+    sweep = Sweep()
+    sweep.add_month(chunk, prior, pool, output=False, sessions=sessions, draws=DRAW)
+    fresh = sweep.add_month(chunk, cur, pool, output=True, sessions=sessions, draws=DRAW)
+    sims = sv.simulate(chunk, cur, pool, draws=DRAW)
+    scored = {k: sv.score_events(chunk, scaled(cur, k), sims, NAME, alpha=0.5).set_index("event_id")["exp_pnl_sim"] for k in GRID}
+    mine = fresh[fresh["structure"] == NAME]
+    assert not mine.empty
+    for _, row in mine.iterrows():
+        k = row["k"] if row["arm"] == E_ARM else float(row["arm"])
+        assert row["exp_pnl_sim"] == pytest.approx(scored[k][row["event_id"]])
+    declined = sweep.declined_rows()
+    declined = declined[(declined["structure"] == NAME) & (declined["arm"] != E_ARM)]
+    assert not declined.empty
+    for _, row in declined.iterrows():
+        assert row["exp_pnl_sim"] == pytest.approx(scored[float(row["arm"])][row["event_id"]], nan_ok=True)
+
+
 def test_declined_counts_include_the_decision_gate_outcomes(monkeypatch):
     _small_window(monkeypatch)
     pool = build_pool(*_tables(), floor=None)
@@ -347,7 +369,7 @@ def test_fresh_declined_rows_are_the_month_declined_decisions_with_arm_strings(m
     sweep = Sweep(names=(NAME,))
     sweep.add_month(chunk, prior, pool, output=False, sessions=sessions, draws=DRAW)
     burn = sweep.declined_rows()
-    assert burn.empty and list(burn.columns) == ["event_id", "event_date", "structure", "status", "reason", "arm"]
+    assert burn.empty and list(burn.columns) == ["event_id", "event_date", "structure", "status", "reason", "exp_pnl_sim", "arm"]
     sweep.add_month(chunk, cur, pool, output=True, sessions=sessions, draws=DRAW)
     got = sweep.declined_rows()
     assert not got.empty and (got["status"] != "taken").all() and set(got["event_id"]) <= set(CUR)

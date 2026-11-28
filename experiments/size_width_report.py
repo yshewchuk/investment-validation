@@ -7,6 +7,7 @@ from engine.v2.foundation import content_hash
 from experiments import size_pnl_receipts as receipts
 from experiments import size_width_band as band
 from experiments import size_width_choices as choices
+from experiments import size_width_diag as diag
 from experiments import size_width_errmodel as errmodel
 from experiments import size_width_fake as fake
 from experiments import size_width_f_report_counts as f_report_counts
@@ -309,10 +310,12 @@ def assemble(out_dir, *, expected=None, w5_tables=None):
     flat_note = [_flat_note(bodies, rec)] if rec in TUNED else []
     rule_text = "\n\n".join([success.render_rule(rule), *flat_note, EVIDENCE])
     w5 = w5_tables if w5_tables is not None else flex.render(inner, outer) if has_flex else PLACEHOLDER
+    factors_by_label = {"production": {n: 1.0 for n in NAMES}, **{arm: tuning.factors(arm, bodies[arm]) for arm in ("A", "B", "D", "E") if arm in bodies}}
+    d1_d2 = [f_views.renamed(diag.section(out, inner, factors_by_label), fid)] if f_run else []  # before any write: a refusal writes nothing
     sections = [head, _t1(inner), *_t2({arm: bodies[arm] for arm in TUNED if arm in bodies}, body_E), *t2c, t3,
                 fake.t4_markdown({n: {float(k): cell for k, cell in row.items()} for n, row in inner["anchor"].items()}).rstrip(),
                 t5, *t5c, *([choices.report_line(*echoes)] if any(e is not None for e in echoes) else []),
-                t6, success.render_t7(table), rule_text, w5]
+                t6, *d1_d2, success.render_t7(table), rule_text, w5]
     report = out / "REPORT.md"
     text = "\n\n".join(s.rstrip() for s in sections) + "\n"
     report.write_text(f_views.label_headings(text.replace("at marks_mid", "at model A fills" if fid == "A" else "at F fills"), f_views.label_for(fill))

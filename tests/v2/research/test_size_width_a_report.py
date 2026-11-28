@@ -14,7 +14,7 @@ from experiments import size_width_report as report
 from experiments.size_pnl_shortvol import NAMES
 from experiments.size_width_f_fills import ENTRY_REASONS
 from experiments.size_width_success import LADDER
-from test_size_width_f_report import HALVES, _add_views, _f_run, _mutate, _refused, _retune, _section, _text
+from test_size_width_f_report import HALVES, _add_views, _f_run, _mutate, _refused, _retune, _section, _text, write_diag
 from test_size_width_report import _write
 
 A_REASON = "f_fill_over_mid"
@@ -65,6 +65,7 @@ def _a_run(out, fill=A_FILL):
             lambda b: (_retune(b["results"], HALVES), _add_views(b["results"], HALVES), _add_a_counts(b["results"], HALVES)))
     _mutate(out, "outer_summary.json",
             lambda b: (_retune(b["results"], ("2025",)), _add_views(b["results"], ("2025",)), _add_a_counts(b["results"], ("2025",))))
+    write_diag(out)
 
 
 def _nontrades_2024(out, nt):
