@@ -933,10 +933,10 @@ The evidence helper separately consumes native history admission and research st
 require that exact binding. The same pre-work roster check (unfinished claims, premature selections) gates serial and bounded-worker execution; each fit child stays single-threaded (including MLP), preserving request identity and the parent/child memory contract.
 Freeze precedes all selected outer evaluation, with zero fit retries and unchanged winner policy.
 
-The CLI reuses the bounded staged-input reader, strict duplicate-key decoder, typed spec/reference admission and shared canonical JSON stream. Collection preserves the existing outer report identity and uses a read-only
+CLI reuses bounded staged-input reader, strict duplicate-key decoder, typed spec/reference admission and shared canonical JSON stream. Collection preserves the existing outer report identity and uses read-only
 SQLite connection. No persisted report framework, scheduler, ledger, final-read or release authority.
 
-Each invocation revalidates bindings/evidence, without cross-call admission caching. The CLI calls `seal_search_run`/`run_search`. Direct engine dependencies: contracts, data, foundation, models, ops, research.
+Each invocation revalidates bindings/evidence, without cross-call admission caching. CLI calls `seal_search_run`/`run_search`. Direct engine dependencies: contracts, data, foundation, models, ops, research.
 
 | Condition | Enforced outcome |
 |---|---|
@@ -951,9 +951,9 @@ Each invocation revalidates bindings/evidence, without cross-call admission cach
 | Durable inner result or completed outer terminal | Verify/reconcile all claimed inner results and replay completed outer folds before fresh fits; finish only missing inner publication, never refit or replace evidence. |
 | Candidate scoring refusal; shared/resource failure; no eligible candidate | Continue only after public reconciliation verifies the durable refused terminal; other failures stop. No eligible candidate refuses `EXPERIMENT_VARIANT_FAILED` before new outer work. |
 | Journal publication/transaction fails | Failed transactions roll back their association, earlier evidence and unreferenced complete objects remain; no whole-run rollback or automatic retry. |
-| CLI typed `OpsError`/`DataError`; unexpected builtin failure | Preserve the complete typed `Problem` in one refusal document, exit 2; unexpected builtin errors propagate. An opened connection closes in either case. |
-| Output exceeds the byte budget or output staging fails with an artifact, filesystem or SQLite error | Report bytes are discarded; only the refusal document reaches stdout, emitting `RESOURCE_LIMIT_EXCEEDED` or sanitized `RESOURCE_UNAVAILABLE`. Other staging errors propagate. Prior journal commits remain. |
-| Stdout write or flush failure | The original stream error propagates; no retry or second document; downstream may have received a prefix, and stdout remains caller-owned. |
+| CLI typed `OpsError`/`DataError`; unexpected builtin failure | Preserve complete typed `Problem` in one refusal document, exit 2; unexpected builtin errors propagate. An opened connection closes in either case. |
+| Output exceeds byte budget or output staging fails with an artifact, filesystem or SQLite error | Report bytes are discarded; only the refusal document reaches stdout, emitting `RESOURCE_LIMIT_EXCEEDED` or sanitized `RESOURCE_UNAVAILABLE`. Other staging errors propagate. Prior journal commits remain. |
+| Stdout write or flush failure | Original stream error propagates; no retry or second document; downstream may have received a prefix, and stdout remains caller-owned. |
 
 ### `size_quantile_metrics`
 
@@ -987,6 +987,7 @@ EXP-190 (`guides/size_quantile_move_design.md`): `size_quantile_prereg` never wr
 `size_quantile_calibration`: unscored `non_finite_output`/`calibration_burn_in`; `tail_pool_thin`→no-CRPS. `size_quantile_arm_{tables.evaluate_arm,verdict.{judge_arm,stage_a_verdict}}`: `scored_share_below_floor`/`period_no_paired_events`/`bootstrap_too_few_groups`/`no_usable_cell`/`conditional_bootstrap_too_few_groups`/`calibration_failed`(Q-arm-only)/`fit_failed`(also-Stage-A)→`not_testable`. Both: bad input `ValueError`; `RESOURCE_LIMIT_EXCEEDED`.
 `size_quantile_stage_a.run_stage_a`: `stage_a_{years_invalid,report_changed,tails_mismatch,b3_changed}`, `spec_changed`, `implied_move_unbound`, reader/B3/arm-S-refusals; atomic v4 report (`unlabelled_in_period`: denominator-only; `crps_exclusions`) reports S/B1-B3/flags.
 `size_quantile_run` (manual-only entry/smoke; 8 GiB watchdog→`RESOURCE_LIMIT_EXCEEDED`): `smoke_{tickers_invalid,out_dir_not_fresh}`, `{input_unreadable,out_dir_not_directory,run_inputs_changed}`; guard, pre-label/B3 refusals precede fits; smoke: no verdict.
+`size_quantile_amendment` (A1 stored-report re-read): `amendment_missing`, `amended_*`.
 
 ## Fill model F
 

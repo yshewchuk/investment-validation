@@ -241,4 +241,32 @@ stage_b:
     R5: "arm ids hash arm, source, family, configuration, spec and fvf_id"
     R6: "data dates only; fits and tau read exits dated before their cutoff; a month's decisions are written before its labels or exits are scored; trailing statistics use strictly earlier months"
 
-amendments: []
+amendments:
+  - id: "A1"
+    title: "Amendment 1 (2026-11-28): the scored-share floor is measured on events production can forecast; post-hoc revision by the user. This entry is the amendment's design text."
+    post_hoc: true
+    post_hoc_note: "POST-HOC: user decision 2026-11-28 (option B), written AFTER the Stage A numbers were seen (registered no-ledger full run at 7c39d5776). Not a pre-registered test; nothing in it is blind. The original fields, their PLANNED row, run inputs, report and any ledger rows are not edited or deleted."
+    label: "POST-HOC (Amendment 1, scored-share floor)"
+    registered_result: "The original not_testable result (Q and Q_raw, scored_share_below_floor in every period) stays EXP-190's registered result. The amended verdict is reported beside it, never in its place."
+    evidence: "Paired share 0.69 (2023H2), 0.73 (2024), 0.78 (2025). Q and Q_raw scored 100% of admitted events; all 6896 drops are B0 forecast_missing (diagnosis, supervisor, read-only): 5215 NaN stored tier-4 pred_abs_move, 1332 finite pred_abs_move with NaN pred_iv_crush_30 (dropped by the both-columns rule in size_pnl_tables), 349 with no tier-4 row. The floor exists so an arm cannot pass by abstaining; here every gap is the baseline's."
+    scored_share_floor:
+      amends: "stage_a.settlements.s4 and the denominator of stage_a.min_scored_share"
+      denominator: "admitted events in the period for which B0 has output (a stored production forecast B0 scored). Every admitted event without B0 output leaves the denominator, whatever the arm did"
+      numerator: "those events also scored by the arm"
+      min_scored_share: 0.80  # unchanged, per period and arm
+      always_reported: "the original share beside the amended one, and the B0 gap counts by period and reason"
+      excluded_as_stored: "the 1332 crush-only-NaN events have no B0 output as stored: they are B0 gaps and are not refilled here"
+      unlabelled: "stored drops record an unlabelled event as label_missing for both sides, so B0 output is unknown: any such drop refuses amended_share_unlabelled (the bound run has none)"
+    unchanged: "Everything else in the pass rule: the population of every metric is still events scored by both the arm and B0; no metric, interval, quarter count, other not_testable reason or arm role changes. run_stage_a is unchanged and still applies the original denominator. This amendment does not change stage_b: whether an amended pass opens Stage B is not decided here"
+    applies_to:  # the one stored run this amendment re-reads
+      spec_hash: "5347a4f5c2599793a811c9adef8fc9cb8c836636473c56cd359cd6c27b18fd9f"
+      run_inputs_hash: "sha256:6c5850f44cb23e6f6723ade37e7185a2f591bc17a15a73d93115c41d5ee64ec4"
+      report_content_hash: "sha256:30dabc2ad6bbb68c7193319073808600821ce75b089e93a7699dade1d123734d"
+    implementation: "experiments.size_quantile_amendment: reads run_inputs.json and stage_a_report.json only (no fit, panel, label or ledger read) and writes stage_a_report_amendment1_<first 12 of the spec hash>.json beside them; it never overwrites"
+    failure_semantics:
+      R1_inputs: "EXPERIMENT_IDENTITY_CONFLICT, in order: spec amendment (amendment_missing), run_inputs.json then stage_a_report.json (amended_input_unreadable, amended_run_inputs_unbound, amended_report_unbound), then stored drops against stored shares (amended_share_unlabelled, amended_shares_inconsistent, amended_report_malformed)"
+      R2_limits: "one bounded read per file; out of memory: RESOURCE_LIMIT_EXCEEDED. No partial report after any refusal"
+      R3_R4: "no randomness; atomic and immutable; identical bytes replay, different bytes refuse amended_report_changed"
+      R5: "the report records both content hashes, the original spec hash and the amending spec hash"
+      R6: "no data read; stored statistics only"
+    planned_rows: "Two EXP-190 PLANNED rows: the original, then this entry's spec hash, appended by the supervisor after merge. The re-read computes no new score and does not check the guard; its report says so"
