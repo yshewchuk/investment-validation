@@ -155,6 +155,8 @@ Saved identity and later outcome/worker APIs' separate read policies do not chan
 
 `python -m experiments.size_quantile_run` (EXP-190 Stage A and its `--tickers` smoke) is manual-only: the supervisor runs it under `bounded_run` after pre-registration; no production entrypoint calls it, and it never writes the ledger; `--no-ledger` is accepted as a no-op.
 
+`python -m experiments.size_quantile_amendment --out-dir DIR` (EXP-190 Amendment 1, post-hoc re-read of the one stored Stage A run) is manual-only: it has no production caller, writes only its own amended report beside the stored one, and never writes the ledger; `--no-ledger` is accepted as a no-op.
+
 `size_pnl_driver.run` and `run_synthetic` are consumed only by the EXP-188 `run.py` (`--stage inner`, `outer` or `synthetic`); it calls the `size_pnl_inputs`, `size_pnl_outer_inputs`, `size_pnl_readers`, `size_pnl_ladder`, `size_pnl_shortvol`, `size_pnl_straddle` (both through the `size_pnl_pricing` copies, also used by `size_pnl_equivalence` and `size_pnl_gprod`; on `engine.chain_index.price_structure_indexed`, with output identical to the originals in the synthetic tests), `size_pnl_decisions`, `size_pnl_receipts` and `size_pnl_gprod` (the optional G_PROD arm, `Sources.gate`) slices and `label_availability`, and has no other caller.
 
 `size_pnl_sources.build_sources` is the EXP-188 `run.py` `--sources` factory (`--sources-config`); it consumes `size_pnl_inputs`, `size_pnl_readers`, `size_pnl_ladder`, `size_pnl_tables` (table-backed `fetch`/`facts`/`plan_frame`), `size_pnl_gprod.load_gate` (optional gate entries), `ArtifactStore.read_verified` (the sealed plan, not re-derived), `magnitude_search_records.read_record` and `native_registration.read_native_registration`.

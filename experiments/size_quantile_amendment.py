@@ -114,6 +114,7 @@ def run(out_dir, *, spec_path=SPEC_PATH) -> dict:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="EXP-190 Amendment 1 report-only re-read.")
     parser.add_argument("--out-dir", required=True)
+    parser.add_argument("--no-ledger", action="store_true", help="accepted no-op: this CLI never writes the ledger")
     try:
         doc = run(parser.parse_args(argv).out_dir, spec_path=SPEC_PATH)
     except OpsError as exc:
