@@ -53,7 +53,8 @@ def test_every_test_file_is_in_exactly_one_shard():
 def test_every_explicit_research_pattern_matches_a_file():
     by_name = {s.name: s for s in REAL_SHARDS}
     for name in ("research-a", "research-b", "research-c", "research-d",
-                 "research-e", "research-f", "research-g", "research-h"):
+                 "research-e", "research-f", "research-g", "research-h",
+                 "research-i", "research-j", "research-k"):
         for pattern in by_name[name].patterns:
             assert any(fnmatch.fnmatchcase(path, pattern) for path in REAL_FILES), (
                 f"{name}: {pattern}"
@@ -65,10 +66,28 @@ def test_new_research_shards_keep_full_intended_membership():
         "research-d": {
             path for path in REAL_FILES
             if path.startswith("tests/v2/research/test_size_")
-            and path != "tests/v2/research/test_size_run_single_collect.py"
+            and path not in {
+                "tests/v2/research/test_size_run_single_collect.py",
+                "tests/v2/research/test_size_quantile_stage_a.py",
+                "tests/v2/research/test_size_width_fake.py",
+                "tests/v2/research/test_size_width_f_run.py",
+                "tests/v2/research/test_size_width_choices.py",
+                "tests/v2/research/test_size_width_fallback.py",
+            }
         },
         "research-h": {
             "tests/v2/research/test_size_run_single_collect.py",
+        },
+        "research-i": {
+            "tests/v2/research/test_size_quantile_stage_a.py",
+        },
+        "research-j": {
+            "tests/v2/research/test_size_width_fake.py",
+            "tests/v2/research/test_size_width_fallback.py",
+        },
+        "research-k": {
+            "tests/v2/research/test_size_width_f_run.py",
+            "tests/v2/research/test_size_width_choices.py",
         },
         "research-e": {
             "tests/v2/research/test_iv_crush_search_execution.py",
@@ -260,6 +279,13 @@ def test_ownership_matches_an_independently_written_table(tmp_path):
     ("tests/v2/research/test_magnitude_search_outer_integrity.py", "research-c"),
     ("tests/v2/research/test_magnitude_search_driver_native.py", "research-c"),
     ("tests/v2/research/test_size_search_integration.py", "research-d"),
+    ("tests/v2/research/test_size_quantile_stage_a.py", "research-i"),
+    ("tests/v2/research/test_size_width_fake.py", "research-j"),
+    ("tests/v2/research/test_size_width_f_run.py", "research-k"),
+    ("tests/v2/research/test_size_width_choices.py", "research-k"),
+    ("tests/v2/research/test_size_width_fallback.py", "research-j"),
+    ("tests/v2/research/test_size_run_single_collect.py", "research-h"),
+    ("tests/v2/research/test_size_width_f_fills.py", "research-d"),
     ("tests/v2/research/test_iv_crush_search_execution.py", "research-e"),
     ("tests/v2/research/test_iv_crush_cli.py", "research-f"),
     ("tests/v2/research/test_distribution_native_admission.py", "research-g"),
