@@ -1,6 +1,7 @@
 """EXP-190 Q3a part 2: walk-forward and fit receipts on synthetic folds; fake labels and fits (no data/, no store)."""
 import datetime
 import json
+import re
 from types import SimpleNamespace
 
 import numpy as np
@@ -274,10 +275,11 @@ def test_each_year_is_on_disk_before_a_later_year_reads_its_labels(monkeypatch, 
 
 def test_selection_never_requests_a_label_dated_on_or_after_the_cutoff(monkeypatch, tmp_path, capsys):
     out = tmp_path / "walk"
-    late = [("e23y", "T9", "2023-12-22", "2023-12-27"), ("e23z", "T9", "2023-12-29", "2023-12-31")]
-    labels = {**LABEL, "e23y": 40.0, "e23z": 40.0}
+    late = [("e23x", "T9", "2023-12-04", "2023-12-08"), ("e23y", "T9", "2023-12-22", "2023-12-27"),
+            ("e23z", "T9", "2023-12-29", "2023-12-31")]
+    labels = {**LABEL, "e23x": 2.0, "e23y": 40.0, "e23z": 40.0}
     sealed = _sealed()
-    T25L = T23 + E23 + ["e23y", "e23z"] + E24
+    T25L = T23 + E23 + ["e23x", "e23y", "e23z"] + E24
     sealed["context"]["target_events"][9:9] = [{"event_id": e, "ticker": t, "event_date": d, "label_end": end}
                                                for e, t, d, end in late]
     sealed["fold_events"][9:9] = [{"event_id": e, "ticker": t, "event_date": d,
@@ -289,7 +291,7 @@ def test_selection_never_requests_a_label_dated_on_or_after_the_cutoff(monkeypat
         {"source_session_ceiling": "2023-12-22"}]
     sealed["plan"]["folds"] = [{"outer": {"year": "2025", "training_candidate_event_ids": T25L},
                                 "inner": [{"year": "2023", "training_candidate_event_ids": T23},
-                                          {"year": "2024", "training_candidate_event_ids": T24}]}]
+                                          {"year": "2024", "training_candidate_event_ids": T24 + ["e23x"]}]}]
     dates = {e["event_id"]: e["event_date"] for e in sealed["context"]["target_events"]}
     repository = SimpleNamespace(table_contract=lambda snapshot, table: magnitude_inputs.COMPUTED_MOVES_CONTRACT)
 
@@ -312,14 +314,17 @@ def test_selection_never_requests_a_label_dated_on_or_after_the_cutoff(monkeypat
     assert all(receipts[year]["status"] == "ok" for year in YEARS)
     assert [(c["ids"], c["before"]) for c in calls["labels"]] == [
         (T23, "2023-01-01"),
-        (E23, "2023-12-22"), (T24, "2023-12-22"),
-        (E23 + ["e23y", "e23z"] + E24, "2025-01-01"), (T25L, "2025-01-01"),
+        (E23 + ["e23x"], "2023-12-22"), (T24 + ["e23x"], "2023-12-22"),
+        (E23 + ["e23x", "e23y", "e23z"] + E24, "2025-01-01"), (T25L, "2025-01-01"),
     ]
-    assert receipts["2023"]["event_ids"] == E23 + ["e23y", "e23z"]
-    assert receipts["2024"]["inputs"]["selection_labels_hash"] == content_hash([[e, labels[e]] for e in E23])
+    assert receipts["2023"]["event_ids"] == E23 + ["e23x", "e23y", "e23z"]
+    assert receipts["2024"]["inputs"]["selection_labels_hash"] == content_hash(
+        [[e, labels[e]] for e in E23 + ["e23x"]])
     assert receipts["2024"]["selection_losses"] == {
-        k: pytest.approx(_pinball([labels[e] for e in E23], PRED[k])) for k in KEYS}
-    assert "selection_not_before_cutoff=2" in capsys.readouterr().err
+        k: pytest.approx(_pinball([labels[e] for e in E23 + ["e23x"]], PRED[k])) for k in KEYS}
+    err = capsys.readouterr().err
+    assert re.findall(r"\[quantile walk\] year=(\d{4}) .*selection_not_before_cutoff=(\d+)", err) == [
+        ("2023", "0"), ("2024", "2"), ("2025", "0")]
 
 
 def test_replay_refits_nothing_and_rewrites_nothing(monkeypatch, tmp_path):
