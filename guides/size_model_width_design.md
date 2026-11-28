@@ -26,7 +26,7 @@ Supervisor analysis, 2026-11-28 (aggregates, not reproduced):
 | `M3` | v14 MAE winner |
 | `E-log`, `N-log` | spline ElasticNet and MLP `log1p` twins |
 
-M3, E-log and N-log are stored walk-forward predictions bound by EXP-188's roster and binders; nothing is refitted. Arms resolving to one `model_id` run once under both names. M3 was chosen on 2023-24 inner MAE; the pair members were not score-chosen. Every arm uses production's `pred_iv_crush_30` as crush forecast.
+M3, E-log and N-log are stored walk-forward predictions bound by EXP-188's roster and binders; nothing is refitted. Arms sharing one `model_id` run once, both named. M3 was chosen on 2023-24 inner MAE; the pair members were not score-chosen. Every arm uses production's `pred_iv_crush_30` as crush forecast.
 
 ### 2.1 Bias-corrected production (values mine, Q4)
 
@@ -160,6 +160,6 @@ Lines are estimated added non-test code / test lines / doc words. Target about 1
 | S6b | Per-model tables and diagnostics. R1, R2, R4: as S6a; diagnostics `not_available`, never refuse. | ~140 / ~140 / 30 | S6a, `pn189dx` merged |
 | S7 | Runbook: smoke, run, `spread050`, resume, logs to check. No code; `preregistered_at` is a separate spec PR. | 0 / 0 / ~600 | S3, S4, Q7 |
 
-The full run waits for S1a-S5, S7 and registration. S6a and S6b block only the report.
+The full run waits for S1a-S5, S7 and registration; S6a and S6b block only reporting.
 
 **Standard-tool check.** No standard format is involved; new code wraps existing repository code. Nothing enters `STRUCTURES` or the board.
