@@ -2,6 +2,7 @@
 
 Expected strings are hand-written here; the oracle is the spec's text, not the code under test."""
 import json
+import re
 
 import pytest
 
@@ -94,6 +95,19 @@ def test_a_primary_run_is_labelled_renamed_and_carries_its_notes(tmp_path):
     t5c_row = "| E | 2025 | TWIN-P | 10 | 1 (10.00) | 0 (0.00) | 0 (0.00) | 0 (0.00) | 3 (30.00) | 0 (0.00) | 4 (40.00) | 2 | 5 | 20.00 |"
     assert t2c_row in _section(text, "### T2c ")
     assert t5c_row in _section(text, "### T5c ")
+    for view, row in (("mid", "| BFLY-P | 1.30 | 2.30 | 0.80 | 0.80 | 0.80 | 0.80 |"),
+                      ("harsh", "| BFLY-P | 1.40 | 2.40 | 0.90 | 0.90 | 0.90 | 0.90 |")):
+        t6_heading = (f"### T6 beside model A: per-structure stand-alone accounts at {view} (2025, return %; reported, never "
+                      f"deciding; 2025 NOT blind for widths) [{label}]")
+        assert t6_heading in text
+        assert row in _section(text, f"### T6 beside model A: per-structure stand-alone accounts at {view} ")
+    for line in text.splitlines():
+        if line.startswith(("#", "|")):
+            assert re.search(r"\bF\b", line) is None, line
+    for heading in ("### T5 beside model A: seven-structure", "### T5 beside model A: return per trade",
+                    "### T2c model A entry non-trades", "### T5c model A entry non-trades",
+                    "### T5d model A-selected taken trades"):
+        assert heading in text
 
 
 @pytest.mark.parametrize("variant, note, label", [
