@@ -322,8 +322,8 @@ pytest and a nonzero result fails the `plan` job, and so the required `test` che
 
 CI runs the suite as shards declared in `tests/shards.toml`. `tools/ci_shards.py matrix`
 prints the shard names: `research-a` through `research-c` split the magnitude-search
-tests; `research-d` owns the `test_size_*` files that `research-h`, `research-i` and
-`research-j` do not claim first; `research-e` and `research-f` split IV tests; `research-g`
+tests; `research-d` owns the `test_size_*` files that `research-h`, `research-i`,
+`research-j` and `research-k` do not claim first; `research-e` and `research-f` split IV tests; `research-g`
 holds distribution and other heavy tests; and `research` covers the remaining
 research tests. The `rest` shard is the catch-all remainder. The SIZE glob and
 first-match exceptions are maintained in `tests/shards.toml`. `files SHARD [--selection FILE]` prints one shard's test files
