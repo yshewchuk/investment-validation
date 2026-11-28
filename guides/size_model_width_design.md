@@ -146,7 +146,7 @@ A slice waits for its questions.
 
 ## 10. Slice plan
 
-Lines: estimated code / test lines / doc words. Code target about 150, limit about 300. S1a is the walking skeleton. Tests use synthetic fixtures and independent oracles (hand-computed ratios, accounts, pass rows). Every slice follows section 6's order, publishes no partial summary and receipts what it loaded. **Every slice's stderr logging** covers the section 6 items its path produces; S5, pure, logs nothing.
+Lines: estimated code / test lines / doc words. Code target about 150, limit about 300. S1a is the walking skeleton. Tests use synthetic fixtures and independent oracles (hand-computed ratios, accounts, pass rows). Run-path slices follow section 6's order, publish no partial summary and receipt what they load. **Every slice's stderr logging** covers the section 6 items its path produces; S5, pure, logs nothing.
 
 | Slice | Path added; failure semantics | Lines | After |
 | --- | --- | --- | --- |
