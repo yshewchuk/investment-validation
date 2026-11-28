@@ -1,0 +1,96 @@
+id: "EXP-191"
+title: "Model x width for the seven short-vol structures under fill model A"
+hypothesis: "Another move forecast with its own width factors beats production (M0) at production widths."
+type: "decision_rescore"
+strategy: "*"
+design: "guides/size_model_width_design.md"  # rules not repeated here are there
+status: "planned"  # preregistered_at is deliberately unset (design section 8)
+post_hoc: true
+label: "POST-HOC (EXP-191, model A)"
+label_2025: "2025 NOT blind for widths or models"
+
+structures: ["TWIN-P", "TWIN-P5", "CND-PS", "BFLY-P", "BFLY-P5", "RAMP7", "CTR5"]
+models:
+  - {arm: "M0", source: "production size_v1_4 pred_abs_move", reference: true}
+  - {arm: "BC", source: "bias_correction"}
+  - {arm: "M3", source: "sealed v14 MAE winner"}
+  - {arm: "E-log", source: "sealed v14 pair cell"}
+  - {arm: "N-log", source: "sealed v14 pair cell"}
+crush_forecast: "production pred_iv_crush_30"
+population: "events common to all five arms; each arm's own pool, 2023-01-01 on, labels available strictly before the month"
+
+bias_correction:
+  window_months: 12
+  statistic: "sum(abs_move) / sum(M0 forecast), over rows with M0 forecast > 0 and a label available strictly before the month start"
+  rows: "M0's own coverage, read from 2022-01-01"
+  apply: "r of the row's own month, to decided events and pool rows"
+  min_n: 500
+  fallback_ratio: 1.0
+  clip: false
+
+width: "k * (arm forecast / 100) / production divisor; bounds after k"
+grid:
+  k: [0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0]
+width_arms:
+  P: "k = 1"
+  A: "one k"
+  B: "one k per structure"
+  D: "TWIN pair k; other five k"
+  E: "per event, k maximising exp_pnl_sim"
+not_run: ["arm C", "oracle anchor", "tolerance bands", "fallback"]
+tuning:
+  per_model: true
+  window: "2023H2-2024"
+  objective: "each tuned unit's stand-alone account return at model A fills"
+  rules: "EXP-189 tie, edge, k_defaulted and same_k"
+  min_trades: 300
+account: {start_equity: 200000, cap: 0.66, target_share: 0.25, expensive_first: true, secured: "strike x 100"}
+periods: ["2023H2", "2024", "2025"]
+
+fill_model:  # top level: the EXP-191 guard passes this block to the selector and refuses fill_model_missing (design section 4)
+  id: "A"
+  fvf_id: "735f3e6cb2fa65c303599152cfa6fead2d7950e9bcb367117d50ed25faffc0b7"
+  carry_dividend_mode: "f7_orats_borrow_discrete_dividend"
+  rate_rules:
+    rate_out_of_range: "missing"
+    rate_empty_row: "rate_unknown"
+  vol_scale: 1.0
+  rate_scale: 0.01
+  reingest:
+    path: "data/experiment/orats_smoothed_vol_v4"
+    tool_version: "4"
+    manifest_sha256: "17ecc75e84d2e261900eccc3ad79a1cbd065af2d58eabdfebfd49dd75001f75d"
+    manifest_units:
+      iRate5wk: "percent"
+      iRateLt: "percent"
+      borrow30: "percent"
+      borrow2yr: "percent"
+      divAmt: "dollars_per_share"
+      annIdiv: "dollars_per_share"
+      annActDiv: "dollars_per_share"
+      divDate: "date"
+      assetType: "code"
+  constants_file: "experiments/EXP-189_short_vol_width_tuning/model_a_constants.json"
+  constants_id: "22e1bc6823ee05ffd3b08130c39f9b48a9c22364e0e256d7482bb4ecb19d67fb"
+  primary_variant: "primary"
+  sensitivity_variant: "spread050"
+  rules: "as EXP-189 Amendment 2"
+reported_never_deciding: ["mid", "harsh", "unknown0", "unknown1", "midfloor"]
+spread050: "full run of all five arms, required only if a candidate passes"
+
+pass_bar:
+  reference: "(M0, P)"
+  relative:
+    beats_reference_in: ["2023H2", "2024", "2025"]
+    max_breakeven_margin_2025: 0.05
+    max_structures_lost_2025: 2
+    e_not_same_k: true
+  absolute: {return_strictly_above: 0, min_periods: 2}
+recommendation:
+  model_order: ["M0", "BC", "M3", "E-log", "N-log"]
+  width_order: ["P", "A", "D", "B", "E"]
+  none_passing: "no change"
+
+diagnostics: "per model, from the shared EXP-189 report code; never block a run"
+ledger: "--no-ledger on every stage; the supervisor appends the PLANNED row; every stage refuses without that row"
+open_questions: ["Q1", "Q2", "Q3", "Q4", "Q5", "Q6", "Q7", "Q8"]  # design section 9; defaults above
