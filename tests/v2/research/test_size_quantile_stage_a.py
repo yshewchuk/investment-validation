@@ -216,6 +216,7 @@ def _guard(case, *, settled=True, min_donors=30):
     spec = yaml.safe_load(REAL_SPEC.read_text(encoding="utf-8"))
     spec["distribution_tails"]["min_donors"] = min_donors
     spec["stage_b"] = {**spec["stage_b"], "status": "settled" if settled else "pending_decisions"}
+    spec["amendments"] = []
     if settled:
         spec["preregistered_at"] = STAMP
     spec_path = case / "spec.yaml"

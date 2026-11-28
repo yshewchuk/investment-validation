@@ -56,6 +56,12 @@ def _terciles(period, y, e, q, mask, tercile):
     return pd.DataFrame(out, columns=TERC)
 
 
+def conditional_rule(periods, w_interval, diff_interval) -> bool:
+    return bool(all(row["W_spearman"] > 0 and row["W_spearman"] > row["L_spearman"] and row["W_tercile_diff"] > 0
+                    and row["W_tercile_diff"] > row["L_tercile_diff"] for row in periods)
+                and w_interval[0] > 0 and diff_interval[0] > 0)
+
+
 def judge_arm(name, arm, b0, events, history, *, raw=None, resamples=RESAMPLES, seed=SEED):
     """Conditional tests and pass rule 2 for one arm, then its verdict (Q and Q_raw only; others None)."""
     try:
@@ -91,8 +97,9 @@ def judge_arm(name, arm, b0, events, history, *, raw=None, resamples=RESAMPLES, 
                 creasons.append("conditional_bootstrap_too_few_groups")
             reasons = res["not_testable_reasons"] + creasons
             status = "not_testable" if reasons else "testable"
-            ok = all(wp[p][0] > 0 and wp[p][0] > lp[p][0] and wp[p][1] > 0 and wp[p][1] > lp[p][1] for p in PERIODS)
-            passed2 = None if status == "not_testable" else bool(ok and w_iv[0] > 0 and d_iv[0] > 0)
+            periods = pd.DataFrame([{"period": p, "W_spearman": wp[p][0], "L_spearman": lp[p][0],
+                                     "W_tercile_diff": wp[p][1], "L_tercile_diff": lp[p][1]} for p in PERIODS])
+            passed2 = None if status == "not_testable" else conditional_rule(periods.to_dict("records"), w_iv, d_iv)
             skips = {"level_width_burn_in": int((lr == "level_width_burn_in").sum()),
                      "level_width_empty_bin": int((lr == "level_width_empty_bin").sum()),
                      "zero_median": int((keep & zero).sum())}
@@ -110,8 +117,6 @@ def judge_arm(name, arm, b0, events, history, *, raw=None, resamples=RESAMPLES, 
                                  **{f"b0_{c}": qb[:, k] for k, c in enumerate(QCOLS)}, "W": W, "L": L, "e": e,
                                  "level_reason": lr, "zero_median": zero, "used": wu, "W_contribution": wc,
                                  "W_tercile": wt, "L_contribution": lc, "L_tercile": lt}, index=pid)
-            periods = pd.DataFrame([{"period": p, "W_spearman": wp[p][0], "L_spearman": lp[p][0],
-                                     "W_tercile_diff": wp[p][1], "L_tercile_diff": lp[p][1]} for p in PERIODS])
             ratio_out = {"periods": pd.DataFrame([{"period": p, "spearman": rp[p][0], "tercile_diff": rp[p][1]}
                                                   for p in PERIODS]),
                          "interval": r_iv, "terciles": _terciles(period, y, e, q, ru, rt)}

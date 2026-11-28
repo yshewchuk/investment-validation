@@ -84,6 +84,15 @@ def _row(slice_name, label, m, a):
             "b0_crps": _mean(bc[np.isfinite(bc)]), "b0_n_crps": int(np.isfinite(bc).sum())}
 
 
+def accuracy_rule(periods_below, quarters_below, quarter_interval, ticker_interval) -> bool:
+    return bool(all(periods_below.values()) and quarters_below >= MIN_ACCURACY_QUARTERS
+                and quarter_interval[1] < 0 and ticker_interval[1] < 0)
+
+
+def calibration_rule(quarters_no_worse) -> bool:
+    return all(c >= MIN_CALIBRATION_QUARTERS for c in quarters_no_worse.values())
+
+
 def evaluate_arm(name, arm, b0, events, *, raw=None, resamples=RESAMPLES, seed=SEED):
     """Tables, scored share and pass rules 1 and 3 for one arm against B0; no verdict for the arm."""
     try:
@@ -128,11 +137,10 @@ def evaluate_arm(name, arm, b0, events, *, raw=None, resamples=RESAMPLES, seed=S
             quarters_below = sum(_mean(a["pa"][m]) < _mean(a["pb"][m]) for m in qmask)
             iv = {k: bootstrap_interval(d, a[k], resamples=resamples, seed=seed)[1:] if len(set(a[k])) > 1
                   else (NAN, NAN) for k in ("quarter", "ticker")}
-            acc = bool(all(periods_below.values()) and quarters_below >= MIN_ACCURACY_QUARTERS
-                       and iv["quarter"][1] < 0 and iv["ticker"][1] < 0) if not reasons else None
+            acc = accuracy_rule(periods_below, quarters_below, iv["quarter"], iv["ticker"]) if not reasons else None
             no_worse = {b: sum(abs(_mean(a["cov"][b][m]) - nom) <= abs(_mean(a["covb"][b][m]) - nom) + 1e-12
                                for m in qmask) for b, (_, _, nom) in BANDS.items()}
-            cal = bool(all(c >= MIN_CALIBRATION_QUARTERS for c in no_worse.values())) if not reasons else None
+            cal = calibration_rule(no_worse) if not reasons else None
             drops = pd.DataFrame({"year": ev["year"].to_numpy(dtype=int)[~paired], "arm_reason": arm_lab[~paired],
                                   "b0_reason": b0_lab[~paired]})
             drops = drops.groupby(["year", "arm_reason", "b0_reason"]).size().reset_index(name="n")

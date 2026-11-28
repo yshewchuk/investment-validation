@@ -25,6 +25,7 @@ def _write_spec(case, *, settled=True, drop_stage_b=False, **changes):
         spec["preregistered_at"] = STAMP
     if drop_stage_b:
         spec.pop("stage_b")
+    spec["amendments"] = []
     spec.update(changes)
     path = case / "spec.yaml"
     path.write_text(yaml.safe_dump(spec, sort_keys=False))
@@ -194,7 +195,10 @@ def test_non_dict_stage_b_refuses_even_with_a_matching_planned_row(tmp_path):
 
 
 def test_real_spec_with_a_planned_row_passes_stage_b_and_the_stamp_check(tmp_path):
-    ledger = _write_ledger(tmp_path / "LEDGER.csv", [_planned_row(_digest(REAL_SPEC))])
+    # one PLANNED row per amendment plus the spec: the original spec (no amendments), then the real spec with A1
+    spec = yaml.safe_load(read_bounded_state(REAL_SPEC, 1 << 20).decode("utf-8"))
+    original = lib.spec_hash({**spec, "amendments": []})
+    ledger = _write_ledger(tmp_path / "LEDGER.csv", [_planned_row(original), _planned_row(_digest(REAL_SPEC))])
     receipt = _check(tmp_path, REAL_SPEC, ledger, _own_experiments(tmp_path))
     assert receipt["spec_hash_checked"] is True
     assert receipt["spec_hash"] == _digest(REAL_SPEC)
