@@ -93,12 +93,15 @@ def _walk(sealed, spec, years, out_dir):
     directory, receipts = Path(out_dir), {}
     keys = {f"{a}x{b}" for a, b in configurations(spec)}
     progress = Progress("quantile walk-forward", len(years))
+    event_dates = {e["event_id"]: e["event_date"] for e in sealed["context"]["target_events"]}
     for index, year in enumerate(years):
         fold = folds[year]
         cutoff = fold["training_labels_before"]
         with stage(f"quantile walk {year}"):
             # Strictly sequential: Y's receipt is on disk before any later year reads labels for Y's evaluation events.
-            earlier = [e for y in years[:index] for e in folds[y]["evaluation_event_ids"]]
+            requested = [e for y in years[:index] for e in folds[y]["evaluation_event_ids"]]
+            # An event dated on or after Y's cutoff has no label available before it; the label reader refuses it.
+            earlier = [e for e in requested if event_dates[e] < cutoff]
             selection = _labels(training_labels(sealed, earlier, cutoff)) if earlier else []
             train = _labels(training_labels(sealed, fold["training_event_ids"], cutoff))
             inputs = {"sealed_binding": sealed["binding"], "spec_hash": lib.spec_hash(spec),
@@ -111,7 +114,7 @@ def _walk(sealed, spec, years, out_dir):
             configuration, losses = select_configuration(spec, sealed, list(receipts.values()), dict(selection))
             decision("quantile walk", f"year={year} configuration={configuration[0]}x{configuration[1]} "
                      f"training={len(train)} evaluation={len(fold['evaluation_event_ids'])} "
-                     f"selection_labels={len(selection)}")
+                     f"selection_labels={len(selection)} selection_not_before_cutoff={len(requested) - len(earlier)}")
             fixed = {"schema_version": SCHEMA, "inputs": inputs, "levels": list(spec["levels"]),
                      "configuration": list(configuration), "selection_losses": losses,
                      "arm_id": arm_id(spec, sealed, SOURCE, configuration),

@@ -1,5 +1,7 @@
 """EXP-190 Q3a part 2: walk-forward and fit receipts on synthetic folds; fake labels and fits (no data/, no store)."""
+import datetime
 import json
+import re
 from types import SimpleNamespace
 
 import numpy as np
@@ -9,6 +11,7 @@ import sklearn
 
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import OpsError
+from engine.v2.research import magnitude_inputs
 from experiments import lib
 from experiments import size_quantile_fits as fits
 from experiments import size_quantile_walk as walk
@@ -268,6 +271,60 @@ def test_each_year_is_on_disk_before_a_later_year_reads_its_labels(monkeypatch, 
         for year in YEARS:
             if set(EXPECT[year][1]) & set(call["ids"]):
                 assert f"fit_{year}.json" in call["existing"], (year, call["before"])
+
+
+def test_selection_never_requests_a_label_dated_on_or_after_the_cutoff(monkeypatch, tmp_path, capsys):
+    out = tmp_path / "walk"
+    late = [("e23x", "T9", "2023-12-04", "2023-12-08"), ("e23y", "T9", "2023-12-22", "2023-12-27"),
+            ("e23z", "T9", "2023-12-29", "2023-12-31")]
+    labels = {**LABEL, "e23x": 2.0, "e23y": 40.0, "e23z": 40.0}
+    sealed = _sealed()
+    T25L = T23 + E23 + ["e23x", "e23y", "e23z"] + E24
+    sealed["context"]["target_events"][9:9] = [{"event_id": e, "ticker": t, "event_date": d, "label_end": end}
+                                               for e, t, d, end in late]
+    sealed["fold_events"][9:9] = [{"event_id": e, "ticker": t, "event_date": d,
+                                   "forecasts": [{"source_session_ceiling": d}]} for e, t, d, _ in late]
+    sealed["events"][9:9] = [{"event_id": e} for e, _, _, _ in late]
+    sealed["rows"][9:9] = [{"event_id": e, "f_a": 90.0 + k, "f_b": 9.0 + k, "f_empty": None}
+                           for k, (e, _, _, _) in enumerate(late)]
+    next(e for e in sealed["fold_events"] if e["event_id"] == "e24a")["forecasts"] = [
+        {"source_session_ceiling": "2023-12-22"}]
+    sealed["plan"]["folds"] = [{"outer": {"year": "2025", "training_candidate_event_ids": T25L},
+                                "inner": [{"year": "2023", "training_candidate_event_ids": T23},
+                                          {"year": "2024", "training_candidate_event_ids": T24 + ["e23x"]}]}]
+    dates = {e["event_id"]: e["event_date"] for e in sealed["context"]["target_events"]}
+    repository = SimpleNamespace(table_contract=lambda snapshot, table: magnitude_inputs.COMPUTED_MOVES_CONTRACT)
+
+    def population(_repository, _snapshot, *, as_of_month, purpose, event_ids):
+        return pd.DataFrame({"event_id": list(event_ids), "event_date": pd.to_datetime([dates[e] for e in event_ids])})
+
+    monkeypatch.setattr(magnitude_inputs, "load_population", population)
+    monkeypatch.setattr(magnitude_inputs, "_plans", lambda *_args: [])
+    calls = _install(monkeypatch, out, labels=labels)
+    recording = walk.training_labels
+
+    def engine_checked_labels(sealed_, event_ids, labels_before):
+        magnitude_inputs._candidate_plans(repository, None, "2026-01", "selection", event_ids,
+                                          datetime.date.fromisoformat(labels_before))
+        return recording(sealed_, event_ids, labels_before)
+
+    monkeypatch.setattr(walk, "training_labels", engine_checked_labels)
+    receipts = walk.fit_walk_forward(sealed, SPEC, YEARS, out)
+    assert list(receipts) == YEARS
+    assert all(receipts[year]["status"] == "ok" for year in YEARS)
+    assert [(c["ids"], c["before"]) for c in calls["labels"]] == [
+        (T23, "2023-01-01"),
+        (E23 + ["e23x"], "2023-12-22"), (T24 + ["e23x"], "2023-12-22"),
+        (E23 + ["e23x", "e23y", "e23z"] + E24, "2025-01-01"), (T25L, "2025-01-01"),
+    ]
+    assert receipts["2023"]["event_ids"] == E23 + ["e23x", "e23y", "e23z"]
+    assert receipts["2024"]["inputs"]["selection_labels_hash"] == content_hash(
+        [[e, labels[e]] for e in E23 + ["e23x"]])
+    assert receipts["2024"]["selection_losses"] == {
+        k: pytest.approx(_pinball([labels[e] for e in E23 + ["e23x"]], PRED[k])) for k in KEYS}
+    err = capsys.readouterr().err
+    assert re.findall(r"\[quantile walk\] year=(\d{4}) .*selection_not_before_cutoff=(\d+)", err) == [
+        ("2023", "0"), ("2024", "2"), ("2025", "0")]
 
 
 def test_replay_refits_nothing_and_rewrites_nothing(monkeypatch, tmp_path):
