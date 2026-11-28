@@ -6,10 +6,13 @@ from pathlib import Path
 import yaml
 
 from engine.v2.ops.errors import OpsError
+from experiments import fair_value_apply
 from experiments import fair_value_inputs as fvi
 from experiments import lib, size_width_account, size_width_prereg, size_width_sizing
+from experiments import size_width_a_fills, size_width_f_select
 
 REAL_SPEC = size_width_prereg.SPEC_PATH
+MODEL_A_CONSTANTS = REAL_SPEC.parent / "model_a_constants.json"
 
 
 def _write_real_spec(case, **changes):
@@ -190,11 +193,20 @@ def test_real_spec_is_exp_189_with_the_design_grid_and_account_equity():
 
 # The hash of the original pre-registered spec: the ledger's first EXP-189 PLANNED row.
 ORIGINAL_HASH = "60773dc627e4b18040d02de0d0e79e29b0b5964749ecb5d52737c17f4958b41a"
+# The spec hash on main with Amendment 1 only: the ledger's second EXP-189 PLANNED row.
+A1_HASH = "44776b05f9a4fd7fb5232a1791ff6e3a9b173d099d86960213a2ba57de7da668"
 
 
 def _real_amendment():
     spec, _ = size_width_prereg.load_spec()
-    (amendment,) = spec["amendments"]
+    amendment, _ = spec["amendments"]
+    return spec, amendment
+
+
+def _real_amendment_2():
+    spec, _ = size_width_prereg.load_spec()
+    _, amendment = spec["amendments"]
+    assert [a["id"] for a in spec["amendments"]] == ["A1", "A2"]
     return spec, amendment
 
 
@@ -202,6 +214,11 @@ def test_amendment_1_leaves_the_original_fields_untouched():
     spec, _ = _real_amendment()
     assert lib.spec_hash({**spec, "amendments": []}) == ORIGINAL_HASH
     assert spec["preregistered_at"] == "2026-11-23T12:00:00+00:00"
+
+
+def test_amendment_2_leaves_amendment_1_untouched():
+    spec, _ = _real_amendment_2()
+    assert lib.spec_hash({**spec, "amendments": spec["amendments"][:1]}) == A1_HASH
 
 
 def test_amendment_1_selects_f_with_loadable_bindings():
@@ -236,11 +253,83 @@ def test_amended_spec_needs_the_original_row_and_a_new_one_last(tmp_path):
             spec_path=REAL_SPEC, ledger_path=_write_ledger(tmp_path / name, rows),
             run_log_path=_run_log_path(tmp_path), experiments_dir=exps)
 
-    original, new = _planned_row(ORIGINAL_HASH), _planned_row(digest)
-    assert refusal(lambda: check("only_original.csv", [original])) == "planned_row_ambiguous"
-    assert refusal(lambda: check("wrong_order.csv", [new, original])) == "spec_hash_mismatch"
-    receipt = check("registered.csv", [original, new])
+    original, a1, new = _planned_row(ORIGINAL_HASH), _planned_row(A1_HASH), _planned_row(digest)
+    assert refusal(lambda: check("original_and_a1.csv", [original, a1])) == "planned_row_ambiguous"
+    assert refusal(lambda: check("wrong_order.csv", [original, new, a1])) == "spec_hash_mismatch"
+    receipt = check("registered.csv", [original, a1, new])
     assert receipt["spec_hash"] == digest and receipt["spec_hash_checked"] is True
+    assert receipt["fill_model"]["id"] == "A"
+
+
+def test_model_a_constants_file_is_the_pinned_one_and_loads_for_both_variants():
+    assert size_width_a_fills.CONSTANTS_PATH == MODEL_A_CONSTANTS
+    _, amendment = _real_amendment_2()
+    fill = amendment["fill_model"]
+    assert fill["constants_sha256"] == "494b21325983821ec1f018e2d04630109284532b7b9d617a5a2e803c9dd4d95a"
+    assert fill["constants_file"] == "experiments/EXP-189_short_vol_width_tuning/model_a_constants.json"
+    assert fill["constants_id"] == "22e1bc6823ee05ffd3b08130c39f9b48a9c22364e0e256d7482bb4ecb19d67fb"
+    assert fill["primary_variant"] == "primary"
+    assert fill["sensitivity_variant"] == "spread050"
+    constants_id = "22e1bc6823ee05ffd3b08130c39f9b48a9c22364e0e256d7482bb4ecb19d67fb"
+    expected = {
+        "anchor": "mid",
+        "constants": {"C_BASE": 0.21, "C_SPREAD": 0.0, "C_THIN_OI": 0.1, "C_THIN_SIZE": 0.15,
+                      "GUARD_FILL_FRACTION": 0.25, "SPREAD_SCALE": 0.5, "THIN_OI_BELOW": 100,
+                      "THIN_SIZE_BELOW": 10, "UNKNOWN_THIN": 0.5},
+        "constants_id": constants_id,
+        "sensitivity_variants": {"spread050": {"C_SPREAD": 0.5}},
+    }
+
+    model, extra = size_width_a_fills.load(constants_id, "primary")
+    assert extra["constants_file_sha256"] == "494b21325983821ec1f018e2d04630109284532b7b9d617a5a2e803c9dd4d95a"
+    assert model.document == expected
+    primary = fair_value_apply.load_constants(model.document, constants_id, "primary")
+    assert primary["C_BASE"] == 0.21
+    assert primary["C_SPREAD"] == 0.0
+    assert primary["C_THIN_SIZE"] == 0.15
+    assert primary["C_THIN_OI"] == 0.10
+
+    model, extra = size_width_a_fills.load(constants_id, "spread050")
+    assert extra["constants_file_sha256"] == "494b21325983821ec1f018e2d04630109284532b7b9d617a5a2e803c9dd4d95a"
+    assert model.document == expected
+    spread050 = fair_value_apply.load_constants(model.document, constants_id, "spread050")
+    assert spread050["C_BASE"] == 0.21
+    assert spread050["C_SPREAD"] == 0.5
+    assert spread050["C_THIN_SIZE"] == 0.15
+    assert spread050["C_THIN_OI"] == 0.10
+
+
+def test_the_real_spec_selects_model_a_with_amendment_1s_f_inputs():
+    spec, a2 = _real_amendment_2()
+    a1 = spec["amendments"][0]["fill_model"]
+    assert size_width_f_select.fill_model(spec) == a2["fill_model"]
+    assert a2["fill_model"]["id"] == "A"
+    for key in ("fvf_id", "carry_dividend_mode", "rate_rules", "vol_scale", "rate_scale", "reingest",
+                "quote_snapshot"):
+        assert a2["fill_model"][key] == a1[key]
+
+
+def test_amendment_2_fill_dates_say_the_fit_postdates_every_test_period():
+    _, amendment = _real_amendment_2()
+    assert amendment["fill_dates"] == (
+        "The fills used to fit model A all postdate every EXP-189 test period (2023H2, 2024, 2025): no overlap.")
+
+
+def test_amendment_2_fit_disclosure_matches_the_supervisors_summary():
+    _, amendment = _real_amendment_2()
+    d = amendment["fit_disclosure"]
+    assert d["input_sha256"] == "e06646be7fe09eb164e947dea0b64d05f59234bc62931d55c0e337a26a0f4fb0"
+    assert d["base_fvf_id"] == "735f3e6cb2fa65c303599152cfa6fead2d7950e9bcb367117d50ed25faffc0b7"
+    assert d["window_minutes"] == 60
+    assert d["counts"] == {
+        "rows": 413, "used": 180, "unflagged": 146, "oi_only": 19, "size_only": 8, "both": 7, "unknown": 0,
+        "outside_window": 228, "unpriceable": 0, "rate_unknown": 2, "no_fair_value": 3, "zero_half_spread": 0,
+        "borrow_cells_out_of_range": 0, "rate_cells_out_of_range": 0}
+    assert d["fit"] == {
+        "unflagged": {"n": 146, "fitted": True, "loss": 0.896096258132475},
+        "oi_only": {"n": 19, "fitted": False, "loss": 0.7181021846860469},
+        "size_only": {"n": 8, "fitted": False, "loss": 1.2533928571428548}}
+    assert d["unflagged_mean_abs_error"] == {"model_a": 0.896096258132475, "current_F": 0.9811597883271139}
 
 
 # --------------------------------------------------------------------------
