@@ -1,0 +1,150 @@
+id: "EXP-191"
+title: "Model x width for the seven short-vol structures under fill model A"
+hypothesis: "Another move forecast, with its own width factors, beats production's forecast (M0) at production widths on the seven put-side short-vol structures."
+type: "decision_rescore"
+strategy: "*"
+design: "guides/size_model_width_design.md"
+status: "planned"
+# preregistered_at is deliberately unset: design section 8 gives the registration order.
+
+post_hoc: true
+post_hoc_note: "Post-hoc: 2025 results of EXP-188 and EXP-189, and the supervisor's 2026-11-28 aggregates, were seen before this design; model A was fitted on the user's own fills, which postdate every test period, so its constants use information unavailable at any decision date. The bias-corrected arm was motivated by a bias measured on a span that includes test periods."
+label: "POST-HOC (EXP-191, model A)"
+label_2025: "2025 NOT blind for widths or models"
+
+user_decisions_2026_11_28:
+  - "A new experiment, EXP-191; EXP-189 stays as is."
+  - "Model arms: M0 (reference), E-log, N-log, M3 (v14 MAE winner) from the sealed v14 stored walk-forward predictions, plus bias-corrected M0 under a pre-specified causal trailing realised/predicted ratio."
+  - "Full 10-width grid per model, so A, B, D and E are rebuilt per model."
+  - "Pass bar both relative (EXP-189's rules against M0 at production widths) and absolute (positive $200,000 account return at model A fills in at least 2 of 2023H2, 2024, 2025). Mid and harsh are reported, never deciding."
+
+constraints:
+  - "No edit to size_pnl_* or size_width_* modules, SIZE search modules or the source_closure of experiments/size_panel.py; new modules are named size_mw_*."
+  - "Nothing enters STRUCTURES, the registry or the board. No call-side short leg."
+  - "Holdouts only through the shared admission; labels by admitted event key only."
+  - "--no-ledger on every stage; no code or agent writes experiments/LEDGER.csv."
+  - "One heavy job at a time under bounded_run."
+
+structures: ["TWIN-P", "TWIN-P5", "CND-PS", "BFLY-P", "BFLY-P5", "RAMP7", "CTR5"]
+models:
+  - {arm: "M0", role: "M0", source: "production size_v1_4 tier-4 pred_abs_move", reference: true}
+  - {arm: "BC", derived_from: "M0", source: "bias_correction below"}
+  - {arm: "M3", role: "M3", source: "v14 MAE winner, stored walk-forward predictions"}
+  - {arm: "E-log", role: "E-log", source: "v14 pre-registered pair cell, stored walk-forward predictions"}
+  - {arm: "N-log", role: "N-log", source: "v14 pre-registered pair cell, stored walk-forward predictions"}
+duplicate_models: "arms resolving to one model_id run once and list both names"
+crush_forecast: "production pred_iv_crush_30 for every arm"
+
+bias_correction:
+  forecast: "r_month * M0 pred_abs_move; each event, in pool or decision, uses the r of its own month"
+  window: "event_date in [S - 12 months, S), S the month start"
+  label_rule: "abs_move label with available_as_of_date strictly before S; data dates, never computed_at"
+  rows: "finite M0 forecast > 0 and a label, on M0's own coverage under the existing readers; 2022 rows are read for early 2023 months"
+  statistic: "sum(label) / sum(forecast); no clipping"
+  min_n: 500
+  fallback: "r = 1.0, flagged bias_fallback and reported by month; not a refusal"
+
+population:
+  rule: "common set: intersection of the five arms' tables after EXP-188's admission and exclusion rules; used by every arm, pool and cutoff history"
+  coverage: "reported per arm and year: admitted, own coverage, common, lost only by that arm"
+  pool: "per arm: its own errors over common-set events dated 2023-01-01 or later with labels printed before the month"
+  invariant: "every arm's monthly priced event ids equal M0's, else refuse population_mismatch"
+
+forecast_entry:
+  simulator: "move = max(f_arm + err_move, 0) with the arm's residual pool; k does not enter; draws keyed by event_id"
+  width: "k * (f_arm / 100) / production divisor; WIDTH_MIN and WIDTH_MAX apply after k"
+  score: "exp_pnl_sim at model A entry debit; top-20% trailing cutoff per (arm, structure, width rule)"
+error_model: "simulator pool per arm; EXP-189 T1 log-scale fit per arm on inner rows, descriptive only"
+
+grid:
+  k: [0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0]
+  edge_rule: "argmax at 3.0 or 0.5 is k_at_edge, not frozen"
+width_arms:
+  - {id: "P", rule: "k = 1, production widths"}
+  - {id: "A", rule: "one k for all seven structures"}
+  - {id: "B", rule: "seven k_s"}
+  - {id: "D", rule: "one k for the TWIN pair, one for the other five"}
+  - {id: "E", rule: "per event and structure, the grid k maximising exp_pnl_sim"}
+not_run: ["EXP-189 arm C (fake forecast)", "oracle anchor", "tolerance bands", "nearest-feasible fallback"]
+
+tuning:
+  per: "model: each model's A, B and D tuned on its own 2023H2-2024 trades, frozen before 2025"
+  objective: "stand-alone cash-secured $200,000 account return at model A fills"
+  tie_rule: "within one standard error of the best: k nearest 1, then the smaller"
+  min_trades: 300
+  other_rules: "EXP-189's k_defaulted, k_at_edge and same_k rules unchanged"
+account:
+  start_equity: 200000
+  cap: 0.66
+  target_share: 0.25
+  expensive_first: true
+  secured: "strike x 100"
+  policy: "as EXP-189"
+
+windows:
+  inner_years: [2023, 2024]
+  outer_year: 2025
+  periods: ["2023H2", "2024", "2025"]
+  burn_in: "scoring from 2023H2"
+
+fill_model:
+  id: "A"
+  fvf_id: "735f3e6cb2fa65c303599152cfa6fead2d7950e9bcb367117d50ed25faffc0b7"
+  carry_dividend_mode: "f7_orats_borrow_discrete_dividend"
+  rate_rules:
+    rate_out_of_range: "missing"
+    rate_empty_row: "rate_unknown"
+  vol_scale: 1.0
+  rate_scale: 0.01
+  reingest:
+    path: "data/experiment/orats_smoothed_vol_v4"
+    tool_version: "4"
+    manifest_sha256: "17ecc75e84d2e261900eccc3ad79a1cbd065af2d58eabdfebfd49dd75001f75d"
+    manifest_units:
+      iRate5wk: "percent"
+      iRateLt: "percent"
+      borrow30: "percent"
+      borrow2yr: "percent"
+      divAmt: "dollars_per_share"
+      annIdiv: "dollars_per_share"
+      annActDiv: "dollars_per_share"
+      divDate: "date"
+      assetType: "code"
+  constants_file: "experiments/EXP-189_short_vol_width_tuning/model_a_constants.json"
+  constants_id: "22e1bc6823ee05ffd3b08130c39f9b48a9c22364e0e256d7482bb4ecb19d67fb"
+  primary_variant: "primary"
+  sensitivity_variant: "spread050"
+  rules: "entry guard, exit, funding, beside views and receipt bindings as EXP-189 Amendment 2"
+reported_never_deciding: ["mid", "harsh", "unknown0", "unknown1", "midfloor"]
+spread050: "a separate full run of all five arms, required only if some candidate passes; the verdict is read on primary; any pass/fail or recommendation difference is reported as sensitive to wide-leg cost"
+
+pass_bar:
+  reference: "(M0, P), computed in this run on the common set"
+  candidates: "every other (model, width arm); 24 when no arms are duplicates"
+  basis: "seven-structure $200,000 account at model A fills, a fresh account per period"
+  relative:
+    - "return beats the reference's in each of 2023H2, 2024 and 2025"
+    - "2025 breakeven alpha at most the reference's + 0.05 (A-selected taken set); not computable fails"
+    - "2025 per-structure accounts lose to the reference's in at most 2 of 7 structures"
+    - "E only: the model's E summary is not same_k"
+  absolute: "return strictly above 0 in at least 2 of 2023H2, 2024, 2025; missing or non-finite is not positive"
+  pass: "all relative conditions and the absolute condition"
+recommendation:
+  model_order: ["M0", "BC", "M3", "E-log", "N-log"]
+  width_order: ["P", "A", "D", "B", "E"]
+  rule: "first passer ordered by model, then width arm; none passing: no change"
+limits: "no multiplicity correction; 2023H2 and 2024 are in-sample for A, B and D; M3 was chosen on 2023-24 MAE; the recommended candidate's 2025 return is selection-biased"
+
+stages:
+  order: ["prepare", "inner per model, M0 first", "outer per model, M0 first, after every inner", "report"]
+  execution: "sequential separate processes; resume per model"
+diagnostics: "per model, from the shared EXP-189 report code: rank checks of predicted vs realised at mid and A, win rates by structure, move/crush error decomposition, top-fifth profile; computed at report time from stored raw rows; never block a run"
+failure_semantics: "design section 6 (R1-R6): ordered refusals, no summary or report after a late failure, receipts bind what was loaded"
+
+ledger:
+  planned_rows: "one EXP-191 PLANNED row, appended by the supervisor after preregistered_at is set in a later spec change; any later change adds an amendments entry and a row"
+  guard: "every stage refuses without it"
+
+open_questions:
+  note: "Defaults above. A slice does not start until its questions are settled (design sections 9 and 10)."
+  ids: ["Q1 population", "Q2 arm C", "Q3 anchor, bands, fallback", "Q4 bias rule values", "Q5 diagnostics inputs", "Q6 recommendation order", "Q7 spread050 scope", "Q8 absolute bar and in-sample periods"]
