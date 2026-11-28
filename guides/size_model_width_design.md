@@ -1,6 +1,6 @@
 # Model x width for the seven short-vol structures under model A (design, EXP-191)
 
-**Status: design and spec only; no code, no ledger row.** This is a new experiment; EXP-189 is unchanged. It reuses EXP-189 (`size_width_tuning_design.md`, with Amendments 1 and 2), EXP-188 (`size_decision_pnl_design.md`) and fill model A. The machine-readable form is `experiments/EXP-191_model_x_width_short_vol/spec.yaml`. Items marked "mine" are my judgement calls; section 9 lists those still open.
+**Status: design and spec only; no code, no ledger row.** EXP-189 is unchanged. This reuses EXP-189 (`size_width_tuning_design.md`, with Amendments 1 and 2), EXP-188 (`size_decision_pnl_design.md`) and fill model A. The machine-readable form is `experiments/EXP-191_model_x_width_short_vol/spec.yaml`. Items marked "mine" are my judgement calls; section 9 lists those still open.
 
 ## 1. Question, evidence, labels
 
@@ -51,11 +51,11 @@ A constant `r` would only rescale every width, which a global `k` already covers
 
 For arm `m`, event `e`, grid factor `k`:
 
-- **Simulator:** unchanged. `move = max(f_m + err_move, 0)`, `crush = pred_crush + err_crush`; paired residuals come from `m`'s **own** `ResidualPool`: `err_move = y - f_m` over strictly earlier E events dated 2023-01-01 or later whose labels had printed before the month (equal pool support for all arms). Draws are keyed by `event_id`, so arms share one random stream. `k` does **not** enter the simulator.
+- **Simulator:** unchanged. `move = max(f_m + err_move, 0)`, `crush = pred_crush + err_crush`; paired residuals come from `m`'s **own** `ResidualPool`: `err_move = y - f_m` over E events dated 2023-01-01 or later and before the month, with labels available strictly before its start (equal support for all arms). Draws are keyed by `event_id`, so arms share one random stream. `k` does **not** enter the simulator.
 - **Width:** production's rule on the arm's forecast, times `k`: `width_moneyness = k * (f_m / 100) / divisor`; `WIDTH_MIN` and `WIDTH_MAX` apply after `k`; strikes resolve through the existing pricing seam. A declined geometry or model A guard skip is a counted non-trade, per arm, and the event stays in E.
 - **Score and gate:** `exp_pnl_sim` uses model A's entry debit (no concession in the simulated exit, EXP-189 A1.3); the top-20% trailing cutoff uses the (arm, structure, width rule)'s own history; spread and market-cap terms are unchanged.
 
-**Simulation eligibility must not differ by arm.** It depends on pool size, facts, the strike grid and finite inputs, all shared on E. Each arm's stage compares its monthly priced-event-id hash with M0's and refuses `population_mismatch` at the first difference.
+**Simulation eligibility must not differ by arm.** Whether an event gets a simulation (declines and skips are separate) depends on pool size, facts, the strike grid and finite inputs, all shared on E. Each arm's stage compares its monthly priced-event-id hash with M0's and refuses `population_mismatch` at the first difference.
 
 **Error models.** The simulator's error model is the per-arm pool: rebuilt per arm by construction. EXP-189's T1 log-scale fit (`L`, `b`, `s`, `n`, residual shape) is also fitted per arm on inner E rows, as a **description only**. EXP-189 arm C, which feeds T1 into a fake forecast, is not run by default (Q2), nor are the oracle anchor, tolerance bands or fallback (Q3).
 
@@ -88,9 +88,9 @@ A candidate is (model, width rule): 25, of which the reference R = (M0, P), leav
 ## 6. Stages, cost, failure semantics, artifacts
 
 `run.py --stage prepare | inner | outer | report`, with `--model` for inner and outer. Order: `prepare`; `inner` for every model, M0 first; `outer` for every model, M0 first; `report`. Models run **sequentially** as separate processes: one heavy job at a time under `bounded_run`. Each model writes under `models/<arm>/`. Resume unit: one model. A completed stage (summary present, bindings equal) logs `complete` and exits without recomputing. A model with a partial stage refuses `model_stage_partial`; the operator renames its directory aside (kept, never read) and reruns that model's inner and outer.
-**Cost (estimate).** EXP-189 Amendment 2 took about 8 h for one model over 10 widths, peak about 5 GB (supervisor's figures). Five such runs give a **planning ceiling of about 40 h**, and as much again if `spread050` is required. EXP-191 skips arm C, the anchor, bands and fallback, so it should cost less; how much is unmeasured. Separate processes keep peak memory per run near the one-model figure, not five times it (expected, unmeasured). `prepare` runs no sweep. A 50-ticker `--no-ledger` smoke (EXP-189's rule, seed tag `exp191`) records wall time and RSS per stage and a full-run estimate before the full run.
+**Cost (estimate).** EXP-189 Amendment 2 took about 8 h for one model over 10 widths, peak about 5 GB (supervisor's figures). Five such runs give a **planning ceiling of about 40 h**, and as much again if `spread050` is required. EXP-191 skips arm C, the anchor, bands and fallback, so it should cost less; how much is unmeasured. Separate processes keep peak memory per run near the one-model figure, not five times it (expected, unmeasured). A 50-ticker `--no-ledger` smoke (EXP-189's rule, seed tag `exp191`) records wall time and RSS per stage and a full-run estimate before the full run.
 
-**Failure semantics (R1-R6).** Checks run in the listed order; the first failure refuses. Codes are `EXPERIMENT_IDENTITY_CONFLICT` with `details.reason` unless the reused code defines another.
+**Failure semantics (R1-R6).** Checks run in the listed order; the first failure refuses. Codes are `EXPERIMENT_IDENTITY_CONFLICT` with `details.reason`; reused code keeps its own (unbounded run: `RESOURCE_UNAVAILABLE`). Nothing retries automatically.
 
 | | Rule |
 | --- | --- |
