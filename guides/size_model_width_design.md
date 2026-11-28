@@ -6,7 +6,7 @@
 
 Does another move forecast, with its own width factors, beat production's at production widths on TWIN-P, TWIN-P5, CND-PS, BFLY-P, BFLY-P5, RAMP7 and CTR5?
 
-Supervisor analysis, 2026-11-28 (aggregates, not reproduced):
+Supervisor analysis, 2026-11-28 (separate aggregates, as supplied):
 
 - EXP-189 A2 at production width: `exp_pnl_sim` ranks taken trades backwards (Spearman about -0.17).
 - Move-forecast error explains about 46% of realised-return variance; crush error under 1%.
@@ -66,7 +66,7 @@ A, B and D are tuned on **that model's** 2023H2-2024 trades and frozen before 20
 
 **Fills.** Model A as in EXP-189 Amendment 2: same constants and `constants_id`, F inputs and pins, entry guard, exit rules and A-debit funding. **Mid, harsh and the other beside-A views never decide.** `spread050` is a separate full run of all five arms, required only if a candidate passes; `primary` decides, and any pass/fail or recommendation difference is reported as sensitive to wide-leg cost (Q7).
 
-**Selecting model A.** `size_width_f_select.fill_model` reads only `amendments[]` and returns `None` for this spec's top-level `fill_model`, which would mean current marks. So the new guard reads the top-level block, passes it to that selector as `{"amendments": [{"fill_model": block}]}`, and puts the result in its receipt. A missing block or an id other than `A` refuses `fill_model_missing` at every stage. S1a tests this.
+**Selecting model A.** `size_width_f_select.fill_model` reads only `amendments[]` and returns `None` for this spec's top-level `fill_model`, which would mean current marks. So the new guard itself refuses `fill_model_missing`, at every stage, if the top-level block is absent or its id is not `A`; the selector alone would accept `F`. Only then it passes `{"amendments": [{"fill_model": block}]}` to the selector and receipts the result. S1a tests this.
 
 Open issue #3091 (replay donors ignore label availability) is not addressed.
 
@@ -123,11 +123,11 @@ Stderr shows stage start, end and elapsed, months done/total, rate, ETA, exclusi
 
 Per model: coverage; forecast level (including `actual_above_forecast_share`); BC ratios; T1; factors and E's `k` shares; curves; non-trades; accounts at A, mid and harsh with breakeven alpha. Then the pass table and recommendation.
 
-It **must include**, per model, the diagnostics being built into shared EXP-189 report code (owner `pn189dx`): predicted-versus-realised rank checks at mid and A, win rates by structure, move/crush error decomposition, and top-fifth profile. EXP-191 calls that code and defines none of these statistics; it computes them at report time from raw rows. One that cannot be computed prints `not_available` with a reason and never blocks a run.
+It **must include**, per model, the diagnostics being built into shared EXP-189 report code (owner `pn189dx`): predicted-versus-realised rank checks at mid and A, win rates by structure, move/crush error decomposition, and top-fifth profile. That code defines them; EXP-191 calls it on raw rows at report time. One that cannot be computed prints `not_available` with a reason and never blocks a run.
 
 ## 8. Registration and ledger
 
-The spec is `status: planned`, `preregistered_at` unset. Order: settle section 9; merge run-path code; a spec PR sets `preregistered_at`; the supervisor appends one PLANNED row with that hash; smoke; full run. Every stage refuses `planned_row_missing`, `planned_row_ambiguous`, `spec_hash_mismatch` or unset `preregistered_at`. All stages require `--no-ledger`; no agent or code writes `experiments/LEDGER.csv`, and the supervisor records the outcome. A later spec change adds an `amendments` entry and a PLANNED row, never one with `fill_model`.
+The spec is `status: planned`, `preregistered_at` unset. Order: settle section 9; merge run-path code; a spec PR sets `preregistered_at`; the supervisor appends one PLANNED row with that hash; smoke; full run. Every stage refuses `planned_row_missing`, `planned_row_ambiguous`, `spec_hash_mismatch` or unset `preregistered_at`. All stages require `--no-ledger`; no agent or code writes `experiments/LEDGER.csv`, and the supervisor records the outcome. A later spec change adds an `amendments` entry and a PLANNED row; no amendment carries `fill_model`.
 
 ## 9. Open questions
 
