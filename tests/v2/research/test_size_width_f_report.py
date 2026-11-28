@@ -1,17 +1,25 @@
 """EXP-189 Amendment 1, slice W7c1: F-run report labels, beside-F views and refusals (synthetic receipts only, no market data)."""
 import copy
 import json
+import shutil
 
+import pandas as pd
 import pytest
 
 from engine.v2.foundation import content_hash
 from experiments import size_pnl_receipts as receipts
+from experiments import size_width_f_report_inputs as ri
 from experiments import size_width_f_views as f_views
 from experiments import size_width_report as report
 from experiments.size_pnl_shortvol import NAMES, Refusal
 from experiments.size_width_f_fills import ENTRY_REASONS
 from experiments.size_width_success import LADDER
 from test_size_width_report import _write
+
+# The taken rows of a synthetic F or A run's report inputs: per stage, two events (inner: 2023H2 and 2024; outer: 2025), and one row
+# per structure for each arm string that the labels use (1.0, 0.75, 1.25 and E). Every row's exit is inside its event's period.
+DIAG_PERIODS = {"inner": (("2023-08-01", "2023-08-20"), ("2024-02-01", "2024-02-20")), "outer": (("2025-05-01", "2025-05-20"),)}
+DIAG_ARMS = ("1.0", "0.75", "1.25", "E")
 
 CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
 FILL = {"fill_model_id": "F", "quotes": "synthetic"}
@@ -182,6 +190,34 @@ def _f_run(out, fill=FILL):
             lambda b: (_retune(b["results"], HALVES), _add_views(b["results"], HALVES), _add_counts(b["results"], HALVES)))
     _mutate(out, "outer_summary.json",
             lambda b: (_retune(b["results"], ("2025",)), _add_views(b["results"], ("2025",)), _add_counts(b["results"], ("2025",))))
+    write_diag(out)
+
+
+def _diag_rows(stage):
+    """The taken rows of one stage's part: every structure x arm x event; exp_pnl_sim 0.01 for the first event, 0.02 for the second."""
+    rows = []
+    for i, (event, exit_date) in enumerate(DIAG_PERIODS[stage]):
+        for arm in DIAG_ARMS:
+            for name in NAMES:
+                rows.append({"event_id": f"{stage}{i}", "event_date": pd.Timestamp(event), "exit_date": pd.Timestamp(exit_date),
+                             "structure": name, "arm": arm, "exp_pnl_sim": 0.01 * (i + 1), "entry_cost": 1.0, "entry_cost_mid": 1.0,
+                             "exit_value": 1.01, "exit_value_mid": 1.02, "pnl_dollars": 1.0, "pnl_dollars_mid": 2.0})
+    return pd.DataFrame(rows)
+
+
+def write_diag(out, frames=None):
+    """The report inputs of a synthetic F or A run: one taken part per stage, bound under inputs_hash "H" and scope None (_write's
+    summaries). ``frames`` maps a stage to its part; a stage not in it gets _diag_rows."""
+    for stage in ("inner", "outer"):
+        ri.write(out, stage, "H", None, {"taken_0000": (frames or {}).get(stage, _diag_rows(stage))})
+
+
+def redo_diag(out, frames=None):
+    """Replaces the report inputs of ``out`` with write_diag's, after removing the stage tables and receipts (they are create-only)."""
+    shutil.rmtree(out / "report_inputs", ignore_errors=True)
+    for stage in ("inner", "outer"):
+        (out / "receipts" / f"report_inputs_{stage}.json").unlink(missing_ok=True)
+    write_diag(out, frames)
 
 
 def _text(out):
