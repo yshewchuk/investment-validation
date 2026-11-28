@@ -127,7 +127,7 @@ It **must include**, per model, the diagnostics being built into shared EXP-189 
 
 ## 8. Registration and ledger
 
-The spec is `status: planned`, `preregistered_at` unset. Order: settle section 9; merge run-path code; a spec PR sets `preregistered_at`; the supervisor appends one PLANNED row with that hash; smoke; full run. Every stage refuses `planned_row_missing`, `planned_row_ambiguous`, `spec_hash_mismatch` or unset `preregistered_at`. All stages require `--no-ledger`; no agent or code writes `experiments/LEDGER.csv`, and the supervisor records the outcome. A later spec change adds an `amendments` entry and a PLANNED row; no amendment carries `fill_model`.
+The spec is `status: planned`, `preregistered_at` unset. Order: settle section 9; merge run-path code; a spec PR sets `preregistered_at`; the supervisor appends one PLANNED row with that hash; smoke; full run. Every stage refuses `planned_row_missing`, `planned_row_ambiguous`, `spec_hash_mismatch` or, if unset, `preregistered_at_missing`. All stages require `--no-ledger`; no agent or code writes `experiments/LEDGER.csv`, and the supervisor records the outcome. A later spec change adds an `amendments` entry and a PLANNED row; no amendment carries `fill_model`.
 
 ## 9. Open questions
 
@@ -160,6 +160,6 @@ Lines: estimated code / test lines / doc words. Code target about 150, limit abo
 | S6b | Per-model tables and diagnostics. R1, R2, R4: as S6a; diagnostics `not_available`, never refuse. | ~140 / ~140 / 30 | S6a, `pn189dx` merged |
 | S7 | Runbook: smoke, run, `spread050`, resume, logs to check. No code; `preregistered_at` is a separate spec PR. | 0 / 0 / ~600 | S3, S4, Q7 |
 
-The full run needs S1a-S5, S7 and registration.
+Runs need S1a-S5, S7, registration; decisions need S6a.
 
 **Standard-tool check.** No standard format is involved. Nothing enters `STRUCTURES` or the board.
