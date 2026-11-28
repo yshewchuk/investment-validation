@@ -13,7 +13,7 @@ from experiments import size_width_report as report
 from experiments.size_pnl_shortvol import NAMES
 from experiments.size_width_f_fills import ENTRY_REASONS
 from experiments.size_width_success import LADDER
-from test_size_width_f_report import HALVES, _add_views, _f_run, _mutate, _refused, _retune, _text
+from test_size_width_f_report import HALVES, _add_views, _f_run, _mutate, _refused, _retune, _section, _text
 from test_size_width_report import _write
 
 A_REASON = "f_fill_over_mid"
@@ -26,9 +26,12 @@ A_FILL = {"fill_model_id": "A", "fvf_id": "fake-fvf", "constants_id": "c" * 64, 
 F_FILL = {"fill_model_id": "F", "fvf_id": "fake-fvf"}
 A_HEAD = ("POST-HOC (Amendment 2, model A fills): written after Amendment 1's results had been seen, and model A was fitted on the user's "
           "own fills; not a pre-registered test and nothing in it is blind. The original run stays EXP-189's only pre-registered result.")
-NOTE_A_PRIMARY = ("Fill model A, variant primary. The verdict is read on this primary run, with spread050 shown beside it (its own run and "
-                  "report; reported as not run if it was not required and not run).")
-NOTE_A_SPREAD = "Fill model A, variant spread050. This is the sensitivity run; the verdict is read on the primary run."
+NOTE_A_PRIMARY = ("Fill model A, variant primary. This is the primary run, on which the verdict is read. This report holds this run only: "
+                  "spread050 is a separate run with its own report, and the comparison of the two is written by hand (if spread050 was not "
+                  "required and not run, it is reported as not run).")
+NOTE_A_SPREAD = ("Fill model A, variant spread050. This is the sensitivity run: the verdict is read on the primary run. Its success table, "
+                 "recommendation and proposed board rule are sensitivity results, not the verdict. This report holds this run only; the "
+                 "comparison with the primary run is written by hand.")
 NOTE_B = ("The fills used to fit model A all postdate every EXP-189 test period (2023H2, 2024, 2025): no overlap. Because those fills "
           "postdate every test period, the constants use information that was not available at any decision date in these runs.")
 NOTE_C = ("Comparison with F: against Amendment 1's stored report, between whole runs (the taken sets can differ), not trade by trade; "
@@ -44,8 +47,8 @@ def _add_a_counts(results, periods):
             res = by[p]
             res["account"]["nonpositive_debit"] = {f"{a:.2f}": 1 for a in LADDER}
             for n in NAMES:
-                nt = {"candidates": 10, "f_skipped": 2, "reasons": {ENTRY_REASONS[0]: 1, A_REASON: 1, "below_cutoff": 4},
-                      "only_arm_f_skipped": 1, "only_production_f_skipped": 3}
+                nt = {"candidates": 10, "f_skipped": 4, "reasons": {ENTRY_REASONS[0]: 1, A_REASON: 3, "below_cutoff": 4},
+                      "only_arm_f_skipped": 2, "only_production_f_skipped": 5}
                 if label == "E":
                     nt["any_k_f_skipped_share"] = 0.2
                 res["structures"][n]["nontrades"] = nt
@@ -87,17 +90,26 @@ def test_a_primary_run_is_labelled_renamed_and_carries_its_notes(tmp_path):
            "E: events with a k model A-skipped % |" in text
     assert "f_fill_over_fair" not in text
     assert "Amendment 1, F fills" not in text and "at marks_mid" not in text
+    t2c_row = "| production | 2023H2 | BFLY-P | 10 | 1 (10.00) | 0 (0.00) | 0 (0.00) | 0 (0.00) | 3 (30.00) | 0 (0.00) | 4 (40.00) | 2 | 5 | n/a |"
+    t5c_row = "| E | 2025 | TWIN-P | 10 | 1 (10.00) | 0 (0.00) | 0 (0.00) | 0 (0.00) | 3 (30.00) | 0 (0.00) | 4 (40.00) | 2 | 5 | 20.00 |"
+    assert t2c_row in _section(text, "### T2c ")
+    assert t5c_row in _section(text, "### T5c ")
 
 
-@pytest.mark.parametrize("variant, note", [("primary", NOTE_A_PRIMARY), ("spread050", NOTE_A_SPREAD)])
-def test_a_run_of_either_variant_passes_with_its_label_and_its_note(tmp_path, variant, note):
+@pytest.mark.parametrize("variant, note, label", [
+    ("primary", NOTE_A_PRIMARY, "POST-HOC (Amendment 2, model A fills, primary)"),
+    ("spread050", NOTE_A_SPREAD, "POST-HOC (Amendment 2, model A fills, spread050 sensitivity, not the verdict)"),
+])
+def test_a_run_of_either_variant_passes_with_its_label_and_its_note(tmp_path, variant, note, label):
     _a_run(tmp_path, {**A_FILL, "variant": variant})
     report.assemble(tmp_path)
     text = _text(tmp_path)
-    label = f"POST-HOC (Amendment 2, model A fills, {variant})"
     assert note in text
     assert json.loads((tmp_path / "proposed_rule.json").read_text(encoding="utf-8"))["label"] == label
     assert all(line.endswith(f"[{label}]") for line in text.splitlines() if line.startswith("#"))
+    if variant == "spread050":
+        rule_heading = next(line for line in text.splitlines() if line.startswith("### Proposed board width rule"))
+        assert rule_heading.endswith(f"[{label}]")
 
 
 def test_f_receipts_still_pass_with_the_amendment_1_label(tmp_path):
@@ -127,7 +139,9 @@ def test_inner_and_outer_fill_models_that_differ_refuse_and_write_nothing(tmp_pa
     {**A_FILL, "variant": "other"},
     {**A_FILL, "variant": ["primary"]},
     {k: v for k, v in A_FILL.items() if k != "constants_id"},
-], ids=["id B", "id a list", "variant other", "variant a list", "constants_id missing"])
+    {**A_FILL, "constants_id": ""},
+    {**A_FILL, "constants_id": 7},
+], ids=["id B", "id a list", "variant other", "variant a list", "constants_id missing", "constants_id empty", "constants_id int"])
 def test_a_fill_model_that_does_not_bind_a_refuses_with_both_receipts_equal(tmp_path, fill):
     _a_run(tmp_path, fill)
     _refused(tmp_path, "tuning_receipt_changed")
@@ -161,6 +175,14 @@ def _check_inputs(out, fill):
     receipts.write_receipt(out / "receipts" / "inputs_inner.json", {"spec_hash": "SPEC", "fill_model": fill})
 
 
+def test_check_report_refuses_model_a_inputs_under_another_spec_hash(tmp_path):
+    _check_inputs(tmp_path, {"fill_model_id": "A", "constants_id": "c" * 64, "variant": "primary"})
+    with pytest.raises(fvi.FairValueRefusal) as caught:
+        sel.check_report({"spec_hash": "OTHER", "fill_model": SEL_A}, tmp_path)
+    assert caught.value.details["reason"] == "f_report_unbound"
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
 @pytest.mark.parametrize("variant", ["primary", "spread050"])
 def test_check_report_passes_model_a_inputs_for_the_selected_constants_and_a_variant(tmp_path, variant):
     _check_inputs(tmp_path, {"fill_model_id": "A", "constants_id": "c" * 64, "variant": variant})
@@ -178,3 +200,4 @@ def test_check_report_refuses_inputs_that_do_not_bind_the_selected_model(tmp_pat
     with pytest.raises(fvi.FairValueRefusal) as caught:
         sel.check_report({"spec_hash": "SPEC", "fill_model": selected}, tmp_path)
     assert caught.value.details["reason"] == "f_report_unbound"
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"

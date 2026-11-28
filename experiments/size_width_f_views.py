@@ -94,8 +94,13 @@ def label_headings(text, label=LABEL):
 
 
 def label_for(fill):
-    """The POST-HOC label of the bound fill model ``fill``: Amendment 1's for F, Amendment 2's (naming the variant) for model A."""
-    return LABEL if fill["fill_model_id"] == "F" else f"POST-HOC (Amendment 2, model A fills, {fill['variant']})"
+    """The POST-HOC label of the bound fill model ``fill``: Amendment 1's for F; Amendment 2's for model A, naming the variant.
+    The spread050 label is marked as a sensitivity run, not the verdict, because its recommendation and rule are sensitivity results."""
+    if fill["fill_model_id"] == "F":
+        return LABEL
+    if fill["variant"] == "spread050":
+        return "POST-HOC (Amendment 2, model A fills, spread050 sensitivity, not the verdict)"
+    return f"POST-HOC (Amendment 2, model A fills, {fill['variant']})"
 
 
 def renamed(markdown, fill_id):

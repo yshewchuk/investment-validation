@@ -153,15 +153,16 @@ def test_an_outer_under_another_variant_than_the_inners_refuses_and_writes_no_ou
     assert not (out / "receipts" / "outer_summary.json").exists()
 
 
-@pytest.mark.parametrize("variant", ["primary", "spread050"])
-def test_the_report_assembles_an_a_run_under_its_variant_label(tmp_path, monkeypatch, m0, stubbed, variant):
+@pytest.mark.parametrize("variant, label", [
+    ("spread050", "POST-HOC (Amendment 2, model A fills, spread050 sensitivity, not the verdict)"),
+    ("primary", "POST-HOC (Amendment 2, model A fills, primary)")])
+def test_the_report_assembles_an_a_run_under_its_variant_label(tmp_path, monkeypatch, m0, stubbed, variant, label):
     frames, root, pins, src = _setup(tmp_path, monkeypatch)
     _constants(tmp_path, monkeypatch)
     out = tmp_path / "out"
     for stage in ("inner", "outer"):
         _a_run(src, out, stage, _a_fill(pins), frames, pins, variant)
     report.assemble(out, expected=src.expected)
-    label = f"POST-HOC (Amendment 2, model A fills, {variant})"
     text = (out / "REPORT.md").read_text(encoding="utf-8")
     headings = [line for line in text.splitlines() if line.startswith("#")]
     assert headings and all(line.endswith(f"[{label}]") for line in headings)

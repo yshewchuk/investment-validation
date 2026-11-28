@@ -90,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.stage == "report" and args.event_ids is not None: raise fail(_INVALID, "--event-ids is not supported by the report stage", details={"reason": "event_ids_not_supported"})
             if args.stage == "report":
                 from experiments import size_width_report  # after the gates; no sources are read
-                size_width_f_select.check_report(receipt, args.out_dir)  # an F spec's report reads only inputs that bind F
+                size_width_f_select.check_report(receipt, args.out_dir)  # the report reads only inputs that bind the registered selection (F, or model A with its constants_id and a known variant)
                 summary = size_width_report.assemble(args.out_dir, expected=args.expected_identities)
             else:
                 from experiments import size_pnl_driver, size_width_driver  # after the gates, so a missing PLANNED row refuses first
