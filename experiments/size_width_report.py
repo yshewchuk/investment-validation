@@ -16,6 +16,7 @@ from experiments import size_width_success as success
 from experiments import size_width_tuning as tuning
 from experiments.size_pnl_report import md_table
 from experiments.size_pnl_shortvol import NAMES, Refusal
+from experiments.size_width_f_fills import ENTRY_REASONS
 from experiments.size_width_sizing import GRID
 
 _CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
@@ -30,6 +31,12 @@ SMOKE = "SMOKE RUN: a scope-bound subset, not a result."
 EVIDENCE = ("Evidence, not a change: the board decision is the user's, with the DYN-SV chooser review (EXP-188 Decision 3); "
             "after a change EXP-188 is rerun on the new widths.")
 F_HEAD = "POST-HOC (Amendment 1, F fills): chosen after the full run under mid fills had been seen; not a pre-registered test and nothing in it is blind. The original run stays EXP-189's only pre-registered result."
+A_HEAD = "POST-HOC (Amendment 2, model A fills): written after Amendment 1's results had been seen, and model A was fitted on the user's own fills; not a pre-registered test and nothing in it is blind. The original run stays EXP-189's only pre-registered result."
+A_NOTE_A = {"primary": "Fill model A, variant primary. This is the primary run, on which the verdict is read. This report holds this run only: spread050 is a separate run with its own report, and the comparison of the two is written by hand (if spread050 was not required and not run, it is reported as not run).",
+            "spread050": "Fill model A, variant spread050. This is the sensitivity run: the verdict is read on the primary run. Its success table, recommendation and proposed board rule are sensitivity results, not the verdict. This report holds this run only; the comparison with the primary run is written by hand."}
+A_NOTES = ("The fills used to fit model A all postdate every EXP-189 test period (2023H2, 2024, 2025): no overlap. Because those fills postdate every test period, the constants use information that was not available at any decision date in these runs.",
+           "Comparison with F: against Amendment 1's stored report, between whole runs (the taken sets can differ), not trade by trade; F is not recomputed here and the comparison is written by hand.",
+           "Exit concession: no model A statistic is defined; its inputs are stored raw under report_inputs/. The midfloor view equals the base under model A.")
 PLACEHOLDER = "### T8-T9 tolerance bands and fallback\n\nnot available: these stage summaries carry no tolerance-band or fallback results."
 T2_HEADERS = ["structure", "A", "B", "C", "D", "E modal share", "E same_k", "flags"]
 T3_HEADERS = ["k", "B score", "B se", "B trades", "C score", "C se", "C trades", "exp_pnl_sim", "declined share 2025"]
@@ -190,9 +197,17 @@ def _conflict(what, reason="tuning_receipt_changed"):
     return Refusal(_CONFLICT, f"report receipts do not belong to one run: {what}", {"reason": reason})
 
 
+def _binds(fill):
+    """True when ``fill`` is a mapping that binds fill model F, or model A with a non-empty str constants_id and a variant in A_VARIANTS."""
+    return isinstance(fill, dict) and (fill.get("fill_model_id") == "F" or (fill.get("fill_model_id") == "A"
+                                       and isinstance(fill.get("constants_id"), str) and fill["constants_id"] != ""
+                                       and fill.get("variant") in f_views.A_VARIANTS))
+
+
 def _bound(out, expected):
-    """(inner, outer, bodies, f_run): the summaries and inputs receipts checked to belong to one driver run, every arm's tuning receipt
-    validated and bound (tuning.frozen), the bodies by arm, and whether the inputs bind F (a fill_model key). Any mismatch refuses before anything is built or written."""
+    """(inner, outer, bodies, fill): the summaries and inputs receipts checked to belong to one driver run, every arm's tuning receipt
+    validated and bound (tuning.frozen), the bodies by arm, and the fill_model the inputs bind (None when they bind none; see _binds).
+    Any mismatch refuses before anything is built or written."""
     inner, outer = _load(out, "inner_summary.json"), _load(out, "outer_summary.json")
     inputs_inner, inputs_outer = _load(out, "inputs_inner.json"), _load(out, "inputs_outer.json")
     if inner["stage"] != "inner": raise _conflict("inner_summary.json is not the inner stage")
@@ -207,8 +222,8 @@ def _bound(out, expected):
     if inputs_outer["identity"] != inputs_inner["identity"]: raise _conflict("inputs_outer identity differs from inputs_inner")
     has_in, has_out = "fill_model" in inputs_inner, "fill_model" in inputs_outer
     if has_in != has_out or inputs_inner.get("fill_model") != inputs_outer.get("fill_model"): raise _conflict("fill_model differs between the inputs receipts")
-    f_run = has_in
-    if f_run and not (isinstance(inputs_inner["fill_model"], dict) and inputs_inner["fill_model"].get("fill_model_id") == "F"): raise _conflict("fill_model does not bind F")
+    fill = inputs_inner["fill_model"] if has_in else None
+    if has_in and not _binds(fill): raise _conflict("fill_model does not bind F or model A")
     bodies = {}
     for arm in outer["arms"]:
         tuning.frozen(out, arm, inner["inputs_hash"])
@@ -217,7 +232,7 @@ def _bound(out, expected):
         for key in IDENTITY_KEYS:
             if inputs_inner["identity"].get(key) != expected.get(key):
                 raise _conflict(f"--expected {key} differs from the identity bound in the inputs receipts", "expected_mismatch")
-    return inner, outer, bodies, f_run
+    return inner, outer, bodies, fill
 
 
 def _choices(out, inner):
@@ -249,7 +264,9 @@ def assemble(out_dir, *, expected=None, w5_tables=None):
     {"report": path, "recommendation": arm or "no_change"}."""
     _check_args(out_dir, expected, w5_tables)
     out = Path(out_dir)
-    inner, outer, bodies, f_run = _bound(out, expected)
+    inner, outer, bodies, fill = _bound(out, expected)
+    f_run, fid = fill is not None, fill and fill["fill_model_id"]
+    reasons = f_report_counts.A_ENTRY_REASONS if fid == "A" else ENTRY_REASONS
     echoes = _choices(out, inner)
     has_flex = "flex" in inner or "flex" in outer
     if has_flex:
@@ -259,7 +276,7 @@ def assemble(out_dir, *, expected=None, w5_tables=None):
     if f_run:
         if not (f_views.admit(inner["results"], labels, ("2023H2", "2024")) and f_views.admit(outer["results"], labels, ("2025",))):
             raise _conflict("the F views in results are missing, malformed, extra or differ from the deciding values")
-        if not (f_report_counts.admit(inner["results"], labels, ("2023H2", "2024")) and f_report_counts.admit(outer["results"], labels, ("2025",))):
+        if not (f_report_counts.admit(inner["results"], labels, ("2023H2", "2024"), reasons) and f_report_counts.admit(outer["results"], labels, ("2025",), reasons)):
             raise _conflict("the F counts in results are missing, malformed or inconsistent")
     elif f_views.has_views(inner["results"]) or f_views.has_views(outer["results"]):
         raise _conflict("F views in a run that does not bind F")
@@ -268,11 +285,11 @@ def assemble(out_dir, *, expected=None, w5_tables=None):
     body_E = bodies["E"]
     t2c, t5c = [], []
     if f_run:
-        t2c = [f_report_counts.counts_markdown("T2c F entry non-trades by reason, arm, year and structure "
-                                               "(2023-24 tuning years; shares are % of candidates)", labels, ("2023H2", "2024"), merged)]
-        t5c = [f_report_counts.counts_markdown("T5c F entry non-trades by reason, arm, year and structure "
-                                               "(2025 NOT blind for widths; shares are % of candidates)", labels, ("2025",), merged),
-               f_report_counts.nonpositive_markdown(labels, PERIODS, merged)]
+        t2c = [f_views.renamed(f_report_counts.counts_markdown("T2c F entry non-trades by reason, arm, year and structure "
+                                                               "(2023-24 tuning years; shares are % of candidates)", labels, ("2023H2", "2024"), merged, reasons), fid)]
+        t5c = [f_views.renamed(f_report_counts.counts_markdown("T5c F entry non-trades by reason, arm, year and structure "
+                                                               "(2025 NOT blind for widths; shares are % of candidates)", labels, ("2025",), merged, reasons), fid),
+               f_views.renamed(f_report_counts.nonpositive_markdown(labels, PERIODS, merged), fid)]
     breakevens = {label: {p: stats[label].get(p, {}).get("x") for p in PERIODS} for label in labels}
     table = success.success_table(merged["production"], {label: merged[label] for label in labels if label != "production"},
                                   breakevens, body_E)
@@ -284,10 +301,11 @@ def assemble(out_dir, *, expected=None, w5_tables=None):
                                   {n: outer["declined"].get(n, {}).get(str(fac[n])) for n in NAMES})
     else:
         rule = success.board_rule(rec, None, {}, {})
-    if f_run: rule["label"] = f_views.LABEL
-    head = "\n\n".join([TITLE, NOT_BLIND, *([SMOKE] if inner["smoke"] else []), *([F_HEAD] if f_run else [])])
-    t5 = f_views.t5_markdown(labels, PERIODS, merged, stats) if f_run else _t5(labels, merged, stats)
-    t6 = _t6(labels, merged) + (f"\n\n{f_views.t6_markdown(labels, merged)}" if f_run else "")
+    if f_run: rule["label"] = f_views.label_for(fill)
+    head = "\n\n".join([TITLE, NOT_BLIND, *([SMOKE] if inner["smoke"] else []),
+                        *(([F_HEAD] if fid == "F" else [A_HEAD, A_NOTE_A[fill["variant"]], *A_NOTES]) if f_run else [])])
+    t5 = f_views.renamed(f_views.t5_markdown(labels, PERIODS, merged, stats), fid) if f_run else _t5(labels, merged, stats)
+    t6 = _t6(labels, merged) + (f"\n\n{f_views.renamed(f_views.t6_markdown(labels, merged), fid)}" if f_run else "")
     flat_note = [_flat_note(bodies, rec)] if rec in TUNED else []
     rule_text = "\n\n".join([success.render_rule(rule), *flat_note, EVIDENCE])
     w5 = w5_tables if w5_tables is not None else flex.render(inner, outer) if has_flex else PLACEHOLDER
@@ -297,6 +315,7 @@ def assemble(out_dir, *, expected=None, w5_tables=None):
                 t6, success.render_t7(table), rule_text, w5]
     report = out / "REPORT.md"
     text = "\n\n".join(s.rstrip() for s in sections) + "\n"
-    report.write_text(f_views.label_headings(text.replace("at marks_mid", "at F fills")) if f_run else text, encoding="utf-8")
+    report.write_text(f_views.label_headings(text.replace("at marks_mid", "at model A fills" if fid == "A" else "at F fills"), f_views.label_for(fill))
+                      if f_run else text, encoding="utf-8")
     (out / "proposed_rule.json").write_text(json.dumps(rule, indent=2, sort_keys=True), encoding="utf-8")
     return {"report": str(report), "recommendation": rec or "no_change"}
