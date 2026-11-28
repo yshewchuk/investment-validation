@@ -44,7 +44,7 @@ A constant `r` rescales widths much as a global `k` does (bounds and grid aside)
 
 ## 3. Common population and forecast entry
 
-**Common event set (default, Q1).** E is the intersection of the five arms' tables after EXP-188's rules (admission and holdout drops; crush forecast, facts and pre-2025 labels present). Every arm, pool, cutoff and comparison uses E. M0's forecast is missing for about 20% of 2023-26 events (supervisor figure); these leave for all arms, since the reference cannot score them. There are no own-coverage accounts.
+**Common event set (default, Q1).** E is the intersection of the five arms' tables after EXP-188's rules (admission and holdout drops; crush forecast and facts present; labels too for pre-2025 events). Every arm, pool, cutoff and comparison uses E; only BC's ratio rows (2.1) differ. M0's forecast is missing for about 20% of 2023-26 events (supervisor figure); these leave for all arms, since the reference cannot score them.
 
 `prepare` records per arm and year: admitted, own coverage, common, and events lost **only** by that arm. M0 here does not reproduce EXP-189 (different events).
 
@@ -66,7 +66,7 @@ A, B and D are tuned on **that model's** 2023H2-2024 trades and frozen before 20
 
 **Fills.** Model A as in EXP-189 Amendment 2: same constants and `constants_id`, F inputs and pins, entry guard, exit rules and A-debit funding. **Mid, harsh and the other beside-A views never decide.** `spread050` is a separate full run of all five arms, required only if a candidate passes; `primary` decides, and any pass/fail or recommendation difference is reported as sensitive to wide-leg cost (Q7).
 
-**Selecting model A.** `size_width_f_select.fill_model` reads only `amendments[]` and returns `None` for this spec's top-level `fill_model`, which would mean current marks. So the new guard reads the top-level block, passes it to that selector as `{"amendments": [{"fill_model": block}]}`, and puts the result in its receipt. A missing block or an id other than `A` refuses `fill_model_missing` at every stage. S1a tests this on the committed spec.
+**Selecting model A.** `size_width_f_select.fill_model` reads only `amendments[]` and returns `None` for this spec's top-level `fill_model`, which would mean current marks. So the new guard reads the top-level block, passes it to that selector as `{"amendments": [{"fill_model": block}]}`, and puts the result in its receipt. A missing block or an id other than `A` refuses `fill_model_missing` at every stage. S1a tests this.
 
 Open issue #3091 (replay donors ignore label availability) is not addressed.
 
@@ -90,9 +90,9 @@ Items 1-4 are EXP-189's rules, from `size_width_success.success_table` per model
 
 `run.py --stage prepare | inner | outer | report`, with `--model` for inner and outer. Every stage takes `--out-dir`, `--expected`, `--sources`, `--sources-config` and `--no-ledger`; inner and outer also `--f-pins`, `--f-quotes` and optional `--fill-variant`. Order: `prepare`; all inners; all outers; `report`; M0 first. Models run **sequentially**, one heavy job at a time under `bounded_run`, writing under `models/<arm>/`. A completed stage with equal bindings logs `complete` and does not recompute. A partial model refuses `model_stage_partial`; the operator renames its directory aside (kept, never read) and reruns its inner and outer.
 
-**Cost.** EXP-189 A2 took about 8 h for one model, peak about 5 GB (supervisor's figures): a **planning ceiling of about 40 h** for five, doubled if `spread050` runs. The skipped extras should lower it (unmeasured); separate processes should keep peak memory near one model's. A 50-ticker `--no-ledger` smoke (EXP-189's rule, seed tag `exp191`) first records wall time and RSS per stage.
+**Cost.** EXP-189 A2 took about 8 h for one model, peak about 5 GB (supervisor's figures): a **planning ceiling of about 40 h** for five, doubled if `spread050` runs. Skipped extras should lower it (unmeasured). A 50-ticker `--no-ledger` smoke (EXP-189's rule, tag `exp191`) first records time and RSS per stage.
 
-**Failures.** Checks run in order. Codes are `EXPERIMENT_IDENTITY_CONFLICT` with `details.reason`; reused code keeps its own (unbounded run: `RESOURCE_UNAVAILABLE`). Nothing retries automatically.
+**Failures.** Checks run in order. Lowercase names are `details.reason` under `EXPERIMENT_IDENTITY_CONFLICT`; reused code keeps its own (unbounded run: `RESOURCE_UNAVAILABLE`). A stage commits by writing its summary last. Nothing retries automatically.
 
 | | Rule |
 | --- | --- |
@@ -111,7 +111,7 @@ Stderr shows stage start, end and elapsed, months done/total, rate, ETA, exclusi
 
 | Artifact (under the out-dir) | Slice | Schema |
 | --- | --- | --- |
-| `receipts/population.json`, `population.parquet` | S1a, widened S2 | bindings, coverage counts; E ids, each arm's forecast, crush forecast |
+| `receipts/population.json`, `population.parquet` | S1a, widened S2 | bindings, coverage counts; E ids, forecasts (BC through 2025-01; later in its `scored/`; its membership is M0's), crush |
 | `receipts/bias_ratio.json`; BC `outer_summary` for later months | S4 | month, window, n, `sum_y`, `sum_f`, `r`, fallback flag, rows hash |
 | `models/<arm>/` input and summary receipts, `months/`, `labels/` | S1a inner, S1b outer | EXP-189 shapes plus population and simulated-id hashes; labels: event_id, `abs_move`, crush, available date |
 | `models/<arm>/scored/<month>.parquet`, hash-bound | S1a inner, S1b outer, all widths S3 | per event, structure, `k` (and E): forecasts, implied move, mcap, `exp_pnl_sim`, status, reason; taken rows: dates, lots, A, mid and harsh entry, exit, P&L, ladder returns |
@@ -123,7 +123,7 @@ Stderr shows stage start, end and elapsed, months done/total, rate, ETA, exclusi
 
 Per model: coverage; forecast level (including `actual_above_forecast_share`); BC ratios; T1; factors and E's `k` shares; curves; non-trades; accounts at A, mid and harsh with breakeven alpha. Then the pass table and recommendation.
 
-It **must include**, per model, the standard diagnostics being built into shared EXP-189 report code (owner `pn189dx`): predicted-versus-realised rank checks at mid and A, win rates by structure, move/crush error decomposition, and top-fifth profile. EXP-191 calls that code and defines none of these statistics; it computes them at report time from raw rows. One that cannot be computed prints `not_available` with a reason and never blocks a run.
+It **must include**, per model, the diagnostics being built into shared EXP-189 report code (owner `pn189dx`): predicted-versus-realised rank checks at mid and A, win rates by structure, move/crush error decomposition, and top-fifth profile. EXP-191 calls that code and defines none of these statistics; it computes them at report time from raw rows. One that cannot be computed prints `not_available` with a reason and never blocks a run.
 
 ## 8. Registration and ledger
 
@@ -146,7 +146,7 @@ A slice waits for its questions.
 
 ## 10. Slice plan
 
-Lines are estimated added non-test code / test lines / doc words. Target about 150 code lines, limit about 300. S1a is the walking skeleton. Tests use synthetic fixtures and independent oracles (hand-computed ratios, accounts, pass rows). Every slice follows section 6's order, publishes no partial summary and receipts what it loaded. **Every slice's stderr logging** covers the section 6 items its path produces; S5, pure, logs nothing.
+Lines: estimated code / test lines / doc words. Code target about 150, limit about 300. S1a is the walking skeleton. Tests use synthetic fixtures and independent oracles (hand-computed ratios, accounts, pass rows). Every slice follows section 6's order, publishes no partial summary and receipts what it loaded. **Every slice's stderr logging** covers the section 6 items its path produces; S5, pure, logs nothing.
 
 | Slice | Path added; failure semantics | Lines | After |
 | --- | --- | --- | --- |
@@ -160,6 +160,6 @@ Lines are estimated added non-test code / test lines / doc words. Target about 1
 | S6b | Per-model tables and diagnostics. R1, R2, R4: as S6a; diagnostics `not_available`, never refuse. | ~140 / ~140 / 30 | S6a, `pn189dx` merged |
 | S7 | Runbook: smoke, run, `spread050`, resume, logs to check. No code; `preregistered_at` is a separate spec PR. | 0 / 0 / ~600 | S3, S4, Q7 |
 
-The full run waits for S1a-S5, S7 and registration; S6a and S6b block only reporting.
+The full run needs S1a-S5, S7 and registration.
 
-**Standard-tool check.** No standard format is involved; new code wraps existing repository code. Nothing enters `STRUCTURES` or the board.
+**Standard-tool check.** No standard format is involved. Nothing enters `STRUCTURES` or the board.

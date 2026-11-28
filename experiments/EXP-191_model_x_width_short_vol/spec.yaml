@@ -21,7 +21,7 @@ population: "events common to all five arms; each arm's own pool, 2023-01-01 on,
 
 bias_correction:
   window_months: 12
-  statistic: "sum(abs_move) / sum(M0 forecast > 0), labels available strictly before the month start"
+  statistic: "sum(abs_move) / sum(M0 forecast), over rows with M0 forecast > 0 and a label available strictly before the month start"
   rows: "M0's own coverage, read from 2022-01-01"
   apply: "r of the row's own month, to decided events and pool rows"
   min_n: 500
@@ -41,7 +41,7 @@ not_run: ["arm C", "oracle anchor", "tolerance bands", "fallback"]
 tuning:
   per_model: true
   window: "2023H2-2024"
-  objective: "seven-structure or unit account return at model A fills"
+  objective: "each tuned unit's stand-alone account return at model A fills"
   rules: "EXP-189 tie, edge, k_defaulted and same_k"
   min_trades: 300
 account: {start_equity: 200000, cap: 0.66, target_share: 0.25, expensive_first: true, secured: "strike x 100"}
@@ -92,5 +92,5 @@ recommendation:
   none_passing: "no change"
 
 diagnostics: "per model, from the shared EXP-189 report code; never block a run"
-ledger: "--no-ledger on every stage; the supervisor appends the PLANNED row; stages refuse without it"
+ledger: "--no-ledger on every stage; the supervisor appends the PLANNED row; every stage refuses without that row"
 open_questions: ["Q1", "Q2", "Q3", "Q4", "Q5", "Q6", "Q7", "Q8"]  # design section 9; defaults above
