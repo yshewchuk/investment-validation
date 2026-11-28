@@ -8,7 +8,7 @@ from engine import paths
 from experiments import fair_value_inputs as fvi
 from experiments import fair_value_run as fvr
 from experiments import size_pnl_receipts as receipts
-from experiments import size_width_a_fills, size_width_f_fills, size_width_f_quotes, size_width_pricing
+from experiments import size_width_a_fills, size_width_f_fills, size_width_f_quotes, size_width_f_views, size_width_pricing
 
 MODE = "f7_orats_borrow_discrete_dividend"
 FInputs = namedtuple("FInputs", "pins read_quotes snapshot_id variant", defaults=("primary",))
@@ -83,12 +83,16 @@ def open_run(fill, inputs=None, plan=None, expected_snapshot_id=None, *, root=No
 
 
 def check_report(receipt, out_dir):
-    """The report's out-dir inputs must bind what this registration selects: F under this spec_hash, or no fill model (A1.7 R5)."""
+    """The report's out-dir inputs must bind what this registration selects: F under this spec_hash, model A under this spec_hash with
+    the selected constants_id and an A_VARIANTS variant, or no fill model (A1.7 R5)."""
     fill, path = receipt.get("fill_model"), Path(out_dir) / "receipts" / "inputs_inner.json"
     if fill is None and not path.exists(): return  # nothing bound; the report's own load refuses a missing receipt
     if fill is not None: _validate(fill)
     inputs = receipts.load_receipt(path)
     bound = inputs.get("fill_model")
-    ok = "fill_model" not in inputs if fill is None else (isinstance(bound, dict) and bound.get("fill_model_id") == fill["id"] and inputs.get("spec_hash") == receipt.get("spec_hash"))
+    ok = "fill_model" not in inputs if fill is None else (isinstance(bound, dict) and bound.get("fill_model_id") == fill["id"]
+                                                          and inputs.get("spec_hash") == receipt.get("spec_hash")
+                                                          and (fill["id"] == "F" or (bound.get("constants_id") == fill["constants_id"]
+                                                                                     and bound.get("variant") in size_width_f_views.A_VARIANTS)))
     if not ok:
         raise fvi.FairValueRefusal("f_report_unbound", "the out-dir's inputs do not bind what this registration selects")

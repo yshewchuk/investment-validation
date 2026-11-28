@@ -1,12 +1,15 @@
 """EXP-189 Amendment 1, slice W7c1: the report side of F. Reads the beside-F views W7b2 stores in each stage summary's results
-(account: all six views; structures: F, mid, harsh) and renders the beside-F tables and the POST-HOC label (design A1.1, A1.2, A1.10)."""
+(account: all six views; structures: F, mid, harsh) and renders the beside-F tables and the POST-HOC label (design A1.1, A1.2, A1.10).
+Amendment 2's model A reuses these views: its label (label_for), its variants (A_VARIANTS) and the F-to-model-A renaming (renamed) live here too."""
 import math
+import re
 
 from experiments.fair_value_fills import VARIANTS
 from experiments.size_pnl_report import md_table
 from experiments.size_pnl_shortvol import NAMES
 
 LABEL = "POST-HOC (Amendment 1, F fills)"
+A_VARIANTS = ("primary", "spread050")
 ACCOUNT_VIEWS = ("F", "mid", "harsh")
 VIEWS = (*ACCOUNT_VIEWS, *VARIANTS)
 
@@ -63,7 +66,7 @@ def _pct(x):
 
 
 def t5_markdown(labels, periods, results, stats):
-    """T5 at F fills (the deciding cell), then the beside-F account and per-trade tables by view."""
+    """T5 at F fills (the deciding cell), then the beside-F account and per-trade tables by view (the report renames F for model A)."""
     keys = [(label, p) for label in labels for p in periods]
     def view(label, p, v): return results[label][p]["account"]["views"][v]
     deciding = [[label, p, results[label][p]["account"]["trades"], _pct(view(label, p, "F")["total_return"]),
@@ -85,6 +88,16 @@ def t6_markdown(labels, results):
         for view in ("mid", "harsh"))
 
 
-def label_headings(text):
-    """``text`` with the label appended to every heading line (a line starting with "#")."""
-    return "\n".join(f"{line} [{LABEL}]" if line.startswith("#") else line for line in text.split("\n"))
+def label_headings(text, label=LABEL):
+    """``text`` with ``label`` appended to every heading line (a line starting with "#")."""
+    return "\n".join(f"{line} [{label}]" if line.startswith("#") else line for line in text.split("\n"))
+
+
+def label_for(fill):
+    """The POST-HOC label of the bound fill model ``fill``: Amendment 1's for F, Amendment 2's (naming the variant) for model A."""
+    return LABEL if fill["fill_model_id"] == "F" else f"POST-HOC (Amendment 2, model A fills, {fill['variant']})"
+
+
+def renamed(markdown, fill_id):
+    """``markdown`` with every whole word F read as "model A" when ``fill_id`` is model A; unchanged otherwise. Only generated sections."""
+    return re.sub(r"\bF\b", "model A", markdown) if fill_id == "A" else markdown
