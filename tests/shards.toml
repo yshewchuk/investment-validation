@@ -7,8 +7,10 @@
 # Shards are ORDERED and the first shard whose pattern matches a file owns it.
 # The last shard is the remainder: it owns every test file no earlier pattern
 # claims, so a new test file or package can never silently fall out of CI.
-# research-d owns tests/v2/research/test_size_*; research-h comes first to
-# isolate test_size_run_single_collect. research-e/f split IV tests, and
+# research-h, research-i and research-j come first to take
+# test_size_run_single_collect, test_size_quantile_stage_a and four heavy
+# test_size_width_* files; research-d owns the remaining test_size_* files.
+# research-e/f split IV tests, and
 # research-g holds distribution/heavy files. Rebalance by updating the patterns
 # or explicit lists below.
 # Earlier, 2026-10-11, before ops-sweep/integration existed (3475 CPU-s total,
@@ -22,6 +24,11 @@
 # Runner speed varies ~2x, so the subprocess-driven ops files and the
 # bounded-retention test (ops-sweep) and the integration tests (integration)
 # each get their own shard.
+# 2026-11-27 (run 46081512562): research-d took 36 min of pytest (8473
+# test-seconds on 4 workers). Split by measured per-file test-seconds into
+# research-i (3142), research-j (2743) and research-d (2588), about 11-14 min
+# each. test_size_quantile_stage_a is one file, so it is the floor: split the
+# file itself if research-i passes ~15 min.
 
 [[shard]]
 name = "ops-sweep"
@@ -64,6 +71,19 @@ patterns = [
 [[shard]]
 name = "research-h"
 patterns = ["tests/v2/research/test_size_run_single_collect.py"]
+
+[[shard]]
+name = "research-i"
+patterns = ["tests/v2/research/test_size_quantile_stage_a.py"]
+
+[[shard]]
+name = "research-j"
+patterns = [
+  "tests/v2/research/test_size_width_fake.py",
+  "tests/v2/research/test_size_width_f_run.py",
+  "tests/v2/research/test_size_width_choices.py",
+  "tests/v2/research/test_size_width_fallback.py",
+]
 
 [[shard]]
 name = "research-d"
