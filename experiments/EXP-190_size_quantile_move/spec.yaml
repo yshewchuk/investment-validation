@@ -6,7 +6,7 @@ strategy: "*"
 price_source: "none in Stage A; Stage B: fill model F (stage_b.fill_model)"
 design: "guides/size_quantile_move_design.md"
 data_snapshot: "sealed SIZE v14 panel and records, read by content hash, bound by Q2"
-preregistered_at: null
+preregistered_at: "2026-11-27T22:03:00+00:00"
 
 constraints:
   - "Nothing enters STRUCTURES, the registry or the board"

@@ -193,26 +193,17 @@ def test_non_dict_stage_b_refuses_even_with_a_matching_planned_row(tmp_path):
     assert refusal(lambda: _check(tmp_path, spec, ledger, _own_experiments(tmp_path))) == "stage_b_pending"
 
 
-def test_real_spec_unstamped_with_a_matching_ledger_row_refuses_preregistered_at_missing(tmp_path):
-    # stage_b is settled in the real spec now, so the guard gets past the stage_b gate and the ledger; the null stamp refuses.
+def test_real_spec_with_a_planned_row_passes_stage_b_and_the_stamp_check(tmp_path):
     ledger = _write_ledger(tmp_path / "LEDGER.csv", [_planned_row(_digest(REAL_SPEC))])
-    assert refusal(lambda: _check(tmp_path, REAL_SPEC, ledger, _own_experiments(tmp_path))) == \
-        "preregistered_at_missing"
-
-
-def test_real_spec_stamped_with_a_planned_row_is_accepted_without_overriding_stage_b(tmp_path):
-    spec = yaml.safe_load(read_bounded_state(REAL_SPEC, 1 << 20).decode("utf-8"))
-    spec["preregistered_at"] = STAMP  # the only change: stage_b is the real spec's own
-    path = tmp_path / "spec.yaml"
-    path.write_text(yaml.safe_dump(spec, sort_keys=False))
-    ledger = _write_ledger(tmp_path / "LEDGER.csv", [_planned_row(_digest(path))])
-    receipt = _check(tmp_path, path, ledger, _own_experiments(tmp_path))
+    receipt = _check(tmp_path, REAL_SPEC, ledger, _own_experiments(tmp_path))
     assert receipt["spec_hash_checked"] is True
-    assert receipt["spec_hash"] == _digest(path)
+    assert receipt["spec_hash"] == _digest(REAL_SPEC)
+    assert receipt["preregistered_at"] == "2026-11-27 22:03:00+00:00"
+    assert receipt["first_run_ts"] is None
 
 
 @pytest.mark.parametrize("ledger_text", [None, ",".join(lib.LEDGER_COLUMNS) + "\n"])  # missing file, or header only
-def test_unstamped_real_spec_with_an_empty_ledger_refuses_planned_row_missing(tmp_path, ledger_text):
+def test_real_spec_with_an_empty_ledger_refuses_planned_row_missing(tmp_path, ledger_text):
     ledger = tmp_path / "LEDGER.csv"
     if ledger_text is not None:
         ledger.write_text(ledger_text, encoding="utf-8")
@@ -293,7 +284,7 @@ def test_real_spec_has_the_design_levels_grid_and_settled_stage_b():
     assert len(product) == 4
     assert spec["stage_b"]["status"] == "settled"
     assert spec["stage_b"]["open_decisions"] == {}
-    assert spec["preregistered_at"] is None
+    assert spec["preregistered_at"] == "2026-11-27T22:03:00+00:00"
 
 
 # --------------------------------------------------------------------------
